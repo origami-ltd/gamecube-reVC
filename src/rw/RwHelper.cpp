@@ -3,6 +3,44 @@
 #include "patcher.h"
 #include "Timecycle.h"
 #include "skeleton.h"
+#if defined(RWLIBS) && !defined(FINAL)
+#include "rtcharse.h"
+#pragma comment( lib, "rtcharse.lib" )
+
+RtCharset *debugCharset;
+#endif
+
+void CreateDebugFont()
+{
+#if defined(RWLIBS) && !defined(FINAL)
+	RwRGBA color = { 255, 255, 128, 255 };
+	RwRGBA colorbg = { 0, 0, 0, 0 };
+	RtCharsetOpen();
+	debugCharset = RtCharsetCreate(&color, &colorbg);
+#endif
+}
+
+void DestroyDebugFont()
+{
+#if defined(RWLIBS) && !defined(FINAL)
+	RtCharsetDestroy(debugCharset);
+	RtCharsetClose();
+#endif
+}
+
+void ObrsPrintfString(const char *str, short x, short y)
+{
+#if defined(RWLIBS) && !defined(FINAL)
+	RtCharsetPrintBuffered(debugCharset, str, x, y, true);
+#endif
+}
+
+void FlushObrsPrintfs()
+{
+#if defined(RWLIBS) && !defined(FINAL)
+	RtCharsetBufferFlush();
+#endif
+}
 
 void *
 RwMallocAlign(RwUInt32 size, RwUInt32 align)
@@ -345,28 +383,6 @@ CameraCreate(RwInt32 width, RwInt32 height, RwBool zBuffer)
 
 	CameraDestroy(camera);
 	return (nil);
-}
-
-WRAPPER void ReadVideoCardCapsFile(uint32&, uint32&, uint32&, uint32&) { EAXJMP(0x5926C0); }
-WRAPPER bool CheckVideoCardCaps(void) { EAXJMP(0x592740); }
-WRAPPER void WriteVideoCardCapsFile(void) { EAXJMP(0x5927D0); }
-WRAPPER void ConvertingTexturesScreen(uint32, uint32, const char*) { EAXJMP(0x592880); }
-WRAPPER void DealWithTxdWriteError(uint32, uint32, const char*) { EAXJMP(0x592BF0); }
-WRAPPER bool CreateTxdImageForVideoCard() { EAXJMP(0x592C70); }
-
-void CreateDebugFont()
-{
-	;
-}
-
-void DestroyDebugFont()
-{
-	;
-}
-
-void FlushObrsPrintfs()
-{
-	;
 }
 
 WRAPPER void _TexturePoolsInitialise() { EAXJMP(0x598B10); }
