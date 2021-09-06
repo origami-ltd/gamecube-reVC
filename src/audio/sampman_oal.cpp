@@ -105,6 +105,7 @@ uint8 nCurrentPedSlot;
 #ifdef FIX_BUGS
 uint32 gPlayerTalkSfx = UINT32_MAX;
 void *gPlayerTalkData = 0;
+size_t gPlayerTalkDataSize = 0;
 #endif
 
 CChannel aChannel[NUM_CHANNELS];
@@ -977,6 +978,8 @@ cSampleManager::Initialise(void)
 
 		gPlayerTalkData = malloc(nMaxPedSize);
 		ASSERT(gPlayerTalkData != 0);
+
+		gPlayerTalkDataSize = nMaxPedSize;
 #endif
 
 		LoadSampleBank(SFX_BANK_0);
@@ -1144,6 +1147,8 @@ cSampleManager::Terminate(void)
 	{
 		free(gPlayerTalkData);
 		gPlayerTalkData = 0;
+		gPlayerTalkDataSize = 0;
+		gPlayerTalkSfx = UINT32_MAX;
 	}
 #endif
 	

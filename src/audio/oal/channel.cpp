@@ -9,6 +9,7 @@
 #endif
 
 extern bool IsFXSupported();
+extern size_t gPlayerTalkDataSize;
 
 ALuint alSources[NUM_CHANNELS];
 ALuint alFilters[NUM_CHANNELS];
@@ -17,7 +18,7 @@ bool bChannelsCreated = false;
 
 int32 CChannel::channelsThatNeedService = 0;
 
-uint8 tempStereoBuffer[PED_BLOCKSIZE * 2];
+uint8* tempStereoBuffer = nil;
 
 void
 CChannel::InitChannels()
@@ -26,6 +27,8 @@ CChannel::InitChannels()
 	alGenBuffers(NUM_CHANNELS, alBuffers);
 	if (IsFXSupported())
 		alGenFilters(NUM_CHANNELS, alFilters);
+
+	tempStereoBuffer = new uint8[Max(PED_BLOCKSIZE, gPlayerTalkDataSize) * 2];
 	bChannelsCreated = true;
 }
 
@@ -43,6 +46,7 @@ CChannel::DestroyChannels()
 			alDeleteFilters(NUM_CHANNELS, alFilters);
 			memset(alFilters, 0, sizeof(alFilters));
 		}
+		delete[]tempStereoBuffer;
 		bChannelsCreated = false;
 	}
 }
