@@ -13,7 +13,7 @@ public:
 	static int OpenFile(const char *file, const char *mode);
 	static int OpenFile(const char *file) { return OpenFile(file, "rb"); }
 	static int OpenFileForWriting(const char *file);
-	static size_t Read(int fd, const char *buf, ssize_t len);
+	static size_t Read(int fd, char *buf, ssize_t len);
 	static size_t Write(int fd, const char *buf, ssize_t len);
 	static bool Seek(int fd, int offset, int whence);
 	static bool ReadLine(int fd, char *buf, int len);

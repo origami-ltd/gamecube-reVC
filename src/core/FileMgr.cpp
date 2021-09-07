@@ -277,7 +277,7 @@ CFileMgr::OpenFileForWriting(const char *file)
 }
 
 size_t
-CFileMgr::Read(int fd, const char *buf, ssize_t len)
+CFileMgr::Read(int fd, char *buf, ssize_t len)
 {
 	return myfread((void*)buf, 1, len, fd);
 }

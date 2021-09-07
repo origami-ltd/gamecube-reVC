@@ -1753,7 +1753,7 @@ CTheScripts::SwitchToMission(int32 mission)
 	int handle = CFileMgr::OpenFile("data\\main.scm", "rb");
 #endif
 	CFileMgr::Seek(handle, offset, 0);
-	CFileMgr::Read(handle, (const char*)&CTheScripts::ScriptSpace[SIZE_MAIN_SCRIPT], SIZE_MISSION_SCRIPT);
+	CFileMgr::Read(handle, (char*)&CTheScripts::ScriptSpace[SIZE_MAIN_SCRIPT], SIZE_MISSION_SCRIPT);
 	CFileMgr::CloseFile(handle);
 	CRunningScript* pMissionScript = CTheScripts::StartNewScript(SIZE_MAIN_SCRIPT);
 	CTimer::Resume();

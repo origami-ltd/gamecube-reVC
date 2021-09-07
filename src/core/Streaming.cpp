@@ -3204,7 +3204,7 @@ CStreaming::PrintStreamingBufferState()
 			CFont::InitPerFrame();
 			DefinedState();
 
-			CRect unusedRect(0, 0, RsGlobal.maximumWidth, RsGlobal.maximumHeight);
+			CRect unusedRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 			CRGBA unusedColor(255, 255, 255, 255);
 			CFont::SetFontStyle(FONT_BANK);
 			CFont::SetBackgroundOff();

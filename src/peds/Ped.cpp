@@ -5064,7 +5064,7 @@ CPed::CheckAroundForPossibleCollisions(void)
 	if (CTimer::GetTimeInMilliseconds() <= m_nPedStateTimer)
 		return;
 
-	GetBoundCentre(ourCentre);
+	ourCentre = GetBoundCentre();
 
 	CWorld::FindObjectsInRange(ourCentre, 10.0f, true, &maxObject, 6, objects, false, true, false, true, false);
 	for (int i = 0; i < maxObject; i++) {
@@ -5073,7 +5073,7 @@ CPed::CheckAroundForPossibleCollisions(void)
 			if (gPhoneInfo.PhoneAtThisPosition(object->GetPosition()))
 				break;
 		}
-		object->GetBoundCentre(objCentre);
+		objCentre = object->GetBoundCentre();
 		float radius = object->GetBoundRadius();
 		if (radius > 4.5f || radius < 1.0f)
 			radius = 1.0f;

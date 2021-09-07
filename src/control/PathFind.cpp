@@ -203,8 +203,7 @@ CPedPath::AddBlockade(CEntity *pEntity, CPedPathNode(*pathNodes)[40], CVector *p
 	const float fDistanceX = pPosition->x - pEntity->GetMatrix().GetPosition().x;
 	const float fDistanceY = pPosition->y - pEntity->GetMatrix().GetPosition().y;
 	const float fBoundRadius = pEntity->GetBoundRadius();
-	CVector vecBoundCentre;
-	pEntity->GetBoundCentre(vecBoundCentre);
+	CVector vecBoundCentre = pEntity->GetBoundCentre();
 	if (vecBoundCentre.x + fBoundRadius >= pPosition->x && 
 		vecBoundCentre.y + fBoundRadius >= pPosition->y &&
 		vecBoundCentre.x - fBoundRadius <= pPosition->x + 28.0f &&

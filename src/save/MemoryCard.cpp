@@ -1374,7 +1374,7 @@ CMemoryCard::ReadFromMemCard(int32 file, void *buff, int32 size)
 	nError = ERR_NONE;
 	return result;
 #else		
-	int32 s = CFileMgr::Read(file, (const char *)buff, size);
+	int32 s = CFileMgr::Read(file, (char *)buff, size);
 	if ( s == size )
 	{
 		printf("%i Bytes Read for Filehandle %i \n", s, file);

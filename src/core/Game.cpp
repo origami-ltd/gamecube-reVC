@@ -1160,17 +1160,19 @@ TidyUpModelInfo(CBaseModelInfo* modelInfo, bool onlyone)
 			return true;
 
 	RwObject* rwobj = modelInfo->GetRwObject();
-	if (RwObjectGetType(rwobj) == rpATOMIC)
-		if (MoveAtomicMemory((RpAtomic*)rwobj, onlyone))
-			return true;
-	if (RwObjectGetType(rwobj) == rpCLUMP) {
-		bool ret = false;
-		if (onlyone)
-			RpClumpForAllAtomics((RpClump*)rwobj, MoveAtomicMemoryCB, &ret);
-		else
-			RpClumpForAllAtomics((RpClump*)rwobj, MoveAtomicMemoryCB, nil);
-		if (ret)
-			return true;
+	if(rwobj){
+		if (RwObjectGetType(rwobj) == rpATOMIC)
+			if (MoveAtomicMemory((RpAtomic*)rwobj, onlyone))
+				return true;
+		if (RwObjectGetType(rwobj) == rpCLUMP) {
+			bool ret = false;
+			if (onlyone)
+				RpClumpForAllAtomics((RpClump*)rwobj, MoveAtomicMemoryCB, &ret);
+			else
+				RpClumpForAllAtomics((RpClump*)rwobj, MoveAtomicMemoryCB, nil);
+			if (ret)
+				return true;
+		}
 	}
 
 	if (modelInfo->GetModelType() == MITYPE_PED && ((CPedModelInfo*)modelInfo)->m_hitColModel)
