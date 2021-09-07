@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PLANE_H__
+#define __GTA_PLANE_H__
 
 #include "Vehicle.h"
 
@@ -79,3 +80,5 @@ public:
 extern float LandingPoint;
 extern float TakeOffPoint;
 extern float PlanePathPosition[3];
+
+#endif // __GTA_PLANE_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SPECIALFX_H__
+#define __GTA_SPECIALFX_H__
 
 //file done
 
@@ -247,3 +248,5 @@ public:
 	static void StartBoatFoamAnimation(); //not used
 	static void UpdateBoatFoamAnimation(CMatrix*); //not used
 };
+
+#endif // __GTA_SPECIALFX_H__

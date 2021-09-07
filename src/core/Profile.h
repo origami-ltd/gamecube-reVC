@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PROFILE_H__
+#define __GTA_PROFILE_H__
 
 enum eProfile
 {
@@ -26,3 +27,5 @@ public:
 	static void SuspendProfile(eProfile profile);
 	static void ShowResults();
 };
+
+#endif // __GTA_PROFILE_H__

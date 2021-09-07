@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ONSCREENTIMER_H__
+#define __GTA_ONSCREENTIMER_H__
 
 enum
 {
@@ -55,3 +56,5 @@ public:
 };
 
 VALIDATE_SIZE(COnscreenTimer, 0xF4);
+
+#endif // __GTA_ONSCREENTIMER_H__

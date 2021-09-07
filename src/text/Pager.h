@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PAGER_H__
+#define __GTA_PAGER_H__
 
 struct PagerMessage {
 	wchar *m_pText;
@@ -26,3 +27,5 @@ public:
 	void ClearMessages();
 	void RestartCurrentMessage();
 };
+
+#endif // __GTA_PAGER_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TRAIN_H__
+#define __GTA_TRAIN_H__
 
 #include "Vehicle.h"
 #include "Door.h"
@@ -82,3 +83,5 @@ public:
 		float *totalLength, float *totalDuration, CTrainInterpolationLine *interpLines, bool rightRail);
 	static void UpdateTrains(void);
 };
+
+#endif // __GTA_TRAIN_H__

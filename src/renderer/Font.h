@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FONT_H__
+#define __GTA_FONT_H__
 
 #include "Sprite2d.h"
 
@@ -215,3 +216,5 @@ public:
 	static bool IsJapaneseFont() { return IsJapanese() && (Details.style == FONT_JAPANESE);  }
 #endif
 };
+
+#endif // __GTA_FONT_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COLLINE_H__
+#define __GTA_COLLINE_H__
 
 struct CColLine
 {
@@ -12,3 +13,5 @@ struct CColLine
 	CColLine(const CVector &p0, const CVector &p1) { this->p0 = p0; this->p1 = p1; };
 	void Set(const CVector &p0, const CVector &p1);
 };
+
+#endif // __GTA_COLLINE_H__

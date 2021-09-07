@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SOLID_H__
+#define __GTA_SOLID_H__
 
 #include "Entity.h"
 
@@ -10,3 +11,5 @@ public:
 		bUsesCollision = true;
 	}
 };
+
+#endif // __GTA_SOLID_H__

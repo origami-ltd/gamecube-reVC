@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CONFIG_H__
+#define __GTA_CONFIG_H__
 
 // disables (most) stuff that wasn't in original gta-vc.exe
 #ifdef __MWERKS__
@@ -500,3 +501,5 @@ static_assert(false, "SUPPORT_XBOX_SCRIPT and SUPPORT_MOBILE_SCRIPT are mutually
 #if defined(GTA_PS2) && defined(EXTERNAL_3D_SOUND)
 #error EXTERNAL_3D_SOUND cannot work on PS2
 #endif
+
+#endif // __GTA_CONFIG_H__

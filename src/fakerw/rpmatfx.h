@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RPMATFX_H__
+#define __GTA_RPMATFX_H__
 
 enum RpMatFXMaterialFlags
 {
@@ -41,3 +42,5 @@ RpMaterial *RpMatFXMaterialSetDualTexture( RpMaterial *material, RwTexture *text
 RpMaterial *RpMatFXMaterialSetDualBlendModes( RpMaterial *material, RwBlendFunction srcBlendMode, RwBlendFunction dstBlendMode );
 RwTexture *RpMatFXMaterialGetDualTexture( const RpMaterial *material );
 const RpMaterial *RpMatFXMaterialGetDualBlendModes( const RpMaterial *material, RwBlendFunction *srcBlendMode, RwBlendFunction *dstBlendMode );
+
+#endif // __GTA_RPMATFX_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COPPED_H__
+#define __GTA_COPPED_H__
 #include "Ped.h"
 
 enum eCopType
@@ -49,3 +50,5 @@ public:
 };
 
 VALIDATE_SIZE(CCopPed, 0x62C);
+
+#endif // __GTA_COPPED_H__

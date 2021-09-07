@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_INIFILE_H__
+#define __GTA_INIFILE_H__
 
 #define DEFAULT_MAX_NUMBER_OF_PEDS 25.0f
 #define DEFAULT_MAX_NUMBER_OF_PEDS_INTERIOR 40.0f
@@ -12,3 +13,5 @@ public:
 	static float PedNumberMultiplier;
 	static float CarNumberMultiplier;
 };
+
+#endif // __GTA_INIFILE_H__

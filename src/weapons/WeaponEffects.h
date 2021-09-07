@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WEAPONEFFECTS_H__
+#define __GTA_WEAPONEFFECTS_H__
 
 class CWeaponEffects
 {
@@ -24,3 +25,5 @@ public:
 };
 
 VALIDATE_SIZE(CWeaponEffects, 0x1C);
+
+#endif // __GTA_WEAPONEFFECTS_H__

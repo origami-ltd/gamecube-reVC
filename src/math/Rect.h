@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RECT_H__
+#define __GTA_RECT_H__
 
 class CRect
 {
@@ -69,3 +70,5 @@ public:
 	float GetWidth(void) { return right - left; }
 	float GetHeight(void) { return bottom - top; }
 };
+
+#endif // __GTA_RECT_H__

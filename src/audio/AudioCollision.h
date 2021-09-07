@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_AUDIOCOLLISION_H__
+#define __GTA_AUDIOCOLLISION_H__
 
 #define NUMAUDIOCOLLISIONS 10
 
@@ -55,3 +56,5 @@ public:
 };
 
 VALIDATE_SIZE(cAudioCollisionManager, 0x354);
+
+#endif // __GTA_AUDIOCOLLISION_H__

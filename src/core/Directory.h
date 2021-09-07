@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DIRECTORY_H__
+#define __GTA_DIRECTORY_H__
 
 class CDirectory
 {
@@ -21,3 +22,5 @@ public:
 	void AddItem(const DirectoryInfo &dirinfo, int32 imgId);
 	bool FindItem(const char *name, uint32 &offset, uint32 &size);
 };
+
+#endif // __GTA_DIRECTORY_H__

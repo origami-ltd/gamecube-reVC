@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_REFERENCES_H__
+#define __GTA_REFERENCES_H__
 
 class CEntity;
 
@@ -18,3 +19,5 @@ public:
 	static void RemoveReferencesToPlayer(void);
 	static void PruneAllReferencesInWorld(void);
 };
+
+#endif // __GTA_REFERENCES_H__

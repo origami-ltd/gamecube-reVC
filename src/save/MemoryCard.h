@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MEMORYCARD_H__
+#define __GTA_MEMORYCARD_H__
 #include "common.h"
 #ifdef PS2_MENU
 #include "Date.h"
@@ -195,3 +196,5 @@ public:
 
 extern CMemoryCard TheMemoryCard;
 #endif
+
+#endif // __GTA_MEMORYCARD_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MAIN_H__
+#define __GTA_MAIN_H__
 
 #ifndef FINAL
 // defined in RwHelpder.cpp
@@ -74,3 +75,5 @@ extern bool gbDrawVersionText;
 #ifdef NO_MOVIES
 extern bool gbNoMovies;
 #endif
+
+#endif // __GTA_MAIN_H__

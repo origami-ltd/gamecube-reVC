@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_AUDIOSAMPLES_H__
+#define __GTA_AUDIOSAMPLES_H__
 
 #include "common.h"
 
@@ -10128,3 +10129,5 @@ enum eSfxSample
 	SAMPLEBANK_PED_END = SFX_PLAYER_ON_FIRE_16,
 	SAMPLEBANK_PED_MAX = SAMPLEBANK_PED_END + 1,
 };
+
+#endif // __GTA_AUDIOSAMPLES_H__

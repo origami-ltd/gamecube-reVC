@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SHADOWS_H__
+#define __GTA_SHADOWS_H__
 
 #define MAX_STOREDSHADOWS    48
 #define MAX_POLYBUNCHES      380
@@ -208,3 +209,5 @@ extern RwTexture *gpWalkDontTex;
 extern RwTexture *gpCrackedGlassTex;
 extern RwTexture *gpPostShadowTex;
 extern RwTexture *gpGoalTex;
+
+#endif // __GTA_SHADOWS_H__

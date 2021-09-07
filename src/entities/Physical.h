@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PHYSICAL_H__
+#define __GTA_PHYSICAL_H__
 
 #include "Lists.h"
 #include "Timer.h"
@@ -173,3 +174,5 @@ public:
 	bool CheckCollision(void);
 	bool CheckCollision_SimpleCar(void);
 };
+
+#endif // __GTA_PHYSICAL_H__

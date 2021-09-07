@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SPRITE_H__
+#define __GTA_SPRITE_H__
 
 class CSprite
 {
@@ -29,3 +30,5 @@ public:
 	static void RenderBufferedOneXLUSprite2D_Rotate_Dimension(float x, float y, float w, float h, const RwRGBA &colour, int16 intens, float rotation, uint8 alpha);
 
 };
+
+#endif // __GTA_SPRITE_H__

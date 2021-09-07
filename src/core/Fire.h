@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FIRE_H__
+#define __GTA_FIRE_H__
 
 class CEntity;
 
@@ -51,3 +52,5 @@ public:
 	void SetScriptFireAudio(int16 index, bool state);
 };
 extern CFireManager gFireManager;
+
+#endif // __GTA_FIRE_H__

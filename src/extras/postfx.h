@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_POSTFX_H__
+#define __GTA_POSTFX_H__
 
 #ifdef EXTENDED_COLOURFILTER
 
@@ -44,3 +45,5 @@ public:
 };
 
 #endif
+
+#endif // __GTA_POSTFX_H__

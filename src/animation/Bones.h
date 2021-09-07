@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_BONES_H__
+#define __GTA_BONES_H__
 
 enum BoneTag
 {
@@ -28,3 +29,5 @@ enum BoneTag
 
 int ConvertPedNode2BoneTag(int node);
 const char *ConvertBoneTag2BoneName(int tag);
+
+#endif // __GTA_BONES_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_AUTOMOBILE_H__
+#define __GTA_AUTOMOBILE_H__
 
 #include "Vehicle.h"
 #include "DamageManager.h"
@@ -173,3 +174,5 @@ public:
 
 extern CVector vecHunterGunPos;
 extern bool bAllCarCheat;
+
+#endif // __GTA_AUTOMOBILE_H__

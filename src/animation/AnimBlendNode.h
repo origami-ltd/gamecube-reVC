@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANIMBLENDNODE_H__
+#define __GTA_ANIMBLENDNODE_H__
 
 #include "AnimBlendSequence.h"
 
@@ -35,3 +36,5 @@ public:
 
 
 VALIDATE_SIZE(CAnimBlendNode, 0x1C);
+
+#endif // __GTA_ANIMBLENDNODE_H__

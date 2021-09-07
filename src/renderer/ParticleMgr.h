@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PARTICLEMGR_H__
+#define __GTA_PARTICLEMGR_H__
 
 #include "ParticleType.h"
 
@@ -136,3 +137,5 @@ public:
 VALIDATE_SIZE(cParticleSystemMgr, 0x2FFC);
 
 extern cParticleSystemMgr mod_ParticleSystemManager;
+
+#endif // __GTA_PARTICLEMGR_H__

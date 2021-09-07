@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DUMMY_H__
+#define __GTA_DUMMY_H__
 
 #include "Lists.h"
 #include "Entity.h"
@@ -17,3 +18,5 @@ public:
 };
 
 bool IsDummyPointerValid(CDummy* pDummy);
+
+#endif // __GTA_DUMMY_H__

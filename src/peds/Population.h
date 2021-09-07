@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_POPULATION_H__
+#define __GTA_POPULATION_H__
 
 #include "Game.h"
 #include "PedType.h"
@@ -86,3 +87,5 @@ public:
 	static void PlaceMallPedsAsStationaryGroup(CVector const&, int32);
 	static CPed* AddDeadPedInFrontOfCar(const CVector& pos, CVehicle* pCulprit);
 };
+
+#endif // __GTA_POPULATION_H__

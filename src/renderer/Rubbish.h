@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RUBBISH_H__
+#define __GTA_RUBBISH_H__
 
 class CVehicle;
 
@@ -55,3 +56,5 @@ public:
 };
 
 extern RwTexture *gpRubbishTexture[4];
+
+#endif // __GTA_RUBBISH_H__

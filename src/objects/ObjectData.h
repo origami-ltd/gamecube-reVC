@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_OBJECTDATA_H__
+#define __GTA_OBJECTDATA_H__
 
 class CObject;
 
@@ -25,3 +26,5 @@ public:
 	static void Initialise(const char *filename);
 	static void SetObjectData(int32 modelId, CObject &object);
 };
+
+#endif // __GTA_OBJECTDATA_H__

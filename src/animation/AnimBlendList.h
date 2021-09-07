@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANIMBLENDLIST_H__
+#define __GTA_ANIMBLENDLIST_H__
 
 // name made up
 class CAnimBlendLink
@@ -26,3 +27,5 @@ public:
 		Init();
 	}
 };
+
+#endif // __GTA_ANIMBLENDLIST_H__

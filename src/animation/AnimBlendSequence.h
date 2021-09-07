@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANIMBLENDSEQUENCE_H__
+#define __GTA_ANIMBLENDSEQUENCE_H__
 
 #include "Quaternion.h"
 
@@ -93,3 +94,5 @@ public:
 	void SetBoneTag(int tag) { boneTag = tag; }
 };
 VALIDATE_SIZE(CAnimBlendSequence, 0x30);
+
+#endif // __GTA_ANIMBLENDSEQUENCE_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COLLISION_H__
+#define __GTA_COLLISION_H__
 
 #include "ColModel.h"
 #include "Game.h"	// for eLevelName
@@ -66,3 +67,5 @@ public:
 	static float DistToLine(const CVector *l0, const CVector *l1, const CVector *point);
 	static float DistToLine(const CVector *l0, const CVector *l1, const CVector *point, CVector &closest);
 };
+
+#endif // __GTA_COLLISION_H__

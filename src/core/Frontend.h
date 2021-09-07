@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FRONTEND_H__
+#define __GTA_FRONTEND_H__
 #ifdef PS2_MENU
 #include "Frontend_PS2.h"
 #else
@@ -869,3 +870,5 @@ VALIDATE_SIZE(CMenuManager, 0x688);
 extern CMenuManager FrontEndMenuManager;
 
 #endif
+
+#endif // __GTA_FRONTEND_H__

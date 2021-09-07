@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RPWORLD_H__
+#define __GTA_RPWORLD_H__
 
 #define rpATOMIC rw::Atomic::ID
 #define rpCLUMP rw::Clump::ID
@@ -334,3 +335,5 @@ RwCamera *RwCameraForAllClumpsNotInFrustum(RwCamera *camera, RwInt32 numClumps, 
 //RpWorldSector *RpWorldSectorForAllAtomics(RpWorldSector *sector, RpAtomicCallBack callback, void *data);
 //RpWorldSector *RpWorldSectorForAllCollisionAtomics(RpWorldSector *sector, RpAtomicCallBack callback, void *data);
 //RpWorldSector *RpWorldSectorForAllLights(RpWorldSector *sector, RpLightCallBack callback, void *data);
+
+#endif // __GTA_RPWORLD_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CAMERA_H__
+#define __GTA_CAMERA_H__
 #include "Placeable.h"
 
 class CEntity;
@@ -643,3 +644,5 @@ extern CCamera TheCamera;
 void CamShakeNoPos(CCamera*, float);
 void MakeAngleLessThan180(float &Angle);
 void WellBufferMe(float Target, float *CurrentValue, float *CurrentSpeed, float MaxSpeed, float Acceleration, bool IsAngle);
+
+#endif // __GTA_CAMERA_H__

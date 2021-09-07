@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RANGE2D_H__
+#define __GTA_RANGE2D_H__
 
 class CRange2D
 {
@@ -9,3 +10,5 @@ public:
 	void DebugShowRange(float, int);
 	CVector2D GetRandomPointInRange();
 };
+
+#endif // __GTA_RANGE2D_H__

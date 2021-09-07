@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RWHELPER_H__
+#define __GTA_RWHELPER_H__
 
 extern bool bDebugRenderGroups;
 extern bool gPS2alphaTest;
@@ -62,3 +63,5 @@ void RestoreAlphaTest();
 #define SetAlphaTest(a) (0)
 #define RestoreAlphaTest() (0)
 #endif
+
+#endif // __GTA_RWHELPER_H__

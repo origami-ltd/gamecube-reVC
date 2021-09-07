@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CREDITS_H__
+#define __GTA_CREDITS_H__
 
 class CCredits
 {
@@ -13,3 +14,5 @@ public:
 	static void PrintCreditSpace(float space, uint32 &line);
 	static void PrintCreditText(float scaleX, float scaleY, wchar *text, uint32 &lineoffset, float scrolloffset);
 };
+
+#endif // __GTA_CREDITS_H__

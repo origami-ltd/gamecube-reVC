@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANTENNAS_H__
+#define __GTA_ANTENNAS_H__
 
 class CAntenna
 {
@@ -23,3 +24,5 @@ public:
 	static void RegisterOne(uint32 id, CVector dir, CVector position, float length);
 	static void Render(void);
 };
+
+#endif // __GTA_ANTENNAS_H__

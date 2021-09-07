@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MESSAGES_H__
+#define __GTA_MESSAGES_H__
 
 struct tMessage 
 {
@@ -67,3 +68,5 @@ public:
 	//static void CutString(int16, char*, char**);
 	//static void PrintString(char*, int16, int16, int16);
 };
+
+#endif // __GTA_MESSAGES_H__

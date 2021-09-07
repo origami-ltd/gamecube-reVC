@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PICKUPS_H__
+#define __GTA_PICKUPS_H__
 #include "Weapon.h"
 
 enum ePickupType
@@ -168,3 +169,5 @@ public:
 	static void ResetPowerPillsCarriedByPlayer(void);
 
 };
+
+#endif // __GTA_PICKUPS_H__

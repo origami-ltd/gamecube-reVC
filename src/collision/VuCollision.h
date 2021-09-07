@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_VUCOLLISION_H__
+#define __GTA_VUCOLLISION_H__
 
 
 struct VuTriangle
@@ -30,3 +31,5 @@ void LineToTriangleCollisionCompressed(const CVuVector &p0, const CVuVector &p1,
 void SphereToTriangleCollision(const CVuVector &sph, const CVuVector &v0, const CVuVector &v1, const CVuVector &v2, const CVuVector &plane);
 void SphereToTriangleCollisionCompressed(const CVuVector &sph, VuTriangle &tri);
 }
+
+#endif // __GTA_VUCOLLISION_H__

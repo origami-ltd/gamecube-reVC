@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DOOR_H__
+#define __GTA_DOOR_H__
 
 class CVehicle;
 
@@ -67,3 +68,5 @@ public:
 	float RetTranslationWhenOpen(void);
 	void Open(float ratio);
 };
+
+#endif // __GTA_DOOR_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COMMON_H__
+#define __GTA_COMMON_H__
 
 #define _CRT_SECURE_NO_WARNINGS
 #define _USE_MATH_DEFINES
@@ -400,3 +401,5 @@ template<int s, int t> struct check_size {
 #define CONCAT_(x,y) x##y
 #define CONCAT(x,y) CONCAT_(x,y)
 
+
+#endif // __GTA_COMMON_H__

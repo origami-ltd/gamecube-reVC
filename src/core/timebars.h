@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TIMEBARS_H__
+#define __GTA_TIMEBARS_H__
 
 #ifdef TIMEBARS
 void tbInit();
@@ -11,3 +12,5 @@ void tbDisplay();
 #define tbEndTimer(a)
 #define tbDisplay()
 #endif
+
+#endif // __GTA_TIMEBARS_H__

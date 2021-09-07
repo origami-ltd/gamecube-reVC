@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DEBUG_H__
+#define __GTA_DEBUG_H__
 
 class CDebug
 {
@@ -43,3 +44,5 @@ public:
 };
 
 extern bool gbDebugStuffInRelease;
+
+#endif // __GTA_DEBUG_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CDSTREAM_H__
+#define __GTA_CDSTREAM_H__
 
 #define CDSTREAM_SECTOR_SIZE 2048
 
@@ -46,3 +47,5 @@ int32 CdStreamGetNumImages(void);
 #ifdef FLUSHABLE_STREAMING
 extern bool flushStream[MAX_CDCHANNELS];
 #endif
+
+#endif // __GTA_CDSTREAM_H__

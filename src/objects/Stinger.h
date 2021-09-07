@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_STINGER_H__
+#define __GTA_STINGER_H__
 
 #include "Object.h"
 
@@ -38,3 +39,5 @@ public:
 	void CheckForBurstTyres();
 	void Process();
 };
+
+#endif // __GTA_STINGER_H__

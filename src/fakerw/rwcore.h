@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RWCORE_H__
+#define __GTA_RWCORE_H__
 
 #define RWCORE_H	// needed by CVector
 
@@ -421,3 +422,5 @@ void RwD3D8EngineSetRefreshRate(RwUInt32 refreshRate);
 RwBool RwD3D8DeviceSupportsDXTTexture(void);
 void RwD3D8EngineSetMultiSamplingLevels(RwUInt32 level);
 RwUInt32 RwD3D8EngineGetMaxMultiSamplingLevels(void);
+
+#endif // __GTA_RWCORE_H__

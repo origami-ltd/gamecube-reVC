@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_BOAT_H__
+#define __GTA_BOAT_H__
 
 #include "Vehicle.h"
 #include "Door.h"
@@ -83,3 +84,5 @@ public:
 	static const uint32 nSaveStructSize;
 
 };
+
+#endif // __GTA_BOAT_H__

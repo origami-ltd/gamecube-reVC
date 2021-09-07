@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_GARAGES_H__
+#define __GTA_GARAGES_H__
 #include "audio_enums.h"
 #include "Camera.h"
 #include "config.h"
@@ -301,3 +302,5 @@ public:
 	static bool IsThisGarageTypeSafehouse(uint8 type) { return FindSafeHouseIndexForGarageType(type) >= 0; }
 
 };
+
+#endif // __GTA_GARAGES_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_STREAM_H__
+#define __GTA_STREAM_H__
 
 #ifdef AUDIO_OAL
 #include <AL/al.h>
@@ -190,3 +191,5 @@ public:
 };
 
 #endif
+
+#endif // __GTA_STREAM_H__

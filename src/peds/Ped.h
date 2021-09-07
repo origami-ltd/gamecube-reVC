@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PED_H__
+#define __GTA_PED_H__
 
 #include "RwHelper.h"
 #include "AnimManager.h"
@@ -1190,3 +1191,5 @@ VALIDATE_SIZE(CPed, 0x5F4);
 
 bool IsPedPointerValid(CPed*);
 bool IsPedPointerValid_NotInWorld(CPed*);
+
+#endif // __GTA_PED_H__

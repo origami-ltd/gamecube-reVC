@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TIMEMODELINFO_H__
+#define __GTA_TIMEMODELINFO_H__
 
 #include "SimpleModelInfo.h"
 
@@ -18,3 +19,5 @@ public:
 	CTimeModelInfo *FindOtherTimeModel(void);
 };
 //static_assert(sizeof(CTimeModelInfo) == 0x58, "CTimeModelInfo: error");
+
+#endif // __GTA_TIMEMODELINFO_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RESTART_H__
+#define __GTA_RESTART_H__
 
 #define NUM_RESTART_POINTS 8
 
@@ -34,3 +35,5 @@ public:
 	static float PoliceRestartHeadings[NUM_RESTART_POINTS];
 	static uint16 NumberOfPoliceRestarts;
 };
+
+#endif // __GTA_RESTART_H__

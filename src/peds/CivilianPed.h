@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CIVILIANPED_H__
+#define __GTA_CIVILIANPED_H__
 
 #include "Ped.h"
 
@@ -24,3 +25,5 @@ public:
 	bool IsOnStealWishList(int32);
 };
 //VALIDATE_SIZE(CCivilianPed, 0x53C);
+
+#endif // __GTA_CIVILIANPED_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MLOMODELINFO_H__
+#define __GTA_MLOMODELINFO_H__
 
 #include "ClumpModelInfo.h"
 
@@ -12,3 +13,5 @@ public:
 	CMloModelInfo(void) : CClumpModelInfo(MITYPE_MLO) {}
 	void ConstructClump();
 };
+
+#endif // __GTA_MLOMODELINFO_H__

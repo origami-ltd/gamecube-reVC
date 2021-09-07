@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_HUD_H__
+#define __GTA_HUD_H__
 #include "Sprite2d.h"
 
 #define HELP_MSG_LENGTH 256
@@ -137,3 +138,5 @@ public:
 	static float DrawFadeState(DRAW_FADE_STATE, int);
 	static void ResetWastedText(void);
 };
+
+#endif // __GTA_HUD_H__

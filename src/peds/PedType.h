@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PEDTYPE_H__
+#define __GTA_PEDTYPE_H__
 
 // Index into the PedType array
 enum ePedType
@@ -176,3 +177,5 @@ public:
 };
 
 VALIDATE_SIZE(CPedStats, 0x34);
+
+#endif // __GTA_PEDTYPE_H__

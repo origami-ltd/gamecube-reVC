@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TEMPCOLMODELS_H__
+#define __GTA_TEMPCOLMODELS_H__
 
 #include "ColModel.h"
 
@@ -22,3 +23,5 @@ public:
 
 	static void Initialise(void);
 };
+
+#endif // __GTA_TEMPCOLMODELS_H__

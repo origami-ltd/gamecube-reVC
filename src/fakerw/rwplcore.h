@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RWPLCORE_H__
+#define __GTA_RWPLCORE_H__
 
 typedef rw::int8 RwInt8;
 typedef rw::int16 RwInt16;
@@ -496,3 +497,5 @@ RwInt32 RwEngineGetMaxTextureSize(void);
  */
 
 RwBool RwStreamFindChunk(RwStream *stream, RwUInt32 type, RwUInt32 *lengthOut, RwUInt32 *versionOut);
+
+#endif // __GTA_RWPLCORE_H__

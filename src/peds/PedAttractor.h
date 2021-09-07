@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PEDATTRACTOR_H__
+#define __GTA_PEDATTRACTOR_H__
 #include "common.h"
 #include <vector>
 
@@ -194,3 +195,5 @@ public:
 		CPedAttractor(pEffect, matrix, maxpeds, qdist, waitTime, approachTime, distance, headingdiff, posdisp, headdisp)
 	{};
 };
+
+#endif // __GTA_PEDATTRACTOR_H__

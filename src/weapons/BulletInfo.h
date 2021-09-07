@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_BULLETINFO_H__
+#define __GTA_BULLETINFO_H__
 
 #include "WeaponType.h"
 
@@ -23,3 +24,5 @@ public:
 	static void Update(void);
 	static bool TestForSniperBullet(float x1, float x2, float y1, float y2, float z1, float z2);
 };
+
+#endif // __GTA_BULLETINFO_H__

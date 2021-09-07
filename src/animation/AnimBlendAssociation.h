@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANIMBLENDASSOCIATION_H__
+#define __GTA_ANIMBLENDASSOCIATION_H__
 
 #include "AnimBlendList.h"
 #include "AnimBlendNode.h"
@@ -91,3 +92,5 @@ public:
 		return (CAnimBlendAssociation*)((uint8*)l - offsetof(CAnimBlendAssociation, link));
 	}
 };
+
+#endif // __GTA_ANIMBLENDASSOCIATION_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_VARCONSOLE_H__
+#define __GTA_VARCONSOLE_H__
 
 enum eVarConsoleEntryType
 {
@@ -90,3 +91,5 @@ public:
 };
 
 extern CVarConsole VarConsole;
+
+#endif // __GTA_VARCONSOLE_H__

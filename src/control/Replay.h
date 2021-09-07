@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_REPLAY_H__
+#define __GTA_REPLAY_H__
 
 #include "Pools.h"
 #include "World.h"
@@ -415,3 +416,5 @@ private:
 	static void GoToNextBlock(void);
 #endif
 };
+
+#endif // __GTA_REPLAY_H__

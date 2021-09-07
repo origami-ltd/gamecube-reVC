@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PARTICLE_H__
+#define __GTA_PARTICLE_H__
 #include "ParticleMgr.h"
 
 
@@ -106,3 +107,5 @@ extern RwRaster *gpRainDripRaster[];
 extern RwRaster *gpRainDripDarkRaster[];
 
 VALIDATE_SIZE(CParticle, 0x58);
+
+#endif // __GTA_PARTICLE_H__

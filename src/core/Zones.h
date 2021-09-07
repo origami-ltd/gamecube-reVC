@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ZONES_H__
+#define __GTA_ZONES_H__
 
 #include "Game.h"
 #include "Gangs.h"
@@ -112,3 +113,5 @@ public:
 	static void LoadAllZones(uint8 *buffer, uint32 length);
 	static void LoadOneZone(CZone *zone, uint8 **buffer, uint32 *length, eZoneType zoneType);
 };
+
+#endif // __GTA_ZONES_H__

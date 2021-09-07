@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PLAYERPED_H__
+#define __GTA_PLAYERPED_H__
 
 #include "Ped.h"
 
@@ -118,3 +119,5 @@ public:
 };
 
 //VALIDATE_SIZE(CPlayerPed, 0x5F0);
+
+#endif // __GTA_PLAYERPED_H__

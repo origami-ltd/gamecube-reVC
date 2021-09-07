@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COLSTORE_H__
+#define __GTA_COLSTORE_H__
 
 #include "templates.h"
 
@@ -41,3 +42,5 @@ public:
 		return ms_pColPool->GetSlot(slot);
 	}
 };
+
+#endif // __GTA_COLSTORE_H__

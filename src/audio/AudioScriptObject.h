@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_AUDIOSCRIPTOBJECT_H__
+#define __GTA_AUDIOSCRIPTOBJECT_H__
 
 class cAudioScriptObject
 {
@@ -24,3 +25,5 @@ public:
 VALIDATE_SIZE(cAudioScriptObject, 20);
 
 extern void PlayOneShotScriptObject(uint8 id, CVector const &pos);
+
+#endif // __GTA_AUDIOSCRIPTOBJECT_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SIMPLEMODELINFO_H__
+#define __GTA_SIMPLEMODELINFO_H__
 
 #include "BaseModelInfo.h"
 
@@ -59,3 +60,5 @@ public:
 		m_atomics[2] = (RpAtomic*)m; }
 };
 //static_assert(sizeof(CSimpleModelInfo) == 0x4C, "CSimpleModelInfo: error");
+
+#endif // __GTA_SIMPLEMODELINFO_H__

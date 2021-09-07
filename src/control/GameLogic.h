@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_GAMELOGIC_H__
+#define __GTA_GAMELOGIC_H__
 
 class CAutomobile;
 
@@ -49,3 +50,5 @@ public:
 	static float ShortCutDropOffOrientationForMission;
 	static bool MissionDropOffReadyToBeUsed;
 };
+
+#endif // __GTA_GAMELOGIC_H__

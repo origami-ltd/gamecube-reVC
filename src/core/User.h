@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_USER_H__
+#define __GTA_USER_H__
 
 #include "Pager.h"
 #include "OnscreenTimer.h"
@@ -40,3 +41,5 @@ public:
 	static void Init();
 	static void Process();
 };
+
+#endif // __GTA_USER_H__

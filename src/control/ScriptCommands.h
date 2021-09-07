@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SCRIPTCOMMANDS_H__
+#define __GTA_SCRIPTCOMMANDS_H__
 
 enum {
 	COMMAND_NOP = 0,
@@ -1506,3 +1507,5 @@ struct tScriptCommandData
 	const char name_override[8];
 };
 #endif
+
+#endif // __GTA_SCRIPTCOMMANDS_H__

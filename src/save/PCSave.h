@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PCSAVE_H__
+#define __GTA_PCSAVE_H__
 
 enum eSaveStatus
 {
@@ -38,3 +39,5 @@ public:
 };
 
 extern C_PcSave PcSaveHelper;
+
+#endif // __GTA_PCSAVE_H__

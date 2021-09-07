@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RENDERER_H__
+#define __GTA_RENDERER_H__
 
 class CEntity;
 
@@ -103,3 +104,5 @@ public:
 #endif
 	static void InsertEntityIntoList(CEntity *ent);
 };
+
+#endif // __GTA_RENDERER_H__

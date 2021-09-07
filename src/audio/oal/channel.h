@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CHANNEL_H__
+#define __GTA_CHANNEL_H__
 
 #ifdef AUDIO_OAL
 #include "oal/oal_utils.h"
@@ -53,3 +54,5 @@ public:
 };
 
 #endif
+
+#endif // __GTA_CHANNEL_H__

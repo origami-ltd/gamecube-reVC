@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COLPOINT_H__
+#define __GTA_COLPOINT_H__
 
 struct CColPoint
 {
@@ -32,3 +33,5 @@ struct CColPoint
 	CColPoint &operator=(const CColPoint &other);
 };
 
+
+#endif // __GTA_COLPOINT_H__

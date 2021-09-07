@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CUTSCENEMGR_H__
+#define __GTA_CUTSCENEMGR_H__
 #include "CutsceneObject.h"
 
 #define CUTSCENENAMESIZE 8
@@ -59,3 +60,5 @@ public:
 	static void RemoveEverythingFromTheWorldForTheBiggestFuckoffCutsceneEver();
 	static void DisableCutsceneShadows() { ms_useCutsceneShadows = false; }
 };
+
+#endif // __GTA_CUTSCENEMGR_H__

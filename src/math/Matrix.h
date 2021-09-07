@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MATRIX_H__
+#define __GTA_MATRIX_H__
 
 class CMatrix
 {
@@ -152,3 +153,5 @@ class CCompressedMatrix : public CCompressedMatrixNotAligned
 {
 	int _alignment; // no clue what would this align to
 };
+
+#endif // __GTA_MATRIX_H__

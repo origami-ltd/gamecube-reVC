@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_VEHICLEMODELINFO_H__
+#define __GTA_VEHICLEMODELINFO_H__
 
 #include "ClumpModelInfo.h"
 
@@ -164,3 +165,5 @@ public:
 
 extern bool gbBlackCars;
 extern bool gbPinkCars;
+
+#endif // __GTA_VEHICLEMODELINFO_H__

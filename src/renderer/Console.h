@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CONSOLE_H__
+#define __GTA_CONSOLE_H__
 
 class CConsole
 {
@@ -25,3 +26,5 @@ public:
 extern CConsole TheConsole;
 
 void cprintf(char*, ...);
+
+#endif // __GTA_CONSOLE_H__

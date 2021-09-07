@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COMPRESSEDVECTOR_H__
+#define __GTA_COMPRESSEDVECTOR_H__
 
 struct CompressedVector
 {
@@ -34,3 +35,5 @@ struct CompressedVector
 	void Set(float x, float y, float z) { this->x = x; this->y = y; this->z = z; };
 #endif
 };
+
+#endif // __GTA_COMPRESSEDVECTOR_H__

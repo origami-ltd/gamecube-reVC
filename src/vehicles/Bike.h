@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_BIKE_H__
+#define __GTA_BIKE_H__
 
 #include "Vehicle.h"
 #include "Skidmarks.h"
@@ -170,3 +171,5 @@ inline int8 GetBikeDoorFlagInclJumpInFromFront(int32 carnode) {
 			return CAR_DOOR_FLAG_UNKNOWN;
 	}
 }
+
+#endif // __GTA_BIKE_H__

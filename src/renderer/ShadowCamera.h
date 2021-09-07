@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SHADOWCAMERA_H__
+#define __GTA_SHADOWCAMERA_H__
 
 
 class CShadowCamera
@@ -52,3 +53,5 @@ public:
 		return m_pCamera;
 	}
 };
+
+#endif // __GTA_SHADOWCAMERA_H__

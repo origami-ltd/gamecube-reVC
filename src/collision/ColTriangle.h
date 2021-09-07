@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COLTRIANGLE_H__
+#define __GTA_COLTRIANGLE_H__
 
 #include "CompressedVector.h"
 
@@ -75,3 +76,5 @@ struct CColTrianglePlane
 	float CalcPoint(const CVector &v) const { return DotProduct(normal, v) - dist; };
 #endif
 };
+
+#endif // __GTA_COLTRIANGLE_H__

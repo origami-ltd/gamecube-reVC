@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FILELOADER_H__
+#define __GTA_FILELOADER_H__
 
 class CFileLoader
 {
@@ -46,3 +47,5 @@ public:
 	static void ReloadObject(const char *line);
 	static void ReLoadScene(const char *filename); // unused mobile function
 };
+
+#endif // __GTA_FILELOADER_H__

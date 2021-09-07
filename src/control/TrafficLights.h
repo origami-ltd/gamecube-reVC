@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TRAFFICLIGHTS_H__
+#define __GTA_TRAFFICLIGHTS_H__
 
 class CEntity;
 class CVehicle;
@@ -30,3 +31,5 @@ public:
 	static bool ShouldCarStopForLight(CVehicle*, bool);
 	static bool ShouldCarStopForBridge(CVehicle*);
 };
+
+#endif // __GTA_TRAFFICLIGHTS_H__

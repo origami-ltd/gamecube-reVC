@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WORLD_H__
+#define __GTA_WORLD_H__
 
 #include "Game.h"
 #include "Lists.h"
@@ -174,3 +175,5 @@ public:
 };
 
 extern CColPoint gaTempSphereColPoints[MAX_COLLISION_POINTS];
+
+#endif // __GTA_WORLD_H__

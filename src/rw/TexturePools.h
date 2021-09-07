@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TEXTUREPOOLS_H__
+#define __GTA_TEXTUREPOOLS_H__
 
 class CTexturePool
 {
@@ -40,3 +41,5 @@ public:
 
 void _TexturePoolsInitialise();
 void _TexturePoolsShutdown();
+
+#endif // __GTA_TEXTUREPOOLS_H__

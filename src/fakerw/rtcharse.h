@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RTCHARSE_H__
+#define __GTA_RTCHARSE_H__
 
 typedef rw::Charset RtCharset;
 typedef rw::Charset::Desc RtCharsetDesc;
@@ -12,3 +13,5 @@ RtCharset   *RtCharsetSetColors(RtCharset * charSet, const RwRGBA * foreGround, 
 RtCharset   *RtCharsetGetDesc(RtCharset * charset, RtCharsetDesc * desc);
 RtCharset   *RtCharsetCreate(const RwRGBA * foreGround, const RwRGBA * backGround);
 RwBool       RtCharsetDestroy(RtCharset * charSet);
+
+#endif // __GTA_RTCHARSE_H__

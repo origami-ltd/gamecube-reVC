@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RPANIMBLEND_H__
+#define __GTA_RPANIMBLEND_H__
 
 class CAnimBlendNode;
 class CAnimBlendAssociation;
@@ -46,3 +47,5 @@ void FrameUpdateCallBackOffscreen(AnimBlendFrameData *frame, void *arg);
 
 void FrameUpdateCallBackNonSkinnedCompressed(AnimBlendFrameData *frame, void *arg);
 void FrameUpdateCallBackSkinnedCompressed(AnimBlendFrameData *frame, void *arg);
+
+#endif // __GTA_RPANIMBLEND_H__

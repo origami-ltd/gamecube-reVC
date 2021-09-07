@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PEDIK_H__
+#define __GTA_PEDIK_H__
 #include "common.h"
 #include "AnimBlendClumpData.h"
 
@@ -64,3 +65,5 @@ public:
 };
 
 VALIDATE_SIZE(CPedIK, 0x28);
+
+#endif // __GTA_PEDIK_H__

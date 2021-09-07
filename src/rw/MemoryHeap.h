@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MEMORYHEAP_H__
+#define __GTA_MEMORYHEAP_H__
 
 // some windows shit
 #ifdef MoveMemory
@@ -202,3 +203,5 @@ public:
 };
 
 extern CMemoryHeap gMainHeap;
+
+#endif // __GTA_MEMORYHEAP_H__

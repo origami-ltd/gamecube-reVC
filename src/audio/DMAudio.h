@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DMAUDIO_H__
+#define __GTA_DMAUDIO_H__
 
 #include "audio_enums.h"
 #include "soundlist.h"
@@ -105,3 +106,5 @@ public:
 	void ShutUpPlayerTalking(bool8 state);
 };
 extern cDMAudio DMAudio;
+
+#endif // __GTA_DMAUDIO_H__

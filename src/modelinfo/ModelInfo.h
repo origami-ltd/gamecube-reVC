@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MODELINFO_H__
+#define __GTA_MODELINFO_H__
 
 #include "2dEffect.h"
 #include "SimpleModelInfo.h"
@@ -50,3 +51,5 @@ public:
 	static bool IsPlaneModel(int32 id);
 	static void ReInit2dEffects();
 };
+
+#endif // __GTA_MODELINFO_H__

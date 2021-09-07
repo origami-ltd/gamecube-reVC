@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PROJECTILEINFO_H__
+#define __GTA_PROJECTILEINFO_H__
 
 #include "WeaponType.h"
 
@@ -32,3 +33,5 @@ public:
 };
 
 extern CProjectileInfo gaProjectileInfo[NUM_PROJECTILES];
+
+#endif // __GTA_PROJECTILEINFO_H__

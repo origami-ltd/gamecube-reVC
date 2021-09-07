@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PARTICLETYPE_H__
+#define __GTA_PARTICLETYPE_H__
 
 enum tParticleType
 {
@@ -90,3 +91,5 @@ enum tParticleType
 	PARTICLE_FIRST = PARTICLE_SPARK,
 	PARTICLE_LAST = PARTICLE_HEATHAZE_IN_DIST
 };
+
+#endif // __GTA_PARTICLETYPE_H__

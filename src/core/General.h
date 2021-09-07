@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_GENERAL_H__
+#define __GTA_GENERAL_H__
 
 #include <ctype.h>
 
@@ -169,3 +170,5 @@ public:
 	static void SetRandomSeed(int32 seed)
 		{ mysrand(seed); }
 };
+
+#endif // __GTA_GENERAL_H__

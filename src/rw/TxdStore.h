@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TXDSTORE_H__
+#define __GTA_TXDSTORE_H__
 
 #include "templates.h"
 
@@ -42,3 +43,5 @@ public:
 	}
 	static bool isTxdLoaded(int slot);
 };
+
+#endif // __GTA_TXDSTORE_H__

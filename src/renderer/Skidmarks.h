@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SKIDMARKS_H__
+#define __GTA_SKIDMARKS_H__
 
 enum { SKIDMARK_LENGTH = 16 };
 
@@ -39,3 +40,5 @@ public:
 	static void RegisterOne(uintptr id, const CVector &pos, float fwdX, float fwdY, eSkidmarkType type, bool *isBloody);
 	static void RegisterOne(uintptr id, const CVector &pos, float fwdX, float fwdY, bool *isMuddy, bool *isBloody);
 };
+
+#endif // __GTA_SKIDMARKS_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_AUDIO_ENUMS_H__
+#define __GTA_AUDIO_ENUMS_H__
 
 enum eRadioStation
 {
@@ -1334,3 +1335,5 @@ enum
 	MISSION_AUDIO_PLAYER_COMMENT,
 	MISSION_AUDIO_COUNT
 };
+
+#endif // __GTA_AUDIO_ENUMS_H__

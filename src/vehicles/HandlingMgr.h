@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_HANDLINGMGR_H__
+#define __GTA_HANDLINGMGR_H__
 
 #include "Transmission.h"
 
@@ -277,3 +278,5 @@ public:
 	bool HasFrontWheelDrive(tVehicleType id) { return HandlingData[id].Transmission.nDriveType != 'R'; }
 };
 extern cHandlingDataMgr mod_HandlingManager;
+
+#endif // __GTA_HANDLINGMGR_H__

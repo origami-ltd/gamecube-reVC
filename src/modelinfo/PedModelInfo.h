@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PEDMODELINFO_H__
+#define __GTA_PEDMODELINFO_H__
 
 #include "ClumpModelInfo.h"
 #include "ColModel.h"
@@ -50,3 +51,5 @@ public:
 	CColModel *AnimatePedColModelSkinned(RpClump *clump);
 	CColModel *AnimatePedColModelSkinnedWorld(RpClump *clump);
 };
+
+#endif // __GTA_PEDMODELINFO_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANIMBLENDASSOCGROUP_H__
+#define __GTA_ANIMBLENDASSOCGROUP_H__
 
 class CAnimBlendAssociation;
 struct CAnimBlock;
@@ -22,3 +23,5 @@ public:
 	void CreateAssociations(const char *name);
 	void CreateAssociations(const char *blockName, RpClump *clump, const char **animNames, int numAssocs);
 };
+
+#endif // __GTA_ANIMBLENDASSOCGROUP_H__

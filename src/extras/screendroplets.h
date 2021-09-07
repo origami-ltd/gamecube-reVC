@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SCREENDROPLETS_H__
+#define __GTA_SCREENDROPLETS_H__
 
 #ifdef SCREEN_DROPLETS
 
@@ -76,3 +77,5 @@ public:
 };
 
 #endif
+
+#endif // __GTA_SCREENDROPLETS_H__

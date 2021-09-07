@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_BUILDING_H__
+#define __GTA_BUILDING_H__
 
 #include "Entity.h"
 
@@ -18,3 +19,5 @@ public:
 };
 
 bool IsBuildingPointerValid(CBuilding*);
+
+#endif // __GTA_BUILDING_H__

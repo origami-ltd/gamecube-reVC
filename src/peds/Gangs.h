@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_GANGS_H__
+#define __GTA_GANGS_H__
 
 #include "PedType.h"
 
@@ -55,3 +56,5 @@ private:
 	static CGangInfo Gang[NUM_GANGS];
 	static bool GangAttackWithCops[NUM_GANGS];
 };
+
+#endif // __GTA_GANGS_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_VEHICLE_H__
+#define __GTA_VEHICLE_H__
 
 #include "Physical.h"
 #include "AutoPilot.h"
@@ -449,3 +450,5 @@ inline int8 GetEnterCarDoorFlag(int32 carnode, uint8 numMaxPassengers) {
 		return CAR_DOOR_FLAG_UNKNOWN;
 	}
 }
+
+#endif // __GTA_VEHICLE_H__

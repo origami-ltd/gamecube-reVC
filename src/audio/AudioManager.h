@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_AUDIOMANAGER_H__
+#define __GTA_AUDIOMANAGER_H__
 
 #include "audio_enums.h"
 #include "AudioCollision.h"
@@ -647,3 +648,5 @@ enum
 	PED_COMMENT_VOLUME_BEHIND_WALL = 31,
 	COLLISION_MAX_DIST = 60,
 };
+
+#endif // __GTA_AUDIOMANAGER_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CUSTOMPIPES_H__
+#define __GTA_CUSTOMPIPES_H__
 
 #ifdef LIBRW
 #ifdef EXTENDED_PIPELINES
@@ -143,3 +144,5 @@ void RenderBlendPass(int pass);
 }
 
 #endif
+
+#endif // __GTA_CUSTOMPIPES_H__

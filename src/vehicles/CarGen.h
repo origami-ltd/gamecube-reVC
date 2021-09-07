@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CARGEN_H__
+#define __GTA_CARGEN_H__
 #include "common.h"
 #include "config.h"
 
@@ -49,3 +50,5 @@ public:
 	static void SaveAllCarGenerators(uint8 *, uint32 *);
 	static void LoadAllCarGenerators(uint8 *, uint32);
 };
+
+#endif // __GTA_CARGEN_H__

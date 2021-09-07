@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PATHFIND_H__
+#define __GTA_PATHFIND_H__
 
 #include "Treadable.h"
 
@@ -302,3 +303,5 @@ inline void CPathNode::SetNext(CPathNode *node) { nextIndex = ThePaths.GetIndex(
 extern bool gbShowPedPaths;
 extern bool gbShowCarPaths;
 extern bool gbShowCarPathsLinks;
+
+#endif // __GTA_PATHFIND_H__

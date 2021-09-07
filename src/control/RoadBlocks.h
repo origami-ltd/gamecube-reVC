@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ROADBLOCKS_H__
+#define __GTA_ROADBLOCKS_H__
 #include "common.h"
 
 class CVehicle;
@@ -28,3 +29,5 @@ public:
 	static void RegisterScriptRoadBlock(CVector, CVector);
 	static void ClearScriptRoadBlocks();
 };
+
+#endif // __GTA_ROADBLOCKS_H__

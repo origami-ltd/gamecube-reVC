@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FRONTENDCONTROLS_H__
+#define __GTA_FRONTENDCONTROLS_H__
 
 enum {
 	NUM_MULTICHOICE_OPTIONS = 16,
@@ -748,3 +749,5 @@ public:
 	virtual void GoLeftMenuOnPage(void);
 	virtual void GoRightMenuOnPage(void);
 };
+
+#endif // __GTA_FRONTENDCONTROLS_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_BRIDGE_H__
+#define __GTA_BRIDGE_H__
 
 class CEntity;
 
@@ -26,3 +27,5 @@ public:
 	static void FindBridgeEntities();
 	static bool ThisIsABridgeObjectMovingUp(int);
 };
+
+#endif // __GTA_BRIDGE_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MBLUR_H__
+#define __GTA_MBLUR_H__
 
 enum FxType
 {
@@ -37,3 +38,5 @@ public:
 	static bool AddRenderFx(RwCamera *cam, RwRect *rect, float z, FxType type);
 	static void OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf);
 };
+
+#endif // __GTA_MBLUR_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ROPES_H__
+#define __GTA_ROPES_H__
 
 class CRope
 {
@@ -29,3 +30,5 @@ public:
 	static bool FindCoorsAlongRope(uintptr id, float t, CVector *coors);
 	static bool CreateRopeWithSwatComingDown(CVector pos);
 };
+
+#endif // __GTA_ROPES_H__

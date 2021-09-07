@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_VECTOR2D_H__
+#define __GTA_VECTOR2D_H__
 
 class CVector2D
 {
@@ -102,3 +103,5 @@ inline CVector2D operator*(float left, const CVector2D &right)
 {
 	return CVector2D(left * right.x, left * right.y);
 }
+
+#endif // __GTA_VECTOR2D_H__

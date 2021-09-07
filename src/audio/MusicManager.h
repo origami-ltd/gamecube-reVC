@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MUSICMANAGER_H__
+#define __GTA_MUSICMANAGER_H__
 
 #include "audio_enums.h"
 
@@ -111,3 +112,5 @@ VALIDATE_SIZE(cMusicManager, 0x95C);
 extern cMusicManager MusicManager;
 extern bool8 g_bAnnouncementReadPosAlready; // we have a symbol of this so it was declared in .h
 float GetHeightScale();
+
+#endif // __GTA_MUSICMANAGER_H__

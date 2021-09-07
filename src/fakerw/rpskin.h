@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RPSKIN_H__
+#define __GTA_RPSKIN_H__
 
 #include <rphanim.h>
 
@@ -24,3 +25,5 @@ RpSkin *RpSkinGeometryGetSkin( RpGeometry *geometry );
 
 RpAtomic *RpSkinAtomicSetHAnimHierarchy( RpAtomic *atomic, RpHAnimHierarchy *hierarchy );
 RpHAnimHierarchy *RpSkinAtomicGetHAnimHierarchy( const RpAtomic *atomic );
+
+#endif // __GTA_RPSKIN_H__

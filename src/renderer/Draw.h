@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DRAW_H__
+#define __GTA_DRAW_H__
 
 enum eAspectRatio 
 {
@@ -68,3 +69,5 @@ public:
 	static float ScaleY(float y);
 #endif 
 };
+
+#endif // __GTA_DRAW_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CRIME_H__
+#define __GTA_CRIME_H__
 
 enum eCrimeType {
 	CRIME_NONE,
@@ -37,3 +38,5 @@ public:
 	CCrimeBeingQd() { };
 	~CCrimeBeingQd() { };
 };
+
+#endif // __GTA_CRIME_H__

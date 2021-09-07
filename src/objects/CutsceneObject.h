@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CUTSCENEOBJECT_H__
+#define __GTA_CUTSCENEOBJECT_H__
 
 #include "Object.h"
 
@@ -22,3 +23,5 @@ public:
 	bool SetupLighting(void);
 	void RemoveLighting(bool reset);
 };
+
+#endif // __GTA_CUTSCENEOBJECT_H__

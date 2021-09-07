@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANIMBLENDCLUMPDATA_H__
+#define __GTA_ANIMBLENDCLUMPDATA_H__
 
 #include "AnimBlendList.h"
 
@@ -43,3 +44,5 @@ public:
 	void SetNumberOfBones(int n) { SetNumberOfFrames(n); }
 	void ForAllFrames(void (*cb)(AnimBlendFrameData*, void*), void *arg);
 };
+
+#endif // __GTA_ANIMBLENDCLUMPDATA_H__

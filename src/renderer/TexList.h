@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TEXLIST_H__
+#define __GTA_TEXLIST_H__
 
 class CTexList
 {
@@ -12,3 +13,5 @@ public:
 	static RwTexture *LoadFileNameTexture(char *name);
 	static void LoadGlobalTextureList();
 };
+
+#endif // __GTA_TEXLIST_H__

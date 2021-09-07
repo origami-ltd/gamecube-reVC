@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_POWERPOINTS_H__
+#define __GTA_POWERPOINTS_H__
 
 enum
 {
@@ -24,3 +25,5 @@ public:
 	static void Save(uint8**, uint32*);
 	static void Load(uint8*, uint32);
 };
+
+#endif // __GTA_POWERPOINTS_H__

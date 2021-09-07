@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SURFACETABLE_H__
+#define __GTA_SURFACETABLE_H__
 
 enum eSurfaceType
 {
@@ -99,3 +100,5 @@ public:
 	static float GetAdhesiveLimit(CColPoint &colpoint);
 	static bool IsSoftLanding(uint8 surf);
 };
+
+#endif // __GTA_SURFACETABLE_H__

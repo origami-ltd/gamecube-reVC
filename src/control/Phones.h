@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PHONES_H__
+#define __GTA_PHONES_H__
 
 #include "Physical.h"
 
@@ -67,3 +68,5 @@ extern CPhoneInfo gPhoneInfo;
 
 void PhonePutDownCB(CAnimBlendAssociation *assoc, void *arg);
 void PhonePickUpCB(CAnimBlendAssociation *assoc, void *arg);
+
+#endif // __GTA_PHONES_H__

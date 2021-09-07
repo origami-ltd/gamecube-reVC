@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_QUATERNION_H__
+#define __GTA_QUATERNION_H__
 
 // TODO: actually implement this
 class CQuaternion
@@ -93,3 +94,5 @@ inline CQuaternion operator/(const CQuaternion &left, float right)
 {
 	return CQuaternion(left.x / right, left.y / right, left.z / right, left.w / right);
 }
+
+#endif // __GTA_QUATERNION_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_MODELINDICES_H__
+#define __GTA_MODELINDICES_H__
 
 #include "ModelInfo.h"
 
@@ -619,3 +620,5 @@ IsFence(int16 id)
 	return id == MI_FENCE ||
 		id == MI_FENCE2;
 }
+
+#endif // __GTA_MODELINDICES_H__

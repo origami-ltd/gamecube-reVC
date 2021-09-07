@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CUTSCENESHADOW_H__
+#define __GTA_CUTSCENESHADOW_H__
 #include "ShadowCamera.h"
 
 class CCutsceneShadow
@@ -50,3 +51,5 @@ public:
 	RwTexture *GetShadowRwTexture();
 	void DrawBorderAroundTexture(RwRGBA  const& color);
 };
+
+#endif // __GTA_CUTSCENESHADOW_H__

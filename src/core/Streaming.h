@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_STREAMING_H__
+#define __GTA_STREAMING_H__
 
 #include "Game.h"
 
@@ -217,3 +218,5 @@ public:
 
 	static void PrintStreamingBufferState();
 };
+
+#endif // __GTA_STREAMING_H__

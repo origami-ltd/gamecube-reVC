@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FLOATER_H__
+#define __GTA_FLOATER_H__
 
 class CPhysical;
 
@@ -45,3 +46,5 @@ public:
 	bool CalcBuoyancyForce(CPhysical *phys, CVector *impulse, CVector *point);
 };
 extern cBuoyancy mod_Buoyancy;
+
+#endif // __GTA_FLOATER_H__

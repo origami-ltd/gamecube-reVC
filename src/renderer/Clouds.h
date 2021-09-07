@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CLOUDS_H__
+#define __GTA_CLOUDS_H__
 
 class CClouds
 {
@@ -21,3 +22,5 @@ public:
 		int16 botred, int16 botgreen, int16 botblue, int16 alpha);
 	static void RenderHorizon(void);
 };
+
+#endif // __GTA_CLOUDS_H__

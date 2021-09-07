@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WEAPONINFO_H__
+#define __GTA_WEAPONINFO_H__
 
 #include "AnimManager.h"
 #include "AnimationId.h"
@@ -72,3 +73,5 @@ public:
 };
 
 VALIDATE_SIZE(CWeaponInfo, 0x64);
+
+#endif // __GTA_WEAPONINFO_H__

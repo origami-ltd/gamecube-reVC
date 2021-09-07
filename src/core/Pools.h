@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_POOLS_H__
+#define __GTA_POOLS_H__
 
 #include "templates.h"
 #include "Lists.h"
@@ -62,3 +63,5 @@ public:
 	static void SavePedPool(uint8 *buf, uint32 *size);
 	static void SaveVehiclePool(uint8 *buf, uint32 *size);
 };
+
+#endif // __GTA_POOLS_H__

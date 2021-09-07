@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SOUNDLIST_H__
+#define __GTA_SOUNDLIST_H__
 
 enum eSound
 {
@@ -280,3 +281,5 @@ enum eScriptSounds {
 	SCRIPT_SOUND_TOTAL,
 	SCRIPT_SOUND_INVALID,
 };
+
+#endif // __GTA_SOUNDLIST_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_OBJECT_H__
+#define __GTA_OBJECT_H__
 
 #include "Physical.h"
 
@@ -114,3 +115,5 @@ public:
 };
 
 bool IsObjectPointerValid(CObject* pObject);
+
+#endif // __GTA_OBJECT_H__

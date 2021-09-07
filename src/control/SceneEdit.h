@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SCENEEDIT_H__
+#define __GTA_SCENEEDIT_H__
 #ifdef GTA_SCENE_EDIT
 class CPed;
 class CVehicle;
@@ -94,3 +95,5 @@ public:
 	static bool SelectWeapon(void);
 };
 #endif
+
+#endif // __GTA_SCENEEDIT_H__

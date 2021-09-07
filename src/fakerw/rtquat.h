@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RTQUAT_H__
+#define __GTA_RTQUAT_H__
 
 // Same layout as rw::Quat but with ugly imag,real separation which i don't want in librw
 struct RtQuat
@@ -13,3 +14,5 @@ const RtQuat *RtQuatQueryRotate(const RtQuat *quat, RwV3d * unitAxis, RwReal * a
 RwV3d *RtQuatTransformVectors(RwV3d * vectorsOut, const RwV3d * vectorsIn, const RwInt32 numPoints, const RtQuat *quat);
 
 void RtQuatConvertToMatrix(const RtQuat * const qpQuat, RwMatrix * const mpMatrix);
+
+#endif // __GTA_RTQUAT_H__

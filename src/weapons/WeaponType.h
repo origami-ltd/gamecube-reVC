@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WEAPONTYPE_H__
+#define __GTA_WEAPONTYPE_H__
 
 enum eWeaponType
 {
@@ -84,3 +85,5 @@ enum eWeaponState
 	WEAPONSTATE_OUT_OF_AMMO,
 	WEAPONSTATE_MELEE_MADECONTACT
 };
+
+#endif // __GTA_WEAPONTYPE_H__

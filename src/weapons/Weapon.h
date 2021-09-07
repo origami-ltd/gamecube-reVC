@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WEAPON_H__
+#define __GTA_WEAPON_H__
 
 #include "WeaponType.h"
 
@@ -88,3 +89,5 @@ public:
 VALIDATE_SIZE(CWeapon, 0x18);
 
 void FireOneInstantHitRound(CVector *source, CVector *target, int32 damage);
+
+#endif // __GTA_WEAPON_H__

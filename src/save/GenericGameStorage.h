@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_GENERICGAMESTORAGE_H__
+#define __GTA_GENERICGAMESTORAGE_H__
 
 #include "Game.h"
 #include "PCSave.h"
@@ -64,3 +65,5 @@ enum {
 };
 
 #endif
+
+#endif // __GTA_GENERICGAMESTORAGE_H__

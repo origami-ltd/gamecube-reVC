@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PAD_H__
+#define __GTA_PAD_H__
 
 enum {
 	PLAYERCONTROL_ENABLED = 0,
@@ -483,3 +484,5 @@ public:
 
 VALIDATE_SIZE(CPad, 0xFC);
 extern CPad Pads[MAX_PADS];
+
+#endif // __GTA_PAD_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SAVEBUF_H__
+#define __GTA_SAVEBUF_H__
 
 #ifdef VALIDATE_SAVE_SIZE
 extern int32 _saveBufCount;
@@ -121,3 +122,5 @@ ZeroSaveBuf(uint8 *&buf, uint32 length)
 #define CheckSaveHeader(buf, a, b, c, d, size) SkipSaveBuf(buf, 8);
 #define CheckSaveHeaderWithLength(buf, len, a, b, c, d, size) SkipSaveBuf(buf, 8);
 #endif
+
+#endif // __GTA_SAVEBUF_H__

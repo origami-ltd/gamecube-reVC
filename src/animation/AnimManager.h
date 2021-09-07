@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ANIMMANAGER_H__
+#define __GTA_ANIMMANAGER_H__
 
 #include "AnimBlendHierarchy.h"
 #include "AnimationId.h"
@@ -143,3 +144,5 @@ public:
 	static void RemoveLastAnimFile(void);
 	static CAnimBlendAssocGroup* GetAnimAssocGroups(void) { return ms_aAnimAssocGroups; }
 };
+
+#endif // __GTA_ANIMMANAGER_H__

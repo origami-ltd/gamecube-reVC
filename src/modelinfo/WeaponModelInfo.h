@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WEAPONMODELINFO_H__
+#define __GTA_WEAPONMODELINFO_H__
 
 #include "SimpleModelInfo.h"
 #include "WeaponType.h"
@@ -21,3 +22,5 @@ public:
 	void SetWeaponInfo(int32 weaponId);
 	eWeaponType GetWeaponInfo(void);
 };
+
+#endif // __GTA_WEAPONMODELINFO_H__

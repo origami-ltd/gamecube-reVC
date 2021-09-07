@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WATERCANNON_H__
+#define __GTA_WATERCANNON_H__
 
 #define WATERCANNON_GRAVITY (0.009f)
 #define WATERCANNON_LIFETIME (150)
@@ -37,3 +38,5 @@ public:
 	static void Update();
 	static void Render(void);
 };
+
+#endif // __GTA_WATERCANNON_H__

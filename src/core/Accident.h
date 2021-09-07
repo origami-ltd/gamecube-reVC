@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_ACCIDENT_H__
+#define __GTA_ACCIDENT_H__
 #include "config.h"
 
 class CPed;
@@ -29,3 +30,5 @@ public:
 };
 
 extern CAccidentManager gAccidentManager;
+
+#endif // __GTA_ACCIDENT_H__

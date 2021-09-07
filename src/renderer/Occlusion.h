@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_OCCLUSION_H__
+#define __GTA_OCCLUSION_H__
 
 struct ActiveOccluderLine {
 	CVector2D origin;
@@ -60,3 +61,5 @@ bool CalcScreenCoors(CVector const &in, CVector *out);
 #ifndef MASTER
 extern bool bDispayOccDebugStuff;
 #endif
+
+#endif // __GTA_OCCLUSION_H__

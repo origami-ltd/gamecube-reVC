@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_VECTOR_H__
+#define __GTA_VECTOR_H__
 
 class CVector : public RwV3d
 {
@@ -127,3 +128,5 @@ class CMatrix;
 CVector Multiply3x3(const CMatrix &mat, const CVector &vec);
 CVector Multiply3x3(const CVector &vec, const CMatrix &mat);
 CVector operator*(const CMatrix &mat, const CVector &vec);
+
+#endif // __GTA_VECTOR_H__

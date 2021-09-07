@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_EMERGENCYPED_H__
+#define __GTA_EMERGENCYPED_H__
 
 #include "Ped.h"
 
@@ -37,3 +38,5 @@ public:
 	void MedicAI(void);
 };
 //VALIDATE_SIZE(CEmergencyPed, 0x554);
+
+#endif // __GTA_EMERGENCYPED_H__

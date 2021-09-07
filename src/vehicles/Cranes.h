@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CRANES_H__
+#define __GTA_CRANES_H__
 #include "common.h"
 
 #include "World.h"
@@ -94,3 +95,5 @@ public:
 	static int32 NumCranes;
 	static CCrane aCranes[NUM_CRANES];
 };
+
+#endif // __GTA_CRANES_H__

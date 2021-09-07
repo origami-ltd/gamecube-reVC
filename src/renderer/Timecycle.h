@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TIMECYCLE_H__
+#define __GTA_TIMECYCLE_H__
 
 class CTimeCycle
 {
@@ -199,3 +200,5 @@ public:
 	static float GetShadowDisplacementX(void) { return m_fShadowDisplacementX[m_CurrentStoredValue]; }
 	static float GetShadowDisplacementY(void) { return m_fShadowDisplacementY[m_CurrentStoredValue]; }
 };
+
+#endif // __GTA_TIMECYCLE_H__

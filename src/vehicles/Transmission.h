@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TRANSMISSION_H__
+#define __GTA_TRANSMISSION_H__
 
 struct tGear
 {
@@ -26,3 +27,5 @@ public:
 	void CalculateGearForSimpleCar(float speed, uint8 &gear);
 	float CalculateDriveAcceleration(const float &gasPedal, uint8 &gear, float &time, const float &velocity, bool cheat);
 };
+
+#endif // __GTA_TRANSMISSION_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_NAMEGRID_H__
+#define __GTA_NAMEGRID_H__
 
 // TODO: reverse mobile code
 
@@ -51,3 +52,5 @@ public:
 	void ProcessControllerInput();
 	void Process();
 };
+
+#endif // __GTA_NAMEGRID_H__

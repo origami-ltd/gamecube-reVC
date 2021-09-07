@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CLOCK_H__
+#define __GTA_CLOCK_H__
 
 class CClock
 {
@@ -29,3 +30,5 @@ public:
 	static uint8 &GetHoursRef(void) { return ms_nGameClockHours; }
 	static uint8 &GetMinutesRef(void) { return ms_nGameClockMinutes; }
 };
+
+#endif // __GTA_CLOCK_H__

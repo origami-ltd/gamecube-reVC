@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SPRITE2D_H__
+#define __GTA_SPRITE2D_H__
 
 class CSprite2d
 {
@@ -52,3 +53,5 @@ public:
 	static void AddToBuffer(const CRect &a1, const CRGBA &a2, float a3, float a4, float a5, float a6, float a7, float a8, float a9, float a10);
 	static void RenderVertexBuffer();
 };
+
+#endif // __GTA_SPRITE2D_H__

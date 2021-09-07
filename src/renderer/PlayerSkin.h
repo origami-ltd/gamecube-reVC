@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PLAYERSKIN_H__
+#define __GTA_PLAYERSKIN_H__
 
 #define DEFAULT_SKIN_NAME "$$\"\""
 
@@ -13,3 +14,5 @@ public:
 	static void EndFrontendSkinEdit();
 	static void RenderFrontendSkinEdit();
 };
+
+#endif // __GTA_PLAYERSKIN_H__

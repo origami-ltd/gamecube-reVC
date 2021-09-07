@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DAMAGEMANAGER_H__
+#define __GTA_DAMAGEMANAGER_H__
 
 #include "common.h"
 
@@ -113,3 +114,5 @@ public:
 	bool ProgressEngineDamage(void);
 };
 VALIDATE_SIZE(CDamageManager, 0x1C);
+
+#endif // __GTA_DAMAGEMANAGER_H__

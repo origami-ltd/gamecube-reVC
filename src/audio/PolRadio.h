@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_POLRADIO_H__
+#define __GTA_POLRADIO_H__
 
 #include "Crime.h"
 #include "AudioSamples.h"
@@ -65,3 +66,5 @@ public:
 };
 
 VALIDATE_SIZE(cPoliceRadioQueue, 244);
+
+#endif // __GTA_POLRADIO_H__

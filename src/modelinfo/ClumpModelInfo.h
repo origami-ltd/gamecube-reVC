@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_CLUMPMODELINFO_H__
+#define __GTA_CLUMPMODELINFO_H__
 
 #include "BaseModelInfo.h"
 
@@ -58,3 +59,5 @@ public:
 	static RwFrame *GetFrameFromId(RpClump *clump, int32 id);
 };
 //static_assert(sizeof(CClumpModelInfo) == 0x34, "CClumpModelInfo: error");
+
+#endif // __GTA_CLUMPMODELINFO_H__

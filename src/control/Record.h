@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RECORD_H__
+#define __GTA_RECORD_H__
 
 class CAutomobile;
 class CVehicle;
@@ -102,3 +103,5 @@ private:
 	static uint8* PackCurrentPadValues(uint8*, CControllerState*, CControllerState*);
 	static uint8* UnPackCurrentPadValues(uint8*, uint8, CControllerState*);
 };
+
+#endif // __GTA_RECORD_H__

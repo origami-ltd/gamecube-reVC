@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FRONTENDOPTION_H__
+#define __GTA_FRONTENDOPTION_H__
 #include "common.h"
 
 #ifdef CUSTOM_FRONTEND_OPTIONS
@@ -86,3 +87,5 @@ void FrontendOptionAddDynamic(const char* gxtKey, uint16 x, uint16 y, uint8 alig
 // lineHeight = 0 means game will use MENU_DEFAULT_LINE_HEIGHT
 uint8 FrontendScreenAdd(const char* gxtKey, int prevPage, int lineHeight, bool showLeftRightHelper, ReturnPrevPageFunc returnPrevPageFunc = nil);
 #endif
+
+#endif // __GTA_FRONTENDOPTION_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_DEBUGMENU_H__
+#define __GTA_DEBUGMENU_H__
 
 #ifdef DEBUGMENU
 
@@ -202,3 +203,5 @@ inline DebugMenuEntry *DebugMenuAddVarBool8(const char *path, const char *name, 
 	return DebugMenuAddVarBool8(path, name, (int8_t*)ptr, triggerFunc);
 }
 #endif
+
+#endif // __GTA_DEBUGMENU_H__

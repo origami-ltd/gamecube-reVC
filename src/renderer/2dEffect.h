@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_2DEFFECT_H__
+#define __GTA_2DEFFECT_H__
 
 enum {
 	EFFECT_LIGHT,
@@ -97,3 +98,5 @@ public:
 };
 
 VALIDATE_SIZE(C2dEffect, 0x34);
+
+#endif // __GTA_2DEFFECT_H__

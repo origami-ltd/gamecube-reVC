@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_TREADABLE_H__
+#define __GTA_TREADABLE_H__
 
 #include "Building.h"
 
@@ -10,3 +11,5 @@ public:
 
 	bool GetIsATreadable(void) { return true; }
 };
+
+#endif // __GTA_TREADABLE_H__

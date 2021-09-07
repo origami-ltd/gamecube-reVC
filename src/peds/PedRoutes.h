@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PEDROUTES_H__
+#define __GTA_PEDROUTES_H__
 
 class CRouteNode
 {
@@ -13,3 +14,5 @@ public:
 	static void RemoveRoute(int16);
 	static void Initialise(void);
 };
+
+#endif // __GTA_PEDROUTES_H__

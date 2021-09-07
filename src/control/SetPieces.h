@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SETPIECES_H__
+#define __GTA_SETPIECES_H__
 
 #include "config.h"
 
@@ -46,3 +47,5 @@ public:
 	static void Load(uint8*, uint32);
 	static void Update(void);
 };
+
+#endif // __GTA_SETPIECES_H__

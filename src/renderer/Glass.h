@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_GLASS_H__
+#define __GTA_GLASS_H__
 
 class CEntity;
 class CVehicle;
@@ -57,3 +58,5 @@ public:
 	static void FindWindowSectorList(CPtrList &list, float *dist, CEntity **entity, float x, float y, float z);
 	static void BreakGlassPhysically(CVector pos, float radius);
 };
+
+#endif // __GTA_GLASS_H__

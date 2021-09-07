@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_PARTICLEOBJECT_H__
+#define __GTA_PARTICLEOBJECT_H__
 
 #include "AudioManager.h"
 #include "ParticleType.h"
@@ -110,3 +111,5 @@ public:
 
 	static CAudioHydrant *Get(int n);	// for neo screen droplets
 };
+
+#endif // __GTA_PARTICLEOBJECT_H__

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_STATS_H__
+#define __GTA_STATS_H__
 
 #include "PedType.h"
 #include "audio_enums.h"
@@ -150,3 +151,5 @@ public:
 	static void BuildStatLine(Const char *, void *, int, void *, int);
 	static int ConstructStatLine(int);
 };
+
+#endif // __GTA_STATS_H__

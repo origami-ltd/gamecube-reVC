@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RPHANIM_H__
+#define __GTA_RPHANIM_H__
 
 #include "rtquat.h"
 
@@ -70,3 +71,5 @@ RwBool RpHAnimHierarchyUpdateMatrices(RpHAnimHierarchy *hierarchy);
 RpHAnimAnimation *RpHAnimAnimationCreate(RwInt32 typeID, RwInt32 numFrames, RwInt32 flags, RwReal duration);
 RpHAnimAnimation  *RpHAnimAnimationDestroy(RpHAnimAnimation *animation);
 RpHAnimAnimation  *RpHAnimAnimationStreamRead(RwStream *stream);
+
+#endif // __GTA_RPHANIM_H__

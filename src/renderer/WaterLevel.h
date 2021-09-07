@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WATERLEVEL_H__
+#define __GTA_WATERLEVEL_H__
 
 #define WATER_X_OFFSET (400.0f)
 
@@ -182,3 +183,5 @@ public:
 	static void HandleBeachToysStuff(void);
 	static CEntity *CreateBeachToy(CVector const &vec, eBeachToy beachtoy);
 };
+
+#endif // __GTA_WATERLEVEL_H__

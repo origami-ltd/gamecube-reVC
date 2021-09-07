@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_RANGE3D_H__
+#define __GTA_RANGE3D_H__
 
 class CRange3D
 {
@@ -9,3 +10,5 @@ public:
 	void DebugShowRange(float, int);
 	CVector GetRandomPointInRange();
 };
+
+#endif // __GTA_RANGE3D_H__

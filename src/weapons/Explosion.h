@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_EXPLOSION_H__
+#define __GTA_EXPLOSION_H__
 
 class CEntity;
 class CVector;
@@ -56,3 +57,5 @@ public:
 };
 
 extern CExplosion gaExplosion[NUM_EXPLOSIONS];
+
+#endif // __GTA_EXPLOSION_H__

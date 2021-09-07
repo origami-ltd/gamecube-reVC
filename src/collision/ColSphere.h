@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_COLSPHERE_H__
+#define __GTA_COLSPHERE_H__
 
 #include "SurfaceTable.h"
 
@@ -19,3 +20,5 @@ struct CColSphere : public CSphere
 	bool IntersectRay(CVector const &from, CVector const &dir, CVector &entry, CVector &exit);
 	using CSphere::Set;
 };
+
+#endif // __GTA_COLSPHERE_H__

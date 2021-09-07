@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_VUVECTOR_H__
+#define __GTA_VUVECTOR_H__
 
 class TYPEALIGN(16) CVuVector : public CVector
 {
@@ -30,3 +31,5 @@ void TransformPoint(CVuVector &out, const CMatrix &mat, const CVuVector &in);
 void TransformPoint(CVuVector &out, const CMatrix &mat, const RwV3d &in);
 void TransformPoints(CVuVector *out, int n, const CMatrix &mat, const RwV3d *in, int stride);
 void TransformPoints(CVuVector *out, int n, const CMatrix &mat, const CVuVector *in);
+
+#endif // __GTA_VUVECTOR_H__

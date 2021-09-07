@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_FILEMGR_H__
+#define __GTA_FILEMGR_H__
 
 class CFileMgr
 {
@@ -21,3 +22,5 @@ public:
 	static int GetErrorReadWrite(int fd);
 	static char *GetRootDirName() { return ms_rootDirName; }
 };
+
+#endif // __GTA_FILEMGR_H__

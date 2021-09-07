@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_BASEMODELINFO_H__
+#define __GTA_BASEMODELINFO_H__
 
 struct CColModel;
 
@@ -72,3 +73,5 @@ public:
 	uint8 GetNum2dEffects() const { return m_num2dEffects; }
 	uint16 GetNumRefs() const { return m_refCount; }
 };
+
+#endif // __GTA_BASEMODELINFO_H__

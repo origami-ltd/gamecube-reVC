@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_SHOTINFO_H__
+#define __GTA_SHOTINFO_H__
 
 #include "WeaponType.h"
 
@@ -22,3 +23,5 @@ public:
 	static void Shutdown(void);
 	static void Update(void);
 };
+
+#endif // __GTA_SHOTINFO_H__

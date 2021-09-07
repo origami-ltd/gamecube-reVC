@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __GTA_WATERCREATURES_H__
+#define __GTA_WATERCREATURES_H__
 
 class CObject;
 
@@ -47,3 +48,5 @@ struct WaterCreatureProperties {
 	float fUnknown; //unused
 	float fWaterDepth;
 };
+
+#endif // __GTA_WATERCREATURES_H__
