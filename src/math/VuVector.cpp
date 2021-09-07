@@ -1,9 +1,24 @@
 #include "common.h"
-
 #include "VuVector.h"
 
-// TODO: move more stuff into here
-
+float
+CVuVector::MagnitudeSqr(void) const
+{
+#ifdef GTA_PS2
+	float ret;
+	__asm__ __volatile__("\n\
+		lwc1	$f2,0(%1)\n\
+		lwc1	$f3,0(%1)\n\
+		lwc1	$f4,0(%1)\n\
+		mula.s	$f2,$f2\n\
+		madda.s	$f3,$f3\n\
+		madd.s	%0,$f4,$f4\n\
+	": "=f"(ret) : "r" (this));
+	return ret;
+#else
+	return x*x + y*y + z*z;
+#endif
+}
 
 void TransformPoint(CVuVector &out, const CMatrix &mat, const CVuVector &in)
 {
@@ -43,7 +58,8 @@ void TransformPoint(CVuVector &out, const CMatrix &mat, const RwV3d &in)
 		vmaddaz.xyz	ACC,   vf04,vf01\n\
 		vmaddw.xyz	vf06,vf05,vf00\n\
 		sqc2    vf06,0x0(%0)\n\
-		": : "r" (&out) , "r" (&mat) ,"r" (&in): "memory");
+		": : "r" (&out) , "r" (&mat) ,"r" (&in)
+		 : "$8", "$9", "$10", "memory");
 #else
 	out = mat * in;
 #endif
@@ -51,7 +67,8 @@ void TransformPoint(CVuVector &out, const CMatrix &mat, const RwV3d &in)
 
 void TransformPoints(CVuVector *out, int n, const CMatrix &mat, const RwV3d *in, int stride)
 {
-#ifdef GTA_PS3
+#ifdef GTA_PS2
+if(n == 0) return;		// TODO(PS2): this shouldn't happen
 	__asm__ __volatile__("\n\
 		paddub	$3,%4,$0\n\
 		lqc2    vf02,0x0(%2)\n\
@@ -77,7 +94,8 @@ void TransformPoints(CVuVector *out, int n, const CMatrix &mat, const RwV3d *in,
 		addiu	%0,%0,0x10\n\
 		sqc2    vf06,-0x10(%0)\n\
 		bnez	%1,1b\n\
-		": : "r" (out) , "r" (n), "r" (&mat), "r" (in), "r" (stride): "memory");
+		": : "r" (out) , "r" (n), "r" (&mat), "r" (in), "r" (stride)
+		 : "$3", "$8", "$9", "$10", "memory");
 #else
 	while(n--){
 		*out = mat * *in;

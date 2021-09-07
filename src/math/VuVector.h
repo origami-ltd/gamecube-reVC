@@ -10,6 +10,8 @@ public:
 	CVuVector(float x, float y, float z, float w) : CVector(x, y, z), w(w) {}
 	CVuVector(const CVector &v) : CVector(v.x, v.y, v.z) {}
 	CVuVector(const RwV3d &v) : CVector(v) {}
+
+	float MagnitudeSqr(void) const;
 /*
 	void Normalise(void) {
 		float sq = MagnitudeSqr();

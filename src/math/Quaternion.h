@@ -1,55 +1,29 @@
 #ifndef __GTA_QUATERNION_H__
 #define __GTA_QUATERNION_H__
 
-// TODO: actually implement this
+#ifdef GTA_PS2
+class TYPEALIGN(16) CQuaternion
+#else
 class CQuaternion
+#endif
 {
 public:
 	float x, y, z, w;
 	CQuaternion(void) {}
 	CQuaternion(float x, float y, float z, float w) : x(x), y(y), z(z), w(w) {}
 
-	float Magnitude(void) const { return Sqrt(x*x + y*y + z*z + w*w); }
-	float MagnitudeSqr(void) const { return x*x + y*y + z*z + w*w; }
+//	float Magnitude(void) const { return Sqrt(x*x + y*y + z*z + w*w); }
+	float GetLengthSquared(void) const { return x*x + y*y + z*z + w*w; }
 	void Normalise(void);
 	void Multiply(const CQuaternion &q1, const CQuaternion &q2);
-	void Invert(void){	// Conjugate would have been a better name
-		x = -x;
-		y = -y;
-		z = -z;
-	}
+	CQuaternion &Invert(void);
+	void Scale(float s);
+	void Copy(const CQuaternion &q);
 
-	const CQuaternion &operator+=(CQuaternion const &right) {
-		x += right.x;
-		y += right.y;
-		z += right.z;
-		w += right.w;
-		return *this;
-	}
+	CQuaternion &operator=(CQuaternion const &rhs);
 
-	const CQuaternion &operator-=(CQuaternion const &right) {
-		x -= right.x;
-		y -= right.y;
-		z -= right.z;
-		w -= right.w;
-		return *this;
-	}
-
-	const CQuaternion &operator*=(float right) {
-		x *= right;
-		y *= right;
-		z *= right;
-		w *= right;
-		return *this;
-	}
-
-	const CQuaternion &operator/=(float right) {
-		x /= right;
-		y /= right;
-		z /= right;
-		w /= right;
-		return *this;
-	}
+	const CQuaternion &operator+=(CQuaternion const &right);
+	const CQuaternion &operator-=(CQuaternion const &right);
 
 	CQuaternion operator-() const {
 		return CQuaternion(-x, -y, -z, -w);

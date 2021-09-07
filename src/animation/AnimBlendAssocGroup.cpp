@@ -93,9 +93,9 @@ strcmpIgnoringDigits(const char *s1, const char *s2)
 		if(c2) s2++;
 		if(c1 == '\0' && c2 == '\0') return true;
 #ifndef ASCII_STRCMP
-		if(iswdigit(c1) && iswdigit(c2))
+		if(isdigit(c1) && isdigit(c2))
 #else
-		if(__ascii_iswdigit(c1) && __ascii_iswdigit(c2))
+		if(__ascii_isdigit(c1) && __ascii_isdigit(c2))
 #endif
 			continue;
 #ifndef ASCII_STRCMP

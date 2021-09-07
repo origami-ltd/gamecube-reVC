@@ -78,12 +78,13 @@ CMatrix::UpdateRW(void)
 	}
 }
 
-void
+CMatrix&
 CMatrix::operator=(CMatrix const &rhs)
 {
 	memcpy(this, &rhs, sizeof(f));
 	if (m_attachment)
 		UpdateRW();
+	return *this;
 }
 
 void
@@ -411,8 +412,40 @@ CMatrix::Rotate(float x, float y, float z)
 CMatrix &
 CMatrix::operator*=(CMatrix const &rhs)
 {
-	// TODO: VU0 code
+#ifdef GTA_PS2
+	// TODO(PS2) don't trash fields
+	__asm__ __volatile__("\n\
+		.set noreorder\n\
+		lqc2    vf01,0x00(%0)\n\
+		lqc2    vf02,0x10(%0)\n\
+		lqc2    vf03,0x20(%0)\n\
+		lqc2    vf04,0x30(%0)\n\
+		lqc2    vf05,0x00(%1)\n\
+		lqc2    vf06,0x10(%1)\n\
+		lqc2    vf07,0x20(%1)\n\
+		lqc2    vf08,0x30(%1)\n\
+		vmulax.xyz	ACC,vf01,vf05\n\
+		vmadday.xyz	ACC,vf02,vf05\n\
+		vmaddz.xyz	vf05,vf03,vf05\n\
+		vmulax.xyz	ACC,vf01,vf06\n\
+		vmadday.xyz	ACC,vf02,vf06\n\
+		vmaddz.xyz	vf06,vf03,vf06\n\
+		vmulax.xyz	ACC,vf01,vf07\n\
+		vmadday.xyz	ACC,vf02,vf07\n\
+		vmaddz.xyz	vf07,vf03,vf07\n\
+		vmulax.xyz	ACC,vf01,vf08\n\
+		vmadday.xyz	ACC,vf02,vf08\n\
+		vmaddaz.xyz	ACC,vf03,vf08\n\
+		vmaddw.xyz	vf08,vf04,vf00\n\
+		sqc2	vf05,0x00(%0)\n\
+		sqc2	vf06,0x10(%0)\n\
+		sqc2	vf07,0x20(%0)\n\
+		sqc2	vf08,0x30(%0)\n\
+		.set reorder\n\
+		": : "r" (this) , "r" (&rhs) : "memory");
+#else
 	*this = *this * rhs;
+#endif
 	return *this;
 }
 
@@ -432,8 +465,39 @@ CMatrix::Reorthogonalise(void)
 CMatrix
 operator*(const CMatrix &m1, const CMatrix &m2)
 {
-	// TODO: VU0 code
 	CMatrix out;
+#ifdef GTA_PS2
+	// TODO(PS2) don't trash fields
+	__asm__ __volatile__("\n\
+		.set noreorder\n\
+		lqc2    vf01,0x00(%1)\n\
+		lqc2    vf02,0x10(%1)\n\
+		lqc2    vf03,0x20(%1)\n\
+		lqc2    vf04,0x30(%1)\n\
+		lqc2    vf05,0x00(%2)\n\
+		lqc2    vf06,0x10(%2)\n\
+		lqc2    vf07,0x20(%2)\n\
+		lqc2    vf08,0x30(%2)\n\
+		vmulax.xyz	ACC,vf01,vf05\n\
+		vmadday.xyz	ACC,vf02,vf05\n\
+		vmaddz.xyz	vf05,vf03,vf05\n\
+		vmulax.xyz	ACC,vf01,vf06\n\
+		vmadday.xyz	ACC,vf02,vf06\n\
+		vmaddz.xyz	vf06,vf03,vf06\n\
+		vmulax.xyz	ACC,vf01,vf07\n\
+		vmadday.xyz	ACC,vf02,vf07\n\
+		vmaddz.xyz	vf07,vf03,vf07\n\
+		vmulax.xyz	ACC,vf01,vf08\n\
+		vmadday.xyz	ACC,vf02,vf08\n\
+		vmaddaz.xyz	ACC,vf03,vf08\n\
+		vmaddw.xyz	vf08,vf04,vf00\n\
+		sqc2	vf05,0x00(%0)\n\
+		sqc2	vf06,0x10(%0)\n\
+		sqc2	vf07,0x20(%0)\n\
+		sqc2	vf08,0x30(%0)\n\
+		.set reorder\n\
+		": : "r" (&out), "r" (&m1) , "r" (&m2) : "memory");
+#else
 	out.rx = m1.rx * m2.rx + m1.fx * m2.ry + m1.ux * m2.rz;
 	out.ry = m1.ry * m2.rx + m1.fy * m2.ry + m1.uy * m2.rz;
 	out.rz = m1.rz * m2.rx + m1.fz * m2.ry + m1.uz * m2.rz;
@@ -446,13 +510,47 @@ operator*(const CMatrix &m1, const CMatrix &m2)
 	out.px = m1.rx * m2.px + m1.fx * m2.py + m1.ux * m2.pz + m1.px;
 	out.py = m1.ry * m2.px + m1.fy * m2.py + m1.uy * m2.pz + m1.py;
 	out.pz = m1.rz * m2.px + m1.fz * m2.py + m1.uz * m2.pz + m1.pz;
+#endif
 	return out;
 }
 
 CMatrix &
 Invert(const CMatrix &src, CMatrix &dst)
 {
-	// TODO: VU0 code
+#ifdef GTA_PS2
+	// TODO(PS2) don't trash fields
+	__asm__ __volatile__("\n\
+		.set noreorder\n\
+		lq	$8,0x00(%0)\n\
+		lq	$9,0x10(%0)\n\
+		lq	$10,0x20(%0)\n\
+		lqc2	vf04,0x30(%0)\n\
+		vmove	vf05,vf04\n\
+		vsub.xyz	vf04,vf04,vf04\n\
+		vmove	vf09,vf04\n\
+		qmfc2	$11,vf04\n\
+		pextlw	$12,$9,$8\n\
+		pextuw	$13,$9,$8\n\
+		pextlw	$14,$11,$10\n\
+		pextuw	$15,$11,$10\n\
+		pcpyld	$8,$14,$12\n\
+		pcpyud	$9,$12,$14\n\
+		pcpyld	$10,$15,$13\n\
+		qmtc2	$8,vf06\n\
+		qmtc2	$9,vf07\n\
+		qmtc2	$10,vf08\n\
+		vmulax.xyz	ACC,vf06,vf05\n\
+		vmadday.xyz	ACC,vf07,vf05\n\
+		vmaddz.xyz	vf04,vf08,vf05\n\
+		vsub.xyz	vf04,vf09,vf04\n\
+		sq	$8,0x00(%1)\n\
+		sq	$9,0x10(%1)\n\
+		sq	$10,0x20(%1)\n\
+		sqc2	vf04,0x30(%1)\n\
+		.set reorder\n\
+		": : "r" (&src) , "r" (&dst)
+		 : "$8", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "memory");
+#else
 	dst.f[3][0] = dst.f[3][1] = dst.f[3][2] = 0.0f;
 
 	dst.f[0][0] = src.f[0][0];
@@ -483,7 +581,7 @@ Invert(const CMatrix &src, CMatrix &dst)
 	dst.f[3][0] = -dst.f[3][0];
 	dst.f[3][1] = -dst.f[3][1];
 	dst.f[3][2] = -dst.f[3][2];
-
+#endif
 	return dst;
 }
 

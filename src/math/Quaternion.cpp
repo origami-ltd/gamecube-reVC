@@ -1,26 +1,133 @@
 #include "common.h"
 #include "Quaternion.h"
 
+CQuaternion&
+CQuaternion::operator=(CQuaternion const &rhs)
+{
+#ifdef GTA_PS2
+	__asm__ __volatile__("\n\
+		lq	$8,(%1)\n\
+		sq	$8,(%0)\n\
+		": : "r" (this), "r" (&rhs)
+		 : "$8", "memory");
+#else
+	x = rhs.x;
+	y = rhs.y;
+	z = rhs.z;
+	w = rhs.w;
+#endif
+	return *this;
+}
+
+const CQuaternion &
+CQuaternion::operator+=(CQuaternion const &right)
+{
+#ifdef GTA_PS2
+	__asm__ __volatile__("\n\
+		lqc2	vf01,(%0)\n\
+		lqc2	vf02,(%1)\n\
+		vadd	vf01,vf01,vf02\n\
+		sqc2	vf01,(%0)\n\
+		": : "r" (this), "r" (&right)
+		 : "memory");
+#else
+	x += right.x;
+	y += right.y;
+	z += right.z;
+	w += right.w;
+#endif
+	return *this;
+}
+
+const CQuaternion &
+CQuaternion::operator-=(CQuaternion const &right)
+{
+#ifdef GTA_PS2
+	__asm__ __volatile__("\n\
+		lqc2	vf01,(%0)\n\
+		lqc2	vf02,(%1)\n\
+		vsub	vf01,vf01,vf02\n\
+		sqc2	vf01,(%0)\n\
+		": : "r" (this), "r" (&right)
+		 : "memory");
+#else
+	x -= right.x;
+	y -= right.y;
+	z -= right.z;
+	w -= right.w;
+#endif
+	return *this;
+}
+
+void
+CQuaternion::Scale(float s)
+{
+#ifdef GTA_PS2
+	__asm__ __volatile__("\n\
+		lqc2	vf01,(%0)\n\
+		mfc1	$8,%1\n\
+		qmtc2	$8,vf02\n\
+		vmulx	vf01,vf01,vf02\n\
+		sqc2	vf01,(%0)\n\
+		": : "r" (this), "f" (s)
+		 : "$8", "memory");
+#else
+	x *= s;
+	y *= s;
+	z *= s;
+	w *= s;
+#endif
+}
+
+void
+CQuaternion::Copy(const CQuaternion &q)
+{
+#ifdef GTA_PS2
+	__asm__ __volatile__("\n\
+		lq	$8,(%1)\n\
+		sq	$8,(%0)\n\
+		": : "r" (this), "r" (&q)
+		 : "$8", "memory");
+#else
+	x = q.x;
+	y = q.y;
+	z = q.z;
+	w = q.w;
+#endif
+}
+
+CQuaternion&
+CQuaternion::Invert(void){
+#ifdef GTA_PS2
+	__asm__ __volatile__("\n\
+		lqc2	vf01,(%0)\n\
+		vsub.xyz	vf01,vf00,vf01\n\
+		sqc2	vf01,(%0)\n\
+		": : "r" (this)
+		 : "memory");
+#else
+	x = -x;
+	y = -y;
+	z = -z;
+#endif
+	return *this;
+}
+
 void
 CQuaternion::Normalise(void)
 {
-	float sq = MagnitudeSqr();
+	float sq = GetLengthSquared();
 	if (sq == 0.0f)
 		w = 1.0f;
-	else {
-		float invsqrt = RecipSqrt(sq);
-		x *= invsqrt;
-		y *= invsqrt;
-		z *= invsqrt;
-		w *= invsqrt;
-	}
+	else
+		Scale(RecipSqrt(sq));
 }
 
 void
 CQuaternion::Slerp(const CQuaternion &q1, const CQuaternion &q2, float theta, float invSin, float t)
 {
 	if (theta == 0.0f)
-		*this = q2;
+		Copy(q2);
 	else {
 		float w1, w2;
 		if (theta > PI / 2) {
@@ -31,8 +138,20 @@ CQuaternion::Slerp(const CQuaternion &q1, const CQuaternion &q2, float theta, fl
 			w1 = Sin((1.0f - t) * theta) * invSin;
 			w2 = Sin(t * theta) * invSin;
 		}
-		// TODO: VU0 code
+#ifdef GTA_PS2
+	__asm__ __volatile__("\n\
+		lqc2	vf01,(%1)\n\
+		lqc2	vf02,(%2)\n\
+		qmtc2	%4,vf03\n\
+		qmtc2	%3,vf04\n\
+		vmulax	ACC,vf01,vf04\n\
+		vmaddx	vf01,vf02,vf03\n\
+		sqc2	vf01,(%0)\n\
+		": : "r" (this), "r" (&q1), "r" (&q2), "r" (w1), "r" (w2)
+		 : "memory");
+#else
 		*this = w1 * q1 + w2 * q2;
+#endif
 	}
 }
 

@@ -1,10 +1,14 @@
 #ifndef __GTA_MATRIX_H__
 #define __GTA_MATRIX_H__
 
+#ifdef GTA_PS2
+class TYPEALIGN(16) CMatrix
+#else
 class CMatrix
+#endif
 {
 public:
-#ifdef GTA_PS2
+#ifdef GTA_PS2_notyet	// disabled right now because of VU0 code from III
 	union
 	{
 		float f[4][4];
@@ -49,7 +53,7 @@ public:
 	void Detach(void);
 	void Update(void);
 	void UpdateRW(void);
-	void operator=(CMatrix const &rhs);
+	CMatrix &operator=(CMatrix const &rhs);
 	CMatrix &operator+=(CMatrix const &rhs);
 	CMatrix &operator*=(CMatrix const &rhs);
 

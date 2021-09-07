@@ -38,7 +38,7 @@ CAnimBlendNode::Update(CVector &trans, CQuaternion &rot, float weight)
 		}
 		if(sequence->type & CAnimBlendSequence::KF_ROT){
 			rot.Slerp(kfB->rotation, kfA->rotation, theta, invSin, t);
-			rot *= blend;
+			rot.Scale(blend);
 		}
 	}
 
@@ -76,7 +76,7 @@ CAnimBlendNode::UpdateCompressed(CVector &trans, CQuaternion &rot, float weight)
 			kfA->GetRotation(&rotA);
 			kfB->GetRotation(&rotB);
 			rot.Slerp(rotB, rotA, theta, invSin, t);
-			rot *= blend;
+			rot.Scale(blend);
 		}
 	}
 
@@ -237,8 +237,8 @@ CAnimBlendNode::CalcDeltasCompressed(void)
 	kfB->GetRotation(&rotB);
 	float cos = DotProduct(rotA, rotB);
 	if(cos < 0.0f){
-		rotB *= -1.0f;
-		kfB->SetRotation(rotB);
+		rotB = -rotB;
+		kfB->SetRotation(-rotB);
 	}
 	cos = DotProduct(rotA, rotB);
 	if(cos > 1.0f)
