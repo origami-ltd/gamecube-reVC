@@ -1444,6 +1444,7 @@ cSampleManager::Terminate(void)
 	{
 		AIL_mem_free_lock(gPlayerTalkData);
 		gPlayerTalkData = 0;
+		gPlayerTalkSfx = UINT32_MAX;
 	}
 #endif
 	
