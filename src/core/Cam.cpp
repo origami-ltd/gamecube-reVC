@@ -1342,6 +1342,7 @@ int16 nFadeControlThreshhold = 45;
 float fDefaultAlphaOrient = -0.22f;
 float fMouseAvoidGeomReturnRate = 0.92f;
 
+#ifdef GTA_PC_CONTROLS
 void
 CCam::Process_FollowPedWithMouse(const CVector &CameraTarget, float TargetOrientation, float, float)
 {
@@ -1535,6 +1536,7 @@ CCam::Process_FollowPedWithMouse(const CVector &CameraTarget, float TargetOrient
 		TheCamera.pTargetEntity->GetMatrix().UpdateRW();
 	}
 }
+#endif
 
 float fBillsBetaOffset;	// made up name, actually in CCam
 
@@ -2240,22 +2242,28 @@ CCam::Process_Rocket(const CVector &CameraTarget, float, float, float)
 	Source.y -= BackOffset*Sin(m_fInitialPlayerOrientation);
 
 	// Look around
+	float LookLeftRight, LookUpDown;
+#ifdef GTA_PC_CONTROLS
 	bool UseMouse = false;
 	float MouseX = CPad::GetPad(0)->GetMouseX();
 	float MouseY = CPad::GetPad(0)->GetMouseY();
-	float LookLeftRight, LookUpDown;
 	if(MouseX != 0.0f || MouseY != 0.0f){
 		UseMouse = true;
 		LookLeftRight = -3.0f*MouseX;
 		LookUpDown = 4.0f*MouseY;
-	}else{
+	}else
+#endif
+	{
 		LookLeftRight = -CPad::GetPad(0)->SniperModeLookLeftRight();
 		LookUpDown = CPad::GetPad(0)->SniperModeLookUpDown();
 	}
+#ifdef GTA_PC_CONTROLS
 	if(UseMouse){
 		Beta += TheCamera.m_fMouseAccelHorzntl * LookLeftRight * FOV/80.0f;
 		Alpha += TheCamera.m_fMouseAccelVertical * LookUpDown * FOV/80.0f;
-	}else{
+	}else
+#endif
+	{
 		float xdir = LookLeftRight < 0.0f ? -1.0f : 1.0f;
 		float ydir = LookUpDown < 0.0f ? -1.0f : 1.0f;
 		Beta += SQR(LookLeftRight/100.0f)*xdir*0.8f/14.0f * FOV/80.0f * CTimer::GetTimeStep();
@@ -2342,22 +2350,28 @@ CCam::Process_M16_1stPerson(const CVector &CameraTarget, float, float, float)
 	}
 
 	// Look around
+	float LookLeftRight, LookUpDown;
+#ifdef GTA_PC_CONTROLS
 	bool UseMouse = false;
 	float MouseX = CPad::GetPad(0)->GetMouseX();
 	float MouseY = CPad::GetPad(0)->GetMouseY();
-	float LookLeftRight, LookUpDown;
 	if(MouseX != 0.0f || MouseY != 0.0f){
 		UseMouse = true;
 		LookLeftRight = -3.0f*MouseX;
 		LookUpDown = 4.0f*MouseY;
-	}else{
+	}else
+#endif
+	{
 		LookLeftRight = -CPad::GetPad(0)->SniperModeLookLeftRight();
 		LookUpDown = CPad::GetPad(0)->SniperModeLookUpDown();
 	}
+#ifdef GTA_PC_CONTROLS
 	if(UseMouse){
 		Beta += TheCamera.m_fMouseAccelHorzntl * LookLeftRight * FOV/80.0f;
 		Alpha += TheCamera.m_fMouseAccelVertical * LookUpDown * FOV/80.0f;
-	}else if(Mode == MODE_HELICANNON_1STPERSON){
+	}else
+#endif
+	if(Mode == MODE_HELICANNON_1STPERSON){
 		LookLeftRight /= 128.0f;
 		LookUpDown /= 128.0f;
 		Beta += LookLeftRight*Abs(LookLeftRight)*0.56f/14.0f * FOV/80.0f * CTimer::GetTimeStep();
@@ -2753,22 +2767,28 @@ CCam::Process_1rstPersonPedOnPC(const CVector&, float TargetOrientation, float, 
 		// Source - MidPos;
 
 		// Look around
+		float LookLeftRight, LookUpDown;
+#ifdef GTA_PC_CONTROLS
 		bool UseMouse = false;
 		float MouseX = CPad::GetPad(0)->GetMouseX();
 		float MouseY = CPad::GetPad(0)->GetMouseY();
-		float LookLeftRight, LookUpDown;
 		if(MouseX != 0.0f || MouseY != 0.0f){
 			UseMouse = true;
 			LookLeftRight = -3.0f*MouseX;
 			LookUpDown = 4.0f*MouseY;
-		}else{
+		}else
+#endif
+		{
 			LookLeftRight = -CPad::GetPad(0)->LookAroundLeftRight();
 			LookUpDown = CPad::GetPad(0)->LookAroundUpDown();
 		}
+#ifdef GTA_PC_CONTROLS
 		if(UseMouse){
 			Beta += TheCamera.m_fMouseAccelHorzntl * LookLeftRight * FOV/80.0f;
 			Alpha += TheCamera.m_fMouseAccelVertical * LookUpDown * FOV/80.0f;
-		}else{
+		}else
+#endif
+		{
 			float xdir = LookLeftRight < 0.0f ? -1.0f : 1.0f;
 			float ydir = LookUpDown < 0.0f ? -1.0f : 1.0f;
 			Beta += SQR(LookLeftRight/100.0f)*xdir*0.8f/14.0f * FOV/80.0f * CTimer::GetTimeStep();
@@ -2892,22 +2912,28 @@ CCam::Process_Sniper(const CVector &CameraTarget, float TargetOrientation, float
 	}
 
 	// Look around
+	float LookLeftRight, LookUpDown;
+#ifdef GTA_PC_CONTROLS
 	bool UseMouse = false;
 	float MouseX = CPad::GetPad(0)->GetMouseX();
 	float MouseY = CPad::GetPad(0)->GetMouseY();
-	float LookLeftRight, LookUpDown;
 	if(MouseX != 0.0f || MouseY != 0.0f){
 		UseMouse = true;
 		LookLeftRight = -3.0f*MouseX;
 		LookUpDown = 4.0f*MouseY;
-	}else{
+	}else
+#endif
+	{
 		LookLeftRight = -CPad::GetPad(0)->SniperModeLookLeftRight();
 		LookUpDown = CPad::GetPad(0)->SniperModeLookUpDown();
 	}
+#ifdef GTA_PC_CONTROLS
 	if(UseMouse){
 		Beta += TheCamera.m_fMouseAccelHorzntl * LookLeftRight * FOV/80.0f;
 		Alpha += TheCamera.m_fMouseAccelVertical * LookUpDown * FOV/80.0f;
-	}else{
+	}else
+#endif
+	{
 		float xdir = LookLeftRight < 0.0f ? -1.0f : 1.0f;
 		float ydir = LookUpDown < 0.0f ? -1.0f : 1.0f;
 		Beta += SQR(LookLeftRight/100.0f)*xdir*0.8f/14.0f * FOV/80.0f * CTimer::GetTimeStep();
@@ -2922,6 +2948,7 @@ CCam::Process_Sniper(const CVector &CameraTarget, float TargetOrientation, float
 	TargetCoors.y = 3.0f * Cos(Alpha) * Sin(Beta) + Source.y;
 	TargetCoors.z = 3.0f * Sin(Alpha) + Source.z;
 
+#ifdef GTA_PC_CONTROLS
 	UseMouse = false;
 	int ZoomInButton = ControlsManager.GetMouseButtonAssociatedWithAction(PED_SNIPER_ZOOM_IN);
 	int ZoomOutButton = ControlsManager.GetMouseButtonAssociatedWithAction(PED_SNIPER_ZOOM_OUT);
@@ -2938,6 +2965,9 @@ CCam::Process_Sniper(const CVector &CameraTarget, float TargetOrientation, float
 		}
 	}
 	if((CPad::GetPad(0)->SniperZoomIn() || CPad::GetPad(0)->SniperZoomOut()) && !UseMouse){
+#else
+	if((CPad::GetPad(0)->SniperZoomIn() || CPad::GetPad(0)->SniperZoomOut())){
+#endif
 		if(CPad::GetPad(0)->SniperZoomOut()){
 			FOV *= (255.0f*CTimer::GetTimeStep() + 10000.0f) / 10000.0f;
 			TargetFOV = FOV;
@@ -3992,10 +4022,17 @@ CCam::Process_Debug(const CVector&, float, float, float)
 	if(Alpha > DEGTORAD(89.5f)) Alpha = DEGTORAD(89.5f);
 	else if(Alpha < DEGTORAD(-89.5f)) Alpha = DEGTORAD(-89.5f);
 
+#ifdef GTA_PC_CONTROLS
 	if(CPad::GetPad(1)->GetSquare() || CPad::GetPad(1)->GetLeftMouse())
 		Speed += 0.1f;
 	else if(CPad::GetPad(1)->GetCross() || CPad::GetPad(1)->GetRightMouse())
 		Speed -= 0.1f;
+#else
+	if(CPad::GetPad(1)->GetSquare())
+		Speed += 0.1f;
+	else if(CPad::GetPad(1)->GetCross())
+		Speed -= 0.1f;
+#endif
 	else
 		Speed = 0.0f;
 	if(Speed > 70.0f) Speed = 70.0f;
@@ -4072,10 +4109,17 @@ CCam::Process_Editor(const CVector&, float, float, float)
 	if(Alpha > DEGTORAD(89.5f)) Alpha = DEGTORAD(89.5f);
 	else if(Alpha < DEGTORAD(-89.5f)) Alpha = DEGTORAD(-89.5f);
 
+#ifdef GTA_PC_CONTROLS
 	if(CPad::GetPad(1)->GetSquare() || CPad::GetPad(1)->GetLeftMouse())
 		Speed += 0.1f;
 	else if(CPad::GetPad(1)->GetCross() || CPad::GetPad(1)->GetRightMouse())
 		Speed -= 0.1f;
+#else
+	if(CPad::GetPad(1)->GetSquare())
+		Speed += 0.1f;
+	else if(CPad::GetPad(1)->GetCross())
+		Speed -= 0.1f;
+#endif
 	else
 		Speed = 0.0f;
 	if(Speed > 70.0f) Speed = 70.0f;
@@ -4629,11 +4673,11 @@ CCam::Process_FollowPed_Rotation(const CVector &CameraTarget, float TargetOrient
 	while(Alpha < -PI) Alpha += 2.0f*PI;
 
 	// Look around
+	float LookLeftRight, LookUpDown;
 	bool UseMouse = false;
+/*
 	float MouseX = CPad::GetPad(0)->GetMouseX();
 	float MouseY = CPad::GetPad(0)->GetMouseY();
-	float LookLeftRight, LookUpDown;
-/*
 	if((MouseX != 0.0f || MouseY != 0.0f) && !CPad::GetPad(0)->ArePlayerControlsDisabled()){
 		UseMouse = true;
 		LookLeftRight = -2.5f*MouseX;
@@ -5102,6 +5146,7 @@ CCam::Process_FollowCar_SA(const CVector& CameraTarget, float TargetOrientation,
 
 	bool mouseChangesBeta = false;
 
+#ifdef GTA_PC_CONTROLS
 	// FIX: Disable mouse movement in drive-by, it's buggy. Original SA bug.
 	if (/*bFreeMouseCam &&*/ CCamera::m_bUseMouse3rdPerson && !pad->ArePlayerControlsDisabled() && nextDirectionIsForward) {
 		float mouseY = pad->GetMouseY() * 2.0f;
@@ -5129,6 +5174,7 @@ CCam::Process_FollowCar_SA(const CVector& CameraTarget, float TargetOrientation,
 			mouseChangesBeta = true;
 		}
 	}
+#endif
 
 	if (correctAlpha) {
 		if (nPreviousMode != MODE_CAM_ON_A_STRING)

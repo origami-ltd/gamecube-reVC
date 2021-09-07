@@ -541,9 +541,12 @@ CCutsceneMgr::Update(void)
 		if (CGeneral::faststricmp(ms_cutsceneName, "finale") && TheCamera.Cams[TheCamera.ActiveCam].Mode == CCam::MODE_FLYBY && ms_cutsceneLoadStatus == CUTSCENE_LOADING_0) {
 			if (CPad::GetPad(0)->GetCrossJustDown()
 				|| (CGame::playingIntro && CPad::GetPad(0)->GetStartJustDown())
+#ifdef GTA_PC_CONTROLS
 				|| CPad::GetPad(0)->GetLeftMouseJustDown()
 				|| CPad::GetPad(0)->GetEnterJustDown()
-				|| CPad::GetPad(0)->GetCharJustDown(' '))
+				|| CPad::GetPad(0)->GetCharJustDown(' ')
+#endif
+			)
 					FinishCutscene();
 		}
 }

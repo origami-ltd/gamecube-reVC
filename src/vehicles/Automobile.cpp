@@ -3103,6 +3103,7 @@ CAutomobile::ProcessControlInputs(uint8 pad)
 		bIsHandbrakeOn = true;
 
 	// Steer left/right
+#ifdef GTA_PC_CONTROLS
 	if(CCamera::m_bUseMouse3rdPerson && !CVehicle::m_bDisableMouseSteering){
 		if(CPad::GetPad(pad)->GetMouseX() != 0.0f){
 			m_fSteerInput += fMouseSteerSens*CPad::GetPad(pad)->GetMouseX();
@@ -3115,7 +3116,9 @@ CAutomobile::ProcessControlInputs(uint8 pad)
 				0.2f*CTimer::GetTimeStep();
 			nLastControlInput = 0;
 		}
-	}else{
+	}else
+#endif
+	{
 		m_fSteerInput += (-CPad::GetPad(pad)->GetSteeringLeftRight()/128.0f - m_fSteerInput)*
 			0.2f*CTimer::GetTimeStep();
 		nLastControlInput = 0;
