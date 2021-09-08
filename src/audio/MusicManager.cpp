@@ -21,6 +21,10 @@
 #include "DMAudio.h"
 #include "GenericGameStorage.h"
 
+#ifdef GTA_PS2
+#include <libcdvd.h>
+#endif
+
 #if !defined FIX_BUGS && (defined RADIO_SCROLL_TO_PREV_STATION || defined RADIO_OFF_TEXT)
 static_assert(false, "R*'s radio implementation is quite buggy, RADIO_SCROLL_TO_PREV_STATION and RADIO_OFF_TEXT won't work without FIX_BUGS");
 #endif
@@ -130,6 +134,27 @@ cMusicManager::SetStartingTrackPositions(bool8 isNewGameTimer)
 	int pos;
 
 	if (IsInitialised()) {
+#ifdef GTA_PS2
+		sceCdCLOCK rtc;
+		if(sceCdReadClock(&rtc) == 1){
+			if(rtc.second == 0)
+				rtc.second = AudioManager.m_anRandomTable[0];
+			if(rtc.minute == 0)
+				rtc.minute = AudioManager.m_anRandomTable[1];
+			if(rtc.hour == 0)
+				rtc.hour = AudioManager.m_anRandomTable[2];
+			if(rtc.day == 0)
+				rtc.day = AudioManager.m_anRandomTable[3];
+			if(rtc.month == 0)
+				rtc.month = AudioManager.m_anRandomTable[4];
+			if(rtc.year == 0)
+				rtc.year = AudioManager.m_anRandomTable[0];
+			pos = rtc.year * rtc.month * rtc.day * rtc.hour *
+				rtc.minute * rtc.minute *
+				rtc.second * rtc.second;
+		}else
+			pos = AudioManager.m_anRandomTable[0];
+#else
 		time_t timevalue = time(0);
 		if (timevalue == -1) {
 			pos = AudioManager.m_anRandomTable[0];
@@ -158,6 +183,7 @@ cMusicManager::SetStartingTrackPositions(bool8 isNewGameTimer)
 				* pTm->tm_min * pTm->tm_min
 				* pTm->tm_sec * pTm->tm_sec * pTm->tm_sec * pTm->tm_sec;
 		}
+#endif
 
 		for (int i = 0; i < TOTAL_STREAMED_SOUNDS; i++) {
 			m_aTracks[i].m_nLength = SampleManager.GetStreamedFileLength(i);

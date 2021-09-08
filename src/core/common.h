@@ -371,7 +371,7 @@ __inline__ void TRACE(char *f, ...) { } // this is re3 only, and so the function
 #endif
 #define ASSERT assert
 
-#ifdef __MWERKS__
+#if defined(__MWERKS__) || defined(GTA_PS2)
 #define static_assert(bool_constexpr, message)
 #endif
 
