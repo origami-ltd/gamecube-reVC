@@ -46,15 +46,19 @@ RwTextureGtaStreamRead(RwStream *stream)
 	if(!RwStreamFindChunk(stream, rwID_TEXTURENATIVE, &size, &version))
 		return nil;
 
+#ifdef GTA_PC
 	float preloadTime = (float)CTimer::GetCurrentTimeInCycles() / (float)CTimer::GetCyclesPerMillisecond();
+#endif
 
 	if(!READNATIVE(stream, &tex, size))
 		return nil;
 
+#ifdef GTA_PC
 	if (gGameState == GS_INIT_PLAYING_GAME) {
 		texLoadTime = (texNumLoaded * texLoadTime + (float)CTimer::GetCurrentTimeInCycles() / (float)CTimer::GetCyclesPerMillisecond() - preloadTime) / (float)(texNumLoaded+1);
 		texNumLoaded++;
 	}
+#endif
 
 #ifdef ANISOTROPIC_FILTERING
 	if(tex && RpAnisotGetMaxSupportedMaxAnisotropy() > 1)	// BUG? this was RpAnisotTextureGetMaxAnisotropy, but that doesn't make much sense

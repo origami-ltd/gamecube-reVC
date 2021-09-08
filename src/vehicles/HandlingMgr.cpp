@@ -165,8 +165,13 @@ cHandlingDataMgr::LoadHandlingData(void)
 		while(*end != '\n') end++;
 
 		// get line
-		strncpy(line, start, end - start);
-		line[end - start] = '\0';
+		int32 lineLength = end - start;
+#ifdef GTA_PS2
+		// CRs are left untouched. we assume every line ends in one
+		lineLength--;
+#endif
+		strncpy(line, start, lineLength);
+		line[lineLength] = '\0';
 		start = end+1;
 		end = start+1;
 

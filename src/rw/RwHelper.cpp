@@ -89,7 +89,7 @@ DefinedState(void)
 	rw::SetRenderState(rw::ALPHATESTREF, 3);
 
 	rw::SetRenderState(rw::GSALPHATEST, gPS2alphaTest);
-#else
+#elif defined(GTA_PC)
 	// D3D stuff
 	RwD3D8SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
 	RwD3D8SetRenderState(D3DRS_ALPHAREF, 2);

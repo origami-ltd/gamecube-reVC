@@ -39,7 +39,15 @@ CText::Load(void)
 	CFileMgr::SetDir("TEXT");
 	switch(FrontEndMenuManager.m_PrefsLanguage){
 	case CMenuManager::LANGUAGE_AMERICAN:
+#ifdef GTA_PS2
+#ifdef GTA_PAL
+		sprintf(filename, "ENGLISH.GXT");
+#else
 		sprintf(filename, "AMERICAN.GXT");
+#endif
+#else
+		sprintf(filename, "AMERICAN.GXT");
+#endif
 		break;
 	case CMenuManager::LANGUAGE_FRENCH:
 		sprintf(filename, "FRENCH.GXT");

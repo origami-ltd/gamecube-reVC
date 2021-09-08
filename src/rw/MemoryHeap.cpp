@@ -5,6 +5,7 @@
 #include "ModelInfo.h"
 #include "Streaming.h"
 #include "FileLoader.h"
+#include "Collision.h"
 #include "MemoryHeap.h"
 
 // TODO(MIAMI)
@@ -41,6 +42,7 @@ CMemoryHeap::Init(uint32 total)
 	m_unkMemId = -1;
 
 	uint8 *mem = (uint8*)malloc(total);
+	assert(mem);
 	assert(((uintptr)mem & 0xF) == 0);
 	m_start = (HeapBlockDesc*)mem;
 	m_end = (HeapBlockDesc*)(mem + total - sizeof(HeapBlockDesc));
@@ -111,7 +113,7 @@ CMemoryHeap::Malloc(uint32 size)
 	// See if we can allocate from one of the fixed-size lists
 	for(int i = 0; i < NUM_FIXED_MEMBLOCKS; i++){
 		CommonSize *list = &m_fixedSize[i];
-		if(m_fixedSize[i].m_size == size){
+		if(list->m_size == size){
 			HeapBlockDesc *block = list->Malloc();
 			if(block){
 				RegisterMalloc(block);

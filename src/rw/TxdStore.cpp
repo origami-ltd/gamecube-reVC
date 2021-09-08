@@ -143,7 +143,9 @@ CTxdStore::LoadTxd(int slot, const char *filename)
 	bool ret;
 
 	ret = false;
+#ifdef GTA_PC
 	_rwD3D8TexDictionaryEnableRasterFormatConversion(true);
+#endif
 	do
 		stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, filename);
 	while(stream == nil);

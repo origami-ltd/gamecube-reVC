@@ -63,7 +63,7 @@ int32 CRenderer::ms_nNoOfVisibleBuildings;
 CEntity *CRenderer::ms_aVisibleBuildingPtrs[NUMVISIBLEENTITIES];
 #endif
 
-CVector CRenderer::ms_vecCameraPosition;
+CVUVECTOR CRenderer::ms_vecCameraPosition;
 CVehicle *CRenderer::m_pFirstPersonVehicle;
 bool CRenderer::m_loadingPriority;
 float CRenderer::ms_lodDistScale = 1.2f;
