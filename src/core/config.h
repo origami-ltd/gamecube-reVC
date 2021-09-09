@@ -189,6 +189,7 @@ enum Config {
 #	define GTA_SCENE_EDIT
 #	define PC_MENU
 #	define PC_WATER
+#	define GTA_PC_CONTROLS	// enables keyboard and mouse. currently GTA_PC and a few other defines will not work without this
 #elif defined GTA_XBOX
 #elif defined GTA_MOBILE
 #	define MISSION_REPLAY
@@ -351,9 +352,6 @@ enum Config {
 #define REGISTER_START_BUTTON
 #define BIND_VEHICLE_FIREWEAPON // Adds ability to rebind fire key for 'in vehicle' controls
 #define BUTTON_ICONS // use textures to show controller buttons
-#ifdef GTA_PC
-	#define GTA_PC_CONTROLS	// enables keyboard and mouse. currently GTA_PC and a few other defines will not work without this
-#endif
 
 // Hud, frontend and radar
 #define PC_MENU
