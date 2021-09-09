@@ -3,8 +3,6 @@
 #include "common.h"
 
 #include "CdStream.h"
-#include "rwcore.h"
-#include "RwHelper.h"
 #include "MemoryMgr.h"
 
 struct CdReadInfo

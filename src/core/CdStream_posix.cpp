@@ -1,5 +1,6 @@
 #ifndef _WIN32
 #include "common.h"
+#ifdef GTA_PC
 #include "crossplatform.h"
 #include <signal.h>
 #include <pthread.h>
@@ -20,7 +21,6 @@
 #endif
 
 #include "CdStream.h"
-#include "rwcore.h"
 #include "MemoryMgr.h"
 
 #define CDDEBUG(f, ...)   debug ("%s: " f "\n", "cdvd_stream", ## __VA_ARGS__)
@@ -601,4 +601,5 @@ CdStreamGetNumImages(void)
 {
 	return gNumImages;
 }
+#endif
 #endif
