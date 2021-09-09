@@ -1214,8 +1214,10 @@ cAudioManager::ProcessActiveQueues()
 							SampleManager.SetChannel3DPosition(j, position.x, position.y, position.z);
 							SampleManager.SetChannel3DDistances(j, sample.m_MaxDistance, 0.25f * sample.m_MaxDistance);
 #else
-							sample.m_nPan = ComputePan(sample.m_fDistance, &position);
-							SampleManager.SetChannelPan(j, sample.m_nPan);
+							sample.m_nPan = ComputePan(sample.m_MaxDistance, &position);
+							if (sample.m_nPan != m_asActiveSamples[j].m_nPan)
+								m_asActiveSamples[j].m_nPan = Clamp2((int8)sample.m_nPan, (int8)m_asActiveSamples[j].m_nPan, 10);
+							SampleManager.SetChannelPan(j, m_asActiveSamples[j].m_nPan);
 #endif
 						}
 #if !defined(GTA_PS2) || defined(AUDIO_REVERB)
@@ -1261,7 +1263,7 @@ cAudioManager::ProcessActiveQueues()
 						if (!m_asActiveSamples[k].m_bIs2D) {
 							TranslateEntity(&m_asActiveSamples[k].m_vecPos, &position);
 #ifndef EXTERNAL_3D_SOUND
-							m_asActiveSamples[j].m_nPan = ComputePan(m_asActiveSamples[j].m_fDistance, &position);
+							m_asActiveSamples[j].m_nPan = ComputePan(m_asActiveSamples[j].m_MaxDistance, &position);
 #endif
 						}
 						emittingVol = m_bDoubleVolume ? 2 * Min(63, m_asActiveSamples[j].WORKING_VOLUME_FIELD) : m_asActiveSamples[j].WORKING_VOLUME_FIELD;
