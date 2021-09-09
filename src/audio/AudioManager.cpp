@@ -11,6 +11,13 @@
 #include "Camera.h"
 #include "World.h"
 #include "ZoneCull.h"
+#include "debugmenu.h"
+
+#ifdef DEBUGMENU
+SETTWEAKPATH("Audio");
+TWEAKBOOLN(AudioManager.m_bIsSurround, "Surround/Reverb");
+TWEAKBOOLN(AudioManager.m_bDoubleVolume, "Double volume");
+#endif
 
 cAudioManager AudioManager;
 
@@ -583,7 +590,7 @@ cAudioManager::ServiceSoundEffects()
 	AdjustSamplesVolume();
 #endif
 	ProcessActiveQueues();
-#ifdef AUDIO_OAL
+#ifndef AUDIO_MSS
 	SampleManager.Service();
 #endif
 	for (int32 i = 0; i < m_sAudioScriptObjectManager.m_nScriptObjectEntityTotal; i++) {

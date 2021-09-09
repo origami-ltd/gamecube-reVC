@@ -7,11 +7,15 @@
 #define MAX_FREQ DIGITALRATE
 
 struct tSample {
+#ifndef GTA_PS2
 	uint32 nOffset;
+#endif
 	uint32 nSize;
 	uint32 nFrequency;
+#ifndef GTA_PS2
 	uint32 nLoopStart;
 	int32 nLoopEnd;
+#endif
 };
 
 #ifdef GTA_PS2
@@ -149,15 +153,19 @@ class cSampleManager
 	uint8   m_nEffectsFadeVolume;
 	uint8   m_nMusicFadeVolume;
 	bool8   m_nMonoMode;
+#ifdef GTA_PC
 	char    m_szCDRomRootPath[80];
 	bool8   m_bInitialised;
 	uint8   m_nNumberOfProviders;
 	char   *m_aAudioProviders[MAXPROVIDERS];
+#endif
 	tSample m_aSamples[TOTAL_AUDIO_SAMPLES];
+#ifdef GTA_PC
 	char    m_MiscomPath[260];
 	char    m_WavFilesPath[260];
 	char    m_MP3FilesPath[188];
-	void   *m_aChannels[18];
+	void   *m_aChannels[18]; // what's this?
+#endif
 
 public:
 	
@@ -250,7 +258,7 @@ public:
 	int32 GetStreamedFileLength                                                (uint8 nStream = 0);
 	bool8 IsStreamPlaying                                                      (uint8 nStream = 0);
 	void  SetStreamedFileLoopFlag                             (bool8 nLoopFlag, uint8 nStream = 0);
-#ifdef AUDIO_OAL
+#ifndef AUDIO_MSS
 	void  Service(void);
 #endif
 	bool8 InitialiseSampleBanks(void);

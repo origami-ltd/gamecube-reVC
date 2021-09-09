@@ -383,6 +383,11 @@ cSampleManager::IsStreamPlaying(uint8 nStream)
 	return FALSE;
 }
 
+void
+cSampleManager::Service(void)
+{
+}
+
 bool8
 cSampleManager::InitialiseSampleBanks(void)
 {

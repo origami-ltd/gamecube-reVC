@@ -246,19 +246,14 @@ void
 cAudioManager::ProcessReverb()
 {
 #ifdef AUDIO_REVERB
-#ifdef FIX_BUGS
-	const uint32 numChannels = NUM_CHANNELS_GENERIC;
-#else
-	const uint32 numChannels = NUM_CHANNELS_GENERIC+1;
-#endif
-
 	if (SampleManager.UpdateReverb() && m_bDynamicAcousticModelingStatus) {
-#ifndef GTA_PS2
-		for (uint32 i = 0; i < numChannels; i++) {
+#ifdef FIX_BUGS
+		for (uint32 i = 0; i < NUM_CHANNELS_GENERIC; i++)
+#else
+		for (uint32 i = 0; i < NUM_CHANNELS_GENERIC + 1; i++)
+#endif
 			if (m_asActiveSamples[i].m_bReverb)
 				SampleManager.SetChannelReverbFlag(i, TRUE);
-		}
-#endif
 	}
 #endif // AUDIO_REVERB
 }

@@ -444,7 +444,7 @@ CMessages::InsertStringInString(wchar *str1, wchar *str2)
 void
 CMessages::InsertPlayerControlKeysInString(wchar *str)
 {
-#ifdef GTA_PC_CONROLS
+#ifdef GTA_PC_CONTROLS
 	uint16 i;
 	wchar outstr[256];
 	wchar keybuf[256];
