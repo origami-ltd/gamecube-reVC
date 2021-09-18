@@ -29,6 +29,12 @@ enum eMusicMode
 	MUSICMODE_DISABLED,
 };
 
+#ifdef GTA_PS2
+typedef uint8 tTrack;
+#else
+typedef uint32 tTrack;
+#endif
+
 enum ePlayerMood
 {
 	PLAYER_MOOD_CALM = 0,

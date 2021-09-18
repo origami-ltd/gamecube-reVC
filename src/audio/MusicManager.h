@@ -14,12 +14,6 @@ public:
 class CVehicle;
 class CPed;
 
-#ifdef GTA_PS2
-typedef uint8 tTrack;
-#else
-typedef uint32 tTrack;
-#endif
-
 class cMusicManager
 {
 public:

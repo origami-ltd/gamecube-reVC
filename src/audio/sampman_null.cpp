@@ -322,7 +322,7 @@ cSampleManager::StopChannel(uint32 nChannel)
 }
 
 void
-cSampleManager::PreloadStreamedFile(uint32 nFile, uint8 nStream)
+cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 {
 	ASSERT( nStream < MAX_STREAMS );
 }
@@ -340,7 +340,7 @@ cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 }
 
 bool8
-cSampleManager::StartStreamedFile(uint32 nFile, uint32 nPos, uint8 nStream)
+cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 {	
 	ASSERT( nStream < MAX_STREAMS );
 	
