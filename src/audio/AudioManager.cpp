@@ -17,6 +17,7 @@
 SETTWEAKPATH("Audio");
 TWEAKBOOLN(AudioManager.m_bIsSurround, "Surround/Reverb");
 TWEAKBOOLN(AudioManager.m_bDoubleVolume, "Double volume");
+TWEAKBOOLN(AudioManager.m_bDynamicAcousticModelingStatus, "Dynamic Acoustic Modeling Status");
 #endif
 
 cAudioManager AudioManager;

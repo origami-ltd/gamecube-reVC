@@ -53,6 +53,7 @@ public:
 
 public:
 	cMusicManager();
+	~cMusicManager();
 	bool8 IsInitialised() { return m_bIsInitialised; }
 	uint8 GetMusicMode() { return m_nMusicMode; }
 	uint32 GetCurrentTrack() { return m_nPlayingTrack; }
