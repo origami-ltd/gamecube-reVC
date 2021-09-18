@@ -23,6 +23,7 @@
 
 #ifdef GTA_PS2
 #include <libcdvd.h>
+extern "C" void WaitVBlank(void);
 #endif
 
 #if !defined FIX_BUGS && (defined RADIO_SCROLL_TO_PREV_STATION || defined RADIO_OFF_TEXT)
@@ -338,13 +339,13 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 		case MUSICMODE_FRONTEND:
 			m_nUpcomingMusicMode = MUSICMODE_FRONTEND;
 
-	#ifdef PAUSE_RADIO_IN_FRONTEND
+#ifdef PAUSE_RADIO_IN_FRONTEND
 			// rewind those streams we weren't listening right now
 			for( uint32 i = STREAMED_SOUND_RADIO_WILD; i < STREAMED_SOUND_CUTSCENE_ASS_1; i++ ) {
 				m_aTracks[i].m_nPosition = GetTrackStartPos(i);
 				m_aTracks[i].m_nLastPosCheckTimer = CTimer::GetTimeInMillisecondsPauseMode();
 			}
-	#endif
+#endif
 
 			break;
 		case MUSICMODE_GAME: m_nUpcomingMusicMode = MUSICMODE_GAME; break;
@@ -358,8 +359,12 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 				}
 			}
 			SampleManager.StopStreamedFile();
-			while (SampleManager.IsStreamPlaying())
+			while (SampleManager.IsStreamPlaying()) {
 				SampleManager.StopStreamedFile();
+#ifdef GTA_PS2
+				WaitVBlank();
+#endif
+			}
 			m_nMusicMode = m_nUpcomingMusicMode;
 			m_bMusicModeChangeStarted = FALSE;
 			m_bTrackChangeStarted = FALSE;
@@ -1096,8 +1101,12 @@ cMusicManager::PreloadCutSceneMusic(uint32 track)
 {
 	if (m_bIsInitialised && !m_bDisabled && track < TOTAL_STREAMED_SOUNDS && m_nMusicMode == MUSICMODE_CUTSCENE) {
 		AudioManager.ResetPoliceRadio();
-		while (SampleManager.IsStreamPlaying())
+		while (SampleManager.IsStreamPlaying()) {
 			SampleManager.StopStreamedFile();
+#ifdef GTA_PS2
+			WaitVBlank();
+#endif
+		}
 		SampleManager.PreloadStreamedFile(track);
 		SampleManager.SetStreamedVolumeAndPan(MAX_VOLUME, 63, TRUE);
 		m_nPlayingTrack = track;
@@ -1107,15 +1116,24 @@ cMusicManager::PreloadCutSceneMusic(uint32 track)
 void
 cMusicManager::PlayPreloadedCutSceneMusic(void)
 {
-	if (m_bIsInitialised && !m_bDisabled && m_nMusicMode == MUSICMODE_CUTSCENE)
+	if (m_bIsInitialised && !m_bDisabled && m_nMusicMode == MUSICMODE_CUTSCENE) {
+		// TODO: PS2 code
 		SampleManager.StartPreloadedStreamedFile();
+	}
 }
 
 void
 cMusicManager::StopCutSceneMusic(void)
 {
 	if (m_bIsInitialised && !m_bDisabled && m_nMusicMode == MUSICMODE_CUTSCENE) {
+#ifdef GTA_PS2
+		while (SampleManager.IsStreamPlaying()) {
+			SampleManager.StopStreamedFile();
+			WaitVBlank();
+		}
+#else
 		SampleManager.StopStreamedFile();
+#endif
 		m_nPlayingTrack = NO_TRACK;
 	}
 }
@@ -1249,8 +1267,12 @@ cMusicManager::UsesPoliceRadio(CVehicle *veh)
 bool8
 cMusicManager::UsesTaxiRadio(CVehicle *veh)
 {
-	if (veh->GetModelIndex() != MI_KAUFMAN) return FALSE;
-	return CTheScripts::bPlayerHasMetDebbieHarry;
+	switch (veh->GetModelIndex())
+	{
+	case MI_KAUFMAN:
+		return CTheScripts::bPlayerHasMetDebbieHarry;
+	}
+	return FALSE;
 }
 
 void
