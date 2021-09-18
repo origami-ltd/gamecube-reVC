@@ -78,9 +78,6 @@ void CChannel::SetDefault()
 
 void CChannel::Reset()
 {
-	// Here is safe because ctor don't call this
-	if (LoopCount > 1)
-		channelsThatNeedService--;
 
 	ClearBuffer();
 	SetDefault();
@@ -107,6 +104,7 @@ void CChannel::Init(uint32 _id, bool Is2D)
 void CChannel::Term()
 {
 	Stop();
+	Reset();
 	if ( HasSource() )
 	{
 		if ( IsFXSupported() )
@@ -145,8 +143,10 @@ void CChannel::Stop()
 {
 	if ( HasSource() )
 		alSourceStop(alSources[id]);
-	
-	Reset();
+
+	// Here is safe because ctor don't call this
+	if (LoopCount > 1)
+		channelsThatNeedService--;
 }
 
 bool CChannel::HasSource()
