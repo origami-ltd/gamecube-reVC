@@ -569,9 +569,15 @@ cMusicManager::ServiceGameMode()
 			if(!ped->DyingOrDead()) {
 #ifdef GTA_PC
 				if (SampleManager.IsMP3RadioChannelAvailable()
+#ifdef FIX_BUGS
+					&& vehicle
+#endif
 					&& vehicle->m_nRadioStation < USERTRACK
 					&& ControlsManager.GetIsKeyboardKeyJustDown(rsF9)
-					&& vehicle) // yeah right, totaly usefull check =P
+#ifndef FIX_BUGS
+					&& vehicle // yeah right, totaly usefull check =P
+#endif
+					)
 				{
 					if (!UsesPoliceRadio(vehicle) && !UsesTaxiRadio(vehicle)) {
 						gNumRetunePresses = 0;
@@ -585,7 +591,7 @@ cMusicManager::ServiceGameMode()
 					}
 				}
 #endif
-				if (CPad::GetPad(0)->ChangeStationJustDown()) {
+				if (CPad::GetPad(0)->ChangeStationJustDown() && vehicle) {
 					if (!UsesPoliceRadio(vehicle) && !UsesTaxiRadio(vehicle)) {
 						gNumRetunePresses++;
 						gRetuneCounter = 20;
@@ -593,7 +599,7 @@ cMusicManager::ServiceGameMode()
 					}
 				}
 #ifdef RADIO_SCROLL_TO_PREV_STATION
-				else if(!CPad::GetPad(0)->ArePlayerControlsDisabled() && (CPad::GetPad(0)->GetMouseWheelDownJustDown() || CPad::GetPad(0)->GetMouseWheelUpJustDown())) {
+				else if(!CPad::GetPad(0)->ArePlayerControlsDisabled() && (CPad::GetPad(0)->GetMouseWheelDownJustDown() || CPad::GetPad(0)->GetMouseWheelUpJustDown()) && vehicle) {
 					if(!UsesPoliceRadio(vehicle) && !UsesTaxiRadio(vehicle)) {
 						int scrollNext = ControlsManager.GetControllerKeyAssociatedWithAction(VEHICLE_CHANGE_RADIO_STATION, MOUSE);
 						int scrollPrev = scrollNext == rsMOUSEWHEELUPBUTTON ? rsMOUSEWHEELDOWNBUTTON
