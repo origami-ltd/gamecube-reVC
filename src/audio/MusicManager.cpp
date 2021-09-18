@@ -204,7 +204,7 @@ cMusicManager::SetStartingTrackPositions(bool8 isNewGameTimer)
 		}
 #endif
 
-		for (uint32 i = 0; i < TOTAL_STREAMED_SOUNDS; i++) {
+		for (tTrack i = 0; i < TOTAL_STREAMED_SOUNDS; i++) {
 			m_aTracks[i].m_nLength = SampleManager.GetStreamedFileLength(i);
 
 			if (i < STREAMED_SOUND_CITY_AMBIENT && isNewGameTimer)
@@ -269,7 +269,7 @@ cMusicManager::Terminate()
 }
 
 void
-cMusicManager::SetRadioChannelByScript(uint32 station, int32 pos)
+cMusicManager::SetRadioChannelByScript(tTrack station, int32 pos)
 {
 	if (m_bIsInitialised) {
 #ifdef GTA_PC
@@ -284,7 +284,7 @@ cMusicManager::SetRadioChannelByScript(uint32 station, int32 pos)
 	}
 }
 
-uint32
+tTrack
 cMusicManager::GetRadioInCar(void)
 {
 #define RET_RADIO(radio) if (m_nRadioInCar != NO_TRACK) { \
@@ -314,7 +314,7 @@ cMusicManager::GetRadioInCar(void)
 }
 
 void
-cMusicManager::SetRadioInCar(uint32 station)
+cMusicManager::SetRadioInCar(tTrack station)
 {
 	if (m_bIsInitialised) {
 		if (!PlayerInCar()) {
@@ -341,7 +341,7 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 
 #ifdef PAUSE_RADIO_IN_FRONTEND
 			// rewind those streams we weren't listening right now
-			for( uint32 i = STREAMED_SOUND_RADIO_WILD; i < STREAMED_SOUND_CUTSCENE_ASS_1; i++ ) {
+			for( tTrack i = STREAMED_SOUND_RADIO_WILD; i < STREAMED_SOUND_CUTSCENE_ASS_1; i++ ) {
 				m_aTracks[i].m_nPosition = GetTrackStartPos(i);
 				m_aTracks[i].m_nLastPosCheckTimer = CTimer::GetTimeInMillisecondsPauseMode();
 			}
@@ -455,7 +455,7 @@ cMusicManager::ServiceFrontEndMode()
 
 #ifdef PAUSE_RADIO_IN_FRONTEND
 	// pause radio
-	for (uint32 i = STREAMED_SOUND_RADIO_WILD; i < STREAMED_SOUND_CUTSCENE_ASS_1; i++)
+	for (tTrack i = STREAMED_SOUND_RADIO_WILD; i < STREAMED_SOUND_CUTSCENE_ASS_1; i++)
 		m_aTracks[i].m_nLastPosCheckTimer = CTimer::GetTimeInMillisecondsPauseMode();
 #endif
 
@@ -1103,7 +1103,7 @@ cMusicManager::ChangeRadioChannel()
 }
 
 void
-cMusicManager::PreloadCutSceneMusic(uint32 track)
+cMusicManager::PreloadCutSceneMusic(tTrack track)
 {
 	if (m_bIsInitialised && !m_bDisabled && track < TOTAL_STREAMED_SOUNDS && m_nMusicMode == MUSICMODE_CUTSCENE) {
 		AudioManager.ResetPoliceRadio();
@@ -1123,7 +1123,15 @@ void
 cMusicManager::PlayPreloadedCutSceneMusic(void)
 {
 	if (m_bIsInitialised && !m_bDisabled && m_nMusicMode == MUSICMODE_CUTSCENE) {
-		// TODO: PS2 code
+#ifdef GTA_PS2
+		if (m_bAnnouncementInProgress) {
+			m_nAnnouncement = NO_TRACK;
+			m_bAnnouncementInProgress = FALSE;
+			m_nNextTrack = NO_TRACK;
+			m_nFrontendTrack = NO_TRACK;
+			m_nPlayingTrack = NO_TRACK;
+		}
+#endif
 		SampleManager.StartPreloadedStreamedFile();
 	}
 }
@@ -1145,7 +1153,7 @@ cMusicManager::StopCutSceneMusic(void)
 }
 
 void
-cMusicManager::PlayFrontEndTrack(uint32 track, bool8 loopFlag)
+cMusicManager::PlayFrontEndTrack(tTrack track, bool8 loopFlag)
 {
 	if (m_bIsInitialised && !m_bDisabled && track < TOTAL_STREAMED_SOUNDS && (m_nUpcomingMusicMode == MUSICMODE_FRONTEND || m_nMusicMode == MUSICMODE_FRONTEND)) {
 		m_nFrontendTrack = track;
@@ -1167,14 +1175,14 @@ void cMusicManager::Disable() {}
 void cMusicManager::Enable() {}
 
 void
-cMusicManager::PlayAnnouncement(uint32 announcement)
+cMusicManager::PlayAnnouncement(tTrack announcement)
 {
 	if (m_bIsInitialised && !m_bDisabled && !m_bAnnouncementInProgress)
 		m_nAnnouncement = announcement;
 }
 
 uint32
-cMusicManager::GetTrackStartPos(uint32 track)
+cMusicManager::GetTrackStartPos(tTrack track)
 {
 	if (!m_bIsInitialised) return 0;
 
@@ -1207,7 +1215,7 @@ cMusicManager::PlayerInCar()
 	return FALSE;
 }
 
-uint32
+tTrack
 cMusicManager::GetCarTuning()
 {
 	CVehicle *veh = AudioManager.FindVehicleOfPlayer();
@@ -1223,7 +1231,7 @@ cMusicManager::GetCarTuning()
 	return RADIO_OFF;
 }
 
-uint32
+tTrack
 cMusicManager::GetNextCarTuning()
 {
 	CVehicle *veh = AudioManager.FindVehicleOfPlayer();
@@ -1298,19 +1306,19 @@ cMusicManager::GetListenTimeArray()
 }
 
 uint32
-cMusicManager::GetRadioPosition(uint32 station)
+cMusicManager::GetRadioPosition(tTrack station)
 {
 	if (station < NUM_RADIOS)
 		return GetTrackStartPos(station);
 	return 0;
 }
 
-uint32
+tTrack
 cMusicManager::GetFavouriteRadioStation()
 {
-	uint32 favstation = 0;
+	tTrack favstation = 0;
 
-	for (int i = 1; i < NUM_RADIOS; i++) {
+	for (tTrack i = 1; i < NUM_RADIOS; i++) {
 		if (aListenTimeArray[i] > aListenTimeArray[favstation])
 			favstation = i;
 	}
