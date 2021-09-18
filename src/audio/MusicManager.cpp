@@ -1125,6 +1125,7 @@ cMusicManager::PlayPreloadedCutSceneMusic(void)
 	if (m_bIsInitialised && !m_bDisabled && m_nMusicMode == MUSICMODE_CUTSCENE) {
 #ifdef GTA_PS2
 		if (m_bAnnouncementInProgress) {
+			g_bAnnouncementReadPosAlready = FALSE;
 			m_nAnnouncement = NO_TRACK;
 			m_bAnnouncementInProgress = FALSE;
 			m_nNextTrack = NO_TRACK;
