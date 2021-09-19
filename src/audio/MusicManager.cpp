@@ -1177,9 +1177,22 @@ cMusicManager::StopFrontEndTrack()
 		m_nFrontendTrack = NO_TRACK;
 }
 
-// these two are empty
-void cMusicManager::Disable() {}
-void cMusicManager::Enable() {}
+// these two were empty, the code is assumed
+void
+cMusicManager::Disable()
+{
+#ifndef FINAL
+	m_bDisabled = TRUE;
+#endif
+}
+
+void
+cMusicManager::Enable()
+{
+#ifndef FINAL
+	m_bDisabled = FALSE;
+#endif
+}
 
 void
 cMusicManager::PlayAnnouncement(tTrack announcement)
