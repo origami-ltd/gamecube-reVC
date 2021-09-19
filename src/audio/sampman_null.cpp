@@ -362,7 +362,11 @@ cSampleManager::GetStreamedFilePosition(uint8 nStream)
 }
 
 void
+#ifdef GTA_PS2
+cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nLRPan, uint8 nFRPan, bool8 nEffectFlag, uint8 nStream)
+#else
 cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffectFlag, uint8 nStream)
+#endif
 {
 	ASSERT( nStream < MAX_STREAMS );
 }

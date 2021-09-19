@@ -254,7 +254,11 @@ public:
 	bool8 StartStreamedFile                         (tTrack nFile, uint32 nPos, uint8 nStream = 0);
 	void  StopStreamedFile                                                     (uint8 nStream = 0);
 	int32 GetStreamedFilePosition                                              (uint8 nStream = 0);
+#ifdef GTA_PS2
+	void  SetStreamedVolumeAndPan(uint8 nVolume, uint8 nLRPan, uint8 nFRPan, bool8 nEffectFlag, uint8 nStream = 0);
+#else
 	void  SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffectFlag, uint8 nStream = 0);
+#endif
 	int32 GetStreamedFileLength                                                (uint8 nStream = 0);
 	bool8 IsStreamPlaying                                                      (uint8 nStream = 0);
 	void  SetStreamedFileLoopFlag                             (bool8 nLoopFlag, uint8 nStream = 0);
