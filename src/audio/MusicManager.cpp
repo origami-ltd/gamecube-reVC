@@ -537,6 +537,12 @@ cMusicManager::ServiceFrontEndMode()
 	} 
 }
 
+#ifdef GTA_PS2
+#define RETUNE_TIME 30
+#else
+#define RETUNE_TIME 20
+#endif
+
 void
 cMusicManager::ServiceGameMode()
 {
@@ -581,7 +587,7 @@ cMusicManager::ServiceGameMode()
 				{
 					if (!UsesPoliceRadio(vehicle) && !UsesTaxiRadio(vehicle)) {
 						gNumRetunePresses = 0;
-						gRetuneCounter = 20;
+						gRetuneCounter = RETUNE_TIME;
 						RadioStaticCounter = 0;
 						if (vehicle->m_nRadioStation < USERTRACK) {
 							do
@@ -594,7 +600,7 @@ cMusicManager::ServiceGameMode()
 				if (CPad::GetPad(0)->ChangeStationJustDown() && vehicle) {
 					if (!UsesPoliceRadio(vehicle) && !UsesTaxiRadio(vehicle)) {
 						gNumRetunePresses++;
-						gRetuneCounter = 20;
+						gRetuneCounter = RETUNE_TIME;
 						RadioStaticCounter = 0;
 					}
 				}
@@ -607,7 +613,7 @@ cMusicManager::ServiceGameMode()
 
 						if(scrollPrev != -1 && !ControlsManager.IsAnyVehicleActionAssignedToMouseKey(scrollPrev)) {
 							gNumRetunePresses--;
-							gRetuneCounter = 20;
+							gRetuneCounter = RETUNE_TIME;
 							RadioStaticCounter = 0;
 							int track = gNumRetunePresses + vehicle->m_nRadioStation;
 							while(track < 0) track += NUM_RADIOS + 1;
@@ -712,15 +718,15 @@ cMusicManager::ServiceGameMode()
 					}
 #endif
 					if (station == RADIO_OFF) {
-						if (gRetuneCounter == 19) { // One less then what switching radio sets, so runs right after turning off radio
+						if (gRetuneCounter == RETUNE_TIME-1) { // One less then what switching radio sets, so runs right after turning off radio
 							AudioManager.PlayOneShot(AudioManager.m_nFrontEndEntity, SOUND_FRONTEND_RADIO_TURN_OFF, 0.0f);
 							RadioStaticCounter = 5;
 						}
 					} else {
 #ifdef RADIO_SCROLL_TO_PREV_STATION
-						if (vehicle->m_nRadioStation == RADIO_OFF && gRetuneCounter == 19) // Right after turning on the radio
+						if (vehicle->m_nRadioStation == RADIO_OFF && gRetuneCounter == RETUNE_TIME-1) // Right after turning on the radio
 #else
-						if (station == 0 && gRetuneCounter == 19) // Right after turning on the radio
+						if (station == 0 && gRetuneCounter == RETUNE_TIME-1) // Right after turning on the radio
 #endif
 							AudioManager.PlayOneShot(AudioManager.m_nFrontEndEntity, SOUND_FRONTEND_RADIO_TURN_ON, 0.0f);
 						AudioManager.DoPoliceRadioCrackle();
