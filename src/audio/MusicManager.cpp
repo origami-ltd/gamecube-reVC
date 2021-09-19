@@ -785,9 +785,9 @@ cMusicManager::SetUpCorrectAmbienceTrack()
 	{
 	case AREA_MAIN_MAP:
 	case AREA_EVERYWHERE:
-		if (CTheScripts::RiotIntensity > 0 && ((TheCamera.GetPosition() - vecRiotPosition).MagnitudeSqr() < SQR(65.0f)))
+		if (CTheScripts::RiotIntensity > 0 && ((TheCamera.GetPosition() - vecRiotPosition).MagnitudeSqr() < SQR(MID_RIOT_DIST)))
 			m_nFrontendTrack = STREAMED_SOUND_LAW4RIOT_AMBIENT;
-		else if (TheCamera.DistanceToWater > 90.0f) {
+		else if (TheCamera.DistanceToWater > (MAX_WATER_DIST - WATER_DIST_STEP)) {
 			if ((CWeather::OldWeatherType == WEATHER_HURRICANE || CWeather::NewWeatherType == WEATHER_HURRICANE) && CWeather::Wind > 1.0f)
 				m_nFrontendTrack = STREAMED_SOUND_HAVANA_CITY_AMBIENT;
 			else
