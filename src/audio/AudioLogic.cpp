@@ -716,7 +716,11 @@ enum
 	BRIDGE_WARNING_VOLUME = 100,
 
 	MISSION_AUDIO_MAX_DIST = 80,
-	MISSION_AUDIO_VOLUME = 80,
+#if !defined(GTA_PS2) && defined(FIX_BUGS)
+	MISSION_AUDIO_VOLUME = 127,
+#else
+	MISSION_AUDIO_VOLUME = 80, // BUG: leftover from III
+#endif
 };
 
 #pragma region VEHICLE AUDIO
@@ -10002,8 +10006,13 @@ cAudioManager::PreloadMissionAudio(uint8 slot, Const char *name)
 			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_NOT_LOADED;
 			m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_STOPPED;
 			m_bIsMissionAudioPlaying[slot] = FALSE;
+#ifdef GTA_PS2
+			m_nMissionAudioFramesToPlay[slot] = m_nTimeSpent * SampleManager.GetSampleLength(missionAudioSfx) / SampleManager.GetSampleBaseFrequency(missionAudioSfx);
+			m_nMissionAudioFramesToPlay[slot] = 11 * m_nMissionAudioFramesToPlay[slot] / 10;
+#else
 			m_nMissionAudioFramesToPlay[slot] = m_nTimeSpent * SampleManager.GetStreamedFileLength(missionAudioSfx) / 1000;
 			m_nMissionAudioFramesToPlay[slot] *= 4;
+#endif
 			m_bIsMissionAudioAllowedToPlay[slot] = FALSE;
 			m_bIsMissionAudio2D[slot] = TRUE;
 			g_bMissionAudioLoadFailed[slot] = FALSE;
@@ -10087,7 +10096,14 @@ cAudioManager::ClearMissionAudio(uint8 slot)
 		m_bIsMissionAudio2D[slot] = TRUE;
 		m_nMissionAudioFramesToPlay[slot] = 0;
 		m_bIsMissionAudioPhoneCall[slot] = FALSE;
+#ifdef GTA_PS2
+		if (m_bIsSurround)
+			SampleManager.StopChannel(CHANNEL_DTS_MISSION_AUDIO_1 + slot);
+		else
+			SampleManager.StopChannel(CHANNEL_MISSION_AUDIO_1 + slot);
+#else
 		SampleManager.StopStreamedFile(slot + 1);
+#endif
 	}
 }
 
@@ -10107,27 +10123,54 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 	if (m_nMissionAudioSampleIndex[slot] != NO_SAMPLE) {
 		switch (m_nMissionAudioLoadingStatus[slot]) {
 		case LOADING_STATUS_NOT_LOADED:
+#ifdef GTA_PS2
+			SampleManager.LoadMissionAudio(slot, m_nMissionAudioSampleIndex[slot]);
+			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADING;
+#else
 			SampleManager.PreloadStreamedFile(m_nMissionAudioSampleIndex[slot], slot + 1);
 			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADED;
+#endif
 			nFramesUntilFailedLoad[slot] = 0;
 			break;
 		case LOADING_STATUS_LOADING:
+#ifdef GTA_PS2
+			if (SampleManager.IsMissionAudioLoaded(slot, m_nMissionAudioSampleIndex[slot]) == LOADING_STATUS_LOADED)
+				m_nMissionAudioLoadingStatus = LOADING_STATUS_LOADED;
+				// fallthrough
+			else
+#endif
 			if (++nFramesUntilFailedLoad[slot] >= 120) {
 				nFramesForPretendPlaying[slot] = 0;
 				g_bMissionAudioLoadFailed[slot] = TRUE;
 				nFramesUntilFailedLoad[slot] = 0;
 				m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADED;
+				return;
 			}
-			return;
-		default:
-			return;
+#ifdef GTA_PS2
+			else {
+				// try loading again
+				SampleManager.LoadMissionAudio(slot, m_nMissionAudioSampleIndex[slot]);
+				return;
+			}
+#endif
 		case LOADING_STATUS_LOADED:
 			if (!m_bIsMissionAudioAllowedToPlay[slot])
 				break;
+#ifdef GTA_PS2
+			uint8 nChannel = m_bIsSurround ? CHANNEL_DTS_MISSION_AUDIO_1 : CHANNEL_MISSION_AUDIO_1;
+#endif
 			if (g_bMissionAudioLoadFailed[slot]) {
 				if (m_bTimerJustReset) {
 					ClearMissionAudio(slot);
+#ifdef GTA_PS2
+					if (m_bIsSurround)
+						SampleManager.StopChannel(CHANNEL_DTS_POLICE_RADIO);
+					else
+						SampleManager.StopChannel(CHANNEL_POLICE_RADIO);
+					SampleManager.StopChannel(nChannel + slot);
+#else
 					SampleManager.StopStreamedFile(slot + 1);
+#endif
 					nFramesForPretendPlaying[slot] = 0;
 					nCheckPlayingDelay[slot] = 0;
 					nFramesUntilFailedLoad[slot] = 0;
@@ -10145,23 +10188,43 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 				if (MissionScriptAudioUsesPoliceChannel(m_nMissionAudioSampleIndex[slot]))
 					SetMissionScriptPoliceAudio(m_nMissionAudioSampleIndex[slot]);
 				else {
+#ifdef GTA_PS2
+					SampleManager.InitialiseChannel(CHANNEL_MISSION_AUDIO_1 + slot, m_nMissionAudioSampleIndex[slot], SFX_BANK_PED_COMMENTS);
+					if (m_bIsPaused)
+						SampleManager.SetChannelFrequency(CHANNEL_MISSION_AUDIO_1 + slot, 0);
+					else
+						SampleManager.SetChannelFrequency(CHANNEL_MISSION_AUDIO_1 + slot, SampleManager.GetSampleBaseFrequency(m_nMissionAudioSampleIndex[slot]));
+#else
 					if (m_bIsPaused)
 						SampleManager.PauseStream(TRUE, slot + 1);
+#endif
 					if (m_bIsMissionAudio2D[slot]) {
-#if defined(GTA_PS2) || defined(FIX_BUGS)
+#ifdef GTA_PS2
+						SampleManager.SetChannelVolume(nChannel + slot, MAX_VOLUME);
+						SampleManager.SetChannelPan(nChannel + slot, 63);
+						//SampleManager.SetChannelReverbFlag(nChannel + slot, FALSE);
 						if (m_nMissionAudioSampleIndex[slot] == SFX_MISSION_AIRHORNL || m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAL)
-#else
-						if (m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAL)
-#endif
-							SampleManager.SetStreamedVolumeAndPan(MISSION_AUDIO_VOLUME, 0, TRUE, slot + 1);
-#if defined(GTA_PS2) || defined(FIX_BUGS)
+							SampleManager.SetChannelPan(nChannel + slot, 0);
 						else if (m_nMissionAudioSampleIndex[slot] == SFX_MISSION_AIRHORNR || m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAR)
+							SampleManager.SetChannelPan(nChannel + slot, 127);
+						else
+							SampleManager.SetChannelPan(nChannel + slot, 63);
 #else
-						else if (m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAR)
+						if (
+#ifdef FIX_BUGS
+							m_nMissionAudioSampleIndex[slot] == SFX_MISSION_AIRHORNL ||
 #endif
+							m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAL)
+							SampleManager.SetStreamedVolumeAndPan(MISSION_AUDIO_VOLUME, 0, TRUE, slot + 1);
+						else if (
+#ifdef FIX_BUGS
+							m_nMissionAudioSampleIndex[slot] == SFX_MISSION_AIRHORNR ||
+#endif
+							m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAR)
 							SampleManager.SetStreamedVolumeAndPan(MISSION_AUDIO_VOLUME, 127, TRUE, slot + 1);
 						else
 							SampleManager.SetStreamedVolumeAndPan(MISSION_AUDIO_VOLUME, 63, TRUE, slot + 1);
+#endif // GTA_PS2
 					} else {
 						distSquared = GetDistanceSquared(m_vecMissionAudioPosition[slot]);
 						if (distSquared < SQR(MISSION_AUDIO_MAX_DIST)) {
@@ -10176,9 +10239,25 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 							Vol = 0;
 							pan = 63;
 						}
+#ifdef GTA_PS2
+						SampleManager.SetChannelVolume(nChannel + slot, Vol);
+						SampleManager.SetChannelPan(nChannel + slot, pan);
+						//SampleManager.SetChannelReverbFlag(nChannel + slot, TRUE);
+#else
+#ifdef FIX_BUGS
 						SampleManager.SetStreamedVolumeAndPan(Vol, pan, TRUE, slot + 1);
+#else
+						// unbelievable...
+						SampleManager.SetChannelVolume(slot, Vol);
+						SampleManager.SetChannelPan(slot, pan);
+#endif // FIX_BUGS
+#endif // GTA_PS2
 					}
+#ifdef GTA_PS2
+					SampleManager.StartChannel(nChannel + slot);
+#else
 					SampleManager.StartPreloadedStreamedFile(slot + 1);
+#endif
 				}
 				m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_PLAYING;
 				nCheckPlayingDelay[slot] = 30;
@@ -10188,7 +10267,15 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 			case PLAY_STATUS_PLAYING:
 				if (m_bTimerJustReset) {
 					ClearMissionAudio(slot);
+#ifdef GTA_PS2
+					if (m_bIsSurround)
+						SampleManager.StopChannel(CHANNEL_DTS_POLICE_RADIO);
+					else
+						SampleManager.StopChannel(CHANNEL_POLICE_RADIO);
+					SampleManager.StopChannel(nChannel + slot);
+#else
 					SampleManager.StopStreamedFile(slot + 1);
+#endif
 					return;
 				}
 				if (MissionScriptAudioUsesPoliceChannel(m_nMissionAudioSampleIndex[slot])) {
@@ -10200,31 +10287,55 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 							if (m_nMissionAudioSampleIndex[slot] >= SFX_MISSION_MOB_01A && m_nMissionAudioSampleIndex[slot] <= SFX_MISSION_MOB_99A)
 								m_bIsMissionAudioPhoneCall[slot] = FALSE;
 							m_nMissionAudioSampleIndex[slot] = NO_SAMPLE;
+#ifdef GTA_PS2
+							if (m_bIsSurround)
+								SampleManager.StopChannel(CHANNEL_DTS_POLICE_RADIO);
+							else
+								SampleManager.StopChannel(CHANNEL_POLICE_RADIO);
+#else
 							SampleManager.StopStreamedFile(slot + 1);
+#endif
 							m_nMissionAudioFramesToPlay[slot] = 0;
 						}
 					}
 				} else if (m_bIsMissionAudioPlaying[slot]) {
+#ifdef GTA_PS2
+					if (!SampleManager.GetChannelUsedFlag(nChannel + slot) && !m_bIsPaused && !m_bWasPaused) {
+#else
 					if (!SampleManager.IsStreamPlaying(slot + 1) && !m_bIsPaused && !m_bWasPaused) {
+#endif
+#ifndef GTA_PS2
 						if (m_nMissionAudioSampleIndex[slot] == SFX_MISSION_ROK2_01)
 							m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_STOPPED;
-						else {
+						else
+#endif
+						{
 							m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_FINISHED;
 							if (m_nMissionAudioSampleIndex[slot] >= SFX_MISSION_MOB_01A && m_nMissionAudioSampleIndex[slot] <= SFX_MISSION_MOB_99A)
 								m_bIsMissionAudioPhoneCall[slot] = FALSE;
 							m_nMissionAudioSampleIndex[slot] = NO_SAMPLE;
+#ifdef GTA_PS2
+							SampleManager.StopChannel(nChannel + slot);
+#else
 							SampleManager.StopStreamedFile(slot + 1);
+#endif
 							m_nMissionAudioFramesToPlay[slot] = 0;
 						}
 					} else {
+#ifdef GTA_PS2
+						if (m_bIsPaused)
+							SampleManager.SetChannelFrequency(nChannel + slot, 0);
+						else {
+							SampleManager.SetChannelFrequency(nChannel + slot, SampleManager.GetSampleBaseFrequency(m_nMissionAudioSampleIndex[slot]));
+#else
 						if (m_bIsPaused)
 							SampleManager.PauseStream(TRUE, slot + 1);
 						else {
 							SampleManager.PauseStream(FALSE, slot + 1);
+#endif
 							if (!m_bIsMissionAudio2D[slot]) {
 								distSquared = GetDistanceSquared(m_vecMissionAudioPosition[slot]);
 								if (distSquared < SQR(MISSION_AUDIO_MAX_DIST)) {
-									// BUG? Why MAX_VOLUME instead of MISSION_AUDIO_VOLUME?
 									if (distSquared > 0.0f) {
 										dist = Sqrt(distSquared);
 										Vol = ComputeVolume(MAX_VOLUME, MISSION_AUDIO_MAX_DIST, dist);
@@ -10235,8 +10346,13 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 								} else {
 									Vol = 0;
 									pan = 63;
-								} 
+								}
+#ifdef GTA_PS2
+								SampleManager.SetChannelVolume(nChannel + slot, Vol);
+								SampleManager.SetChannelPan(nChannel + slot, pan);
+#else
 								SampleManager.SetStreamedVolumeAndPan(Vol, pan, TRUE, slot + 1);
+#endif
 							}
 						}
 					} 
@@ -10244,7 +10360,11 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 					if (m_bIsPaused)
 						break;
 					if (nCheckPlayingDelay[slot]-- > 0) {
+#ifdef GTA_PS2
+						if (!SampleManager.GetChannelUsedFlag(nChannel + slot))
+#else
 						if (!SampleManager.IsStreamPlaying(slot + 1))
+#endif
 							break;
 						nCheckPlayingDelay[slot] = 0;
 					}
@@ -10255,6 +10375,8 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 				break;
 			}
 			break;
+		default:
+			return;
 		}
 	}
 }
