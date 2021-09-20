@@ -1086,7 +1086,7 @@ cSampleManager::Initialise(void)
 #ifdef AUDIO_CACHE
 			if ( CreateCache )
 #endif
-			for ( int32 i = STREAMED_SOUND_MISSION_MOBR1; i < TOTAL_STREAMED_SOUNDS; i++ )
+			for ( int32 i = SFX_MISSION_MOBR1; i < TOTAL_STREAMED_SOUNDS; i++ )
 			{
 #ifdef PS2_AUDIO_PATHS
 				strcpy(filepath, m_szCDRomRootPath);
@@ -1137,7 +1137,7 @@ cSampleManager::Initialise(void)
 			{
 #endif
 
-				for (int32 i = 0; i < STREAMED_SOUND_MISSION_MOBR1; i++)
+				for (int32 i = 0; i < SFX_MISSION_MOBR1; i++)
 				{
 #ifdef PS2_AUDIO_PATHS
 					strcpy(filepath, m_MP3FilesPath);
@@ -1192,7 +1192,7 @@ cSampleManager::Initialise(void)
 #ifdef AUDIO_CACHE
 			if ( CreateCache )
 #endif
-				for ( int32 i = STREAMED_SOUND_MISSION_COMPLETED4; i < STREAMED_SOUND_MISSION_PAGER; i++ )
+				for ( int32 i = STREAMED_SOUND_MISSION_COMPLETED4; i < SFX_MISSION_PAGER; i++ )
 				{
 #ifdef PS2_AUDIO_PATHS
 					strcpy(filepath, m_MiscomPath);
@@ -2225,7 +2225,7 @@ cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 			
 			char filepath[MAX_PATH];
 #ifdef PS2_AUDIO_PATHS
-			strcpy(filepath, nFile < STREAMED_SOUND_MISSION_COMPLETED4 ? m_MP3FilesPath : (nFile < STREAMED_SOUND_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
+			strcpy(filepath, nFile < STREAMED_SOUND_MISSION_COMPLETED4 ? m_MP3FilesPath : (nFile < SFX_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
 			strcat(filepath, PS2StreamedNameTable[nFile]);
 
 			mp3Stream[nStream] = AIL_open_stream(DIG, filepath, 0);
@@ -2233,7 +2233,7 @@ cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 			if ( !mp3Stream[nStream] )
 #endif
 			{
-				strcpy(filepath, nFile < STREAMED_SOUND_MISSION_COMPLETED4 ? m_MP3FilesPath : (nFile < STREAMED_SOUND_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
+				strcpy(filepath, nFile < STREAMED_SOUND_MISSION_COMPLETED4 ? m_MP3FilesPath : (nFile < SFX_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
 				strcat(filepath, StreamedNameTable[nFile]);
 			
 				mp3Stream[nStream] = AIL_open_stream(DIG, filepath, 0);
