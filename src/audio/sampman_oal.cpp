@@ -856,9 +856,9 @@ cSampleManager::Initialise(void)
 		alcMakeContextCurrent(ALContext);
 	
 		const char* ext=(const char*)alGetString(AL_EXTENSIONS);
-		ASSERT(strstr(ext,"AL_SOFT_loop_points")!=NULL);
 		if ( strstr(ext,"AL_SOFT_loop_points")==NULL )
 		{
+			ASSERT(strstr(ext, "AL_SOFT_loop_points") != NULL);
 			Terminate();
 			return FALSE;
 		}
@@ -1749,6 +1749,7 @@ cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 	
 	if ( stream->IsOpened() )
 	{
+		stream->SetPosMS(0);
 		stream->Start();
 	}
 }

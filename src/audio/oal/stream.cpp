@@ -210,6 +210,7 @@ class CWavFile : public IDecoder
 	tFormatHeader m_FormatHeader;
 
 	uint32 m_DataStartOffset; // TODO: 64 bit?
+	uint32 m_DataSize;
 	uint32 m_nSampleCount;
 	uint32 m_nSamplesPerBlock;
 
@@ -301,6 +302,7 @@ public:
 		}
 		
 		m_DataStartOffset = ftell(m_pFile);
+		m_DataSize = DataHeader.Size;
 		m_nSampleCount = DataHeader.Size / m_FormatHeader.BlockAlign * m_nSamplesPerBlock;
 
 		m_bIsOpen = true;
@@ -363,7 +365,8 @@ public:
 		if (m_FormatHeader.AudioFormat == WAVEFMT_PCM)
 		{
 			// just read the file and sort the samples
-			uint32 size = fread(buffer, 1, GetBufferSize(), m_pFile);
+			uint32 bytesLeft = m_DataSize - (ftell(m_pFile) - m_DataStartOffset);
+			uint32 size = fread(buffer, 1, Min(GetBufferSize(), bytesLeft), m_pFile);
 			if (m_FormatHeader.NumChannels == 2)
 				SortStereoBuffer.SortStereo(buffer, size);
 			return size;
@@ -391,7 +394,8 @@ public:
 			{
 				// read the file
 				uint8 *pAdpcmBuf = m_pAdpcmBuffer;
-				if (fread(m_pAdpcmBuffer, 1, m_FormatHeader.BlockAlign, m_pFile) == 0)
+				uint32 bytesLeft = m_DataSize - (ftell(m_pFile) - m_DataStartOffset);
+				if (fread(m_pAdpcmBuffer, 1, Min(m_FormatHeader.BlockAlign, bytesLeft), m_pFile) == 0)
 					return 0;
 
 				// get the first sample in adpcm block and initialise the decoder(s)
@@ -1448,11 +1452,13 @@ void CStream::SetVolume(uint32 nVol)
 
 void CStream::SetPan(uint8 nPan)
 {
-	m_nPan = Clamp((int8)nPan - 63, 0, 63);
-	SetPosition(0, (m_nPan - 63) / 64.0f, 0.0f, Sqrt(1.0f - SQR((m_nPan - 63) / 64.0f)));
+	int iPan = nPan;
+	iPan = Clamp(iPan - 63, 0, 63);
+	SetPosition(0, (iPan - 63) / 64.0f, 0.0f, -Sqrt(1.0f - SQR((iPan - 63) / 64.0f)));
 
-	m_nPan = Clamp((int8)nPan + 64, 64, 127);
-	SetPosition(1, (m_nPan - 63) / 64.0f, 0.0f, Sqrt(1.0f - SQR((m_nPan - 63) / 64.0f)));
+	iPan = nPan;
+	iPan = Clamp(iPan + 64, 64, 127);
+	SetPosition(1, (iPan - 63) / 64.0f, 0.0f, -Sqrt(1.0f - SQR((iPan - 63) / 64.0f)));
 
 	m_nPan = nPan;
 }
