@@ -2025,6 +2025,9 @@ cSampleManager::SetChannelPan(uint32 nChannel, uint32 nPan)
 void
 cSampleManager::SetChannelFrequency(uint32 nChannel, uint32 nFreq)
 {
+#ifdef FIX_BUGS
+	if (nFreq == 0) nFreq = 1;
+#endif
 #ifdef EXTERNAL_3D_SOUND
 	bool8 b2d = FALSE;
 
