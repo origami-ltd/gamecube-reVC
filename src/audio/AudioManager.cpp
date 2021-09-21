@@ -1301,8 +1301,8 @@ cAudioManager::ProcessActiveQueues()
 #endif
 #ifndef GTA_PS2
 							SampleManager.SetChannelLoopPoints(k, m_asActiveSamples[k].m_nLoopStart, m_asActiveSamples[k].m_nLoopEnd);
-#endif
 							SampleManager.SetChannelLoopCount(k, m_asActiveSamples[k].m_nLoopCount);
+#endif
 #if !defined(GTA_PS2) || defined(AUDIO_REVERB)
 							SampleManager.SetChannelReverbFlag(k, m_asActiveSamples[k].m_bReverb);
 #endif
