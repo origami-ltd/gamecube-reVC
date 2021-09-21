@@ -2025,9 +2025,6 @@ cSampleManager::SetChannelPan(uint32 nChannel, uint32 nPan)
 void
 cSampleManager::SetChannelFrequency(uint32 nChannel, uint32 nFreq)
 {
-#ifdef FIX_BUGS
-	if (nFreq == 0) nFreq = 1;
-#endif
 #ifdef EXTERNAL_3D_SOUND
 	bool8 b2d = FALSE;
 
@@ -2049,6 +2046,9 @@ cSampleManager::SetChannelFrequency(uint32 nChannel, uint32 nFreq)
 	}
 	else
 	{
+#ifdef FIX_BUGS
+		if (nFreq == 0) nFreq = 1;
+#endif
 		if ( opened_samples[nChannel] )
 			AIL_set_3D_sample_playback_rate(opened_samples[nChannel], nFreq);
 	}
