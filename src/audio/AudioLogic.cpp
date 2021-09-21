@@ -10002,6 +10002,12 @@ cAudioManager::PreloadMissionAudio(uint8 slot, Const char *name)
 	if (m_bIsInitialised && slot < MISSION_AUDIO_SLOTS) {
 		uint32 missionAudioSfx = FindMissionAudioSfx(name);
 		if (missionAudioSfx != NO_SAMPLE) {
+// HACK: do not reload camera sound if it's already loaded
+#if !defined GTA_PS2 && defined FIX_BUGS
+			if ((m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAL && missionAudioSfx == SFX_MISSION_CAMERAL) ||
+				(m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAR && missionAudioSfx == SFX_MISSION_CAMERAR))
+				return;
+#endif
 			m_nMissionAudioSampleIndex[slot] = missionAudioSfx;
 			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_NOT_LOADED;
 			m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_STOPPED;
@@ -10307,8 +10313,16 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 #ifndef GTA_PS2
 						if (m_nMissionAudioSampleIndex[slot] == SFX_MISSION_ROK2_01)
 							m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_STOPPED;
+#ifdef FIX_BUGS
+						// HACK: reset sound states for camera sound as if it was just loaded
+						else if (m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAL || m_nMissionAudioSampleIndex[slot] == SFX_MISSION_CAMERAR) {
+							m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADED;
+							m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_STOPPED;
+							m_bIsMissionAudioAllowedToPlay[slot] = FALSE;
+						}
+#endif // FIX_BUGS
 						else
-#endif
+#endif // !GTA_PS2
 						{
 							m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_FINISHED;
 							if (m_nMissionAudioSampleIndex[slot] >= SFX_MISSION_MOB_01A && m_nMissionAudioSampleIndex[slot] <= SFX_MISSION_MOB_99A)
