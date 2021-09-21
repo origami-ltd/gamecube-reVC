@@ -56,12 +56,13 @@ CChannel::CChannel()
 {
 	Data = nil;
 	DataSize = 0;
-	bIs2D = false;
+	bIs2DDefault = bForce2D = false;
 	SetDefault();
 }
 
 void CChannel::SetDefault()
 {
+	Pan = 63;
 	Pitch = 1.0f;
 	Gain = 1.0f;
 	Mix = 0.0f;
@@ -74,11 +75,11 @@ void CChannel::SetDefault()
 	LoopPoints[0] = 0; LoopPoints[1] = -1;
 	
 	Frequency = MAX_FREQ;
+	bForce2D = bIs2DDefault;
 }
 
 void CChannel::Reset()
 {
-
 	ClearBuffer();
 	SetDefault();
 }
@@ -94,7 +95,7 @@ void CChannel::Init(uint32 _id, bool Is2D)
 		
 		if ( Is2D )
 		{
-			bIs2D = true;
+			bIs2DDefault = bForce2D = true;
 			alSource3f(alSources[id], AL_POSITION, 0.0f, 0.0f, 0.0f);
 			alSourcef(alSources[id], AL_GAIN, 1.0f);
 		}
@@ -119,15 +120,18 @@ void CChannel::Start()
 	if ( !HasSource() ) return;
 	if ( !Data ) return;
 
-	if ( bIs2D )
+	if ( bForce2D )
 	{
 		// convert mono data to stereo
+		int LVol = Pan <= 63 ? 128 : (127-Pan) / 64.0f * 128;
+		int RVol = Pan >= 63 ? 128 : Pan / 64.0f * 128;
+
 		int16 *monoData = (int16*)Data;
 		int16 *stereoData = (int16*)tempStereoBuffer;
 		for (size_t i = 0; i < DataSize / 2; i++)
 		{
-			*(stereoData++) = *monoData;
-			*(stereoData++) = *(monoData++);
+			*(stereoData++) = (*monoData * LVol) >> 7;
+			*(stereoData++) = (*(monoData++) * RVol) >> 7;
 		}
 		alBufferData(alBuffers[id], AL_FORMAT_STEREO16, tempStereoBuffer, DataSize * 2, Frequency);
 	}
@@ -177,12 +181,12 @@ void CChannel::SetGain(float gain)
 	alSourcef(alSources[id], AL_GAIN, gain);
 }
 	
-void CChannel::SetVolume(int32 vol)
+void CChannel::SetVolume(uint32 vol)
 {
 	SetGain(ALfloat(vol) / MAX_VOLUME);
 }
 
-void CChannel::SetSampleData(void *_data, size_t _DataSize, int32 freq)
+void CChannel::SetSampleData(void *_data, size_t _DataSize, uint32 freq)
 {
 	Data = _data;
 	DataSize = _DataSize;
@@ -194,7 +198,7 @@ void CChannel::SetCurrentFreq(uint32 freq)
 	SetPitch(ALfloat(freq) / Frequency);
 }
 
-void CChannel::SetLoopCount(int32 count)
+void CChannel::SetLoopCount(uint32 count)
 {
 	if ( !HasSource() ) return;
 
@@ -251,6 +255,7 @@ void CChannel::SetPosition(float x, float y, float z)
 {
 	if ( !HasSource() ) return;
 	alSource3f(alSources[id], AL_POSITION, x, y, z);
+	bForce2D = false;
 }
 	
 void CChannel::SetDistances(float max, float min)
@@ -260,11 +265,18 @@ void CChannel::SetDistances(float max, float min)
 	alSourcef   (alSources[id], AL_REFERENCE_DISTANCE, min);
 	alSourcef   (alSources[id], AL_MAX_GAIN, 1.0f);
 	alSourcef   (alSources[id], AL_ROLLOFF_FACTOR, 1.0f);
+	bForce2D = false;
 }
 	
-void CChannel::SetPan(int32 pan)
+void CChannel::SetPan(uint8 pan)
 {
-	SetPosition((pan-63)/64.0f, 0.0f, Sqrt(1.0f-SQR((pan-63)/64.0f)));
+	if (IsUsed())
+		debug("Channel %i changes pan during playback, we don't support that yet :(\n", id);
+
+	// this is kinda pointless
+	//SetPosition(((int)pan-63)/64.0f, 0.0f, -Sqrt(1.0f-SQR(((int)pan-63)/64.0f)));
+	Pan = pan;
+	bForce2D = true;
 }
 
 void CChannel::ClearBuffer()
