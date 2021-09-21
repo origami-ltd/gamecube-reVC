@@ -2021,12 +2021,6 @@ cSampleManager::Service(void)
 		if ( stream->IsOpened() )
 			stream->Update();
 	}
-	int refCount = CChannel::channelsThatNeedService;
-	for ( int32 i = 0; refCount && i < NUM_CHANNELS; i++ )
-	{
-		if ( aChannel[i].Update() )
-			refCount--;
-	}
 }
 
 bool8

@@ -21,12 +21,8 @@ class CChannel
 	uint32 Frequency;
 	float  Position[3];
 	float  Distances[2];
-	uint32 LoopCount;
 	ALint  LoopPoints[2];
-	ALint  LastProcessedOffset;
 public:
-	static int32 channelsThatNeedService;
-
 	static void InitChannels();
 	static void DestroyChannels();
 
@@ -52,7 +48,6 @@ public:
 	void ClearBuffer();
 	void SetReverbMix(ALuint slot, float mix);
 	void UpdateReverb(ALuint slot);
-	bool Update();
 };
 
 #endif

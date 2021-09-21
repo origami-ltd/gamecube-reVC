@@ -16,8 +16,6 @@ ALuint alFilters[NUM_CHANNELS];
 ALuint alBuffers[NUM_CHANNELS];
 bool bChannelsCreated = false;
 
-int32 CChannel::channelsThatNeedService = 0;
-
 uint8* tempStereoBuffer = nil;
 
 void
@@ -70,8 +68,6 @@ void CChannel::SetDefault()
 	Position[0] = 0.0f; Position[1] = 0.0f; Position[2] = 0.0f;
 	Distances[0] = 0.0f; Distances[1] = FLT_MAX;
 
-	LoopCount = 1;
-	LastProcessedOffset = UINT32_MAX;
 	LoopPoints[0] = 0; LoopPoints[1] = -1;
 	
 	Frequency = MAX_FREQ;
@@ -147,10 +143,6 @@ void CChannel::Stop()
 {
 	if ( HasSource() )
 		alSourceStop(alSources[id]);
-
-	// Here is safe because ctor don't call this
-	if (LoopCount > 1)
-		channelsThatNeedService--;
 }
 
 bool CChannel::HasSource()
@@ -202,47 +194,8 @@ void CChannel::SetLoopCount(uint32 count)
 {
 	if ( !HasSource() ) return;
 
-	// 0: loop indefinitely, 1: play one time, 2: play two times etc...
-	// only > 1 needs manual processing
-
-	if (LoopCount > 1 && count < 2)
-		channelsThatNeedService--;
-	else if (LoopCount < 2 && count > 1)
-		channelsThatNeedService++;
-
+	// 0: loop indefinitely, 1: play one time, 2: play two times etc... in our case controlled by audio manager
 	alSourcei(alSources[id], AL_LOOPING, count == 1 ? AL_FALSE : AL_TRUE);
-	LoopCount = count;
-}
-
-bool CChannel::Update()
-{
-	if (!HasSource()) return false;
-	if (LoopCount < 2) return false;
-
-	ALint state;
-	alGetSourcei(alSources[id], AL_SOURCE_STATE, &state);
-	if (state == AL_STOPPED) {
-		debug("Looping channels(%d in this case) shouldn't report AL_STOPPED, but nvm\n", id);
-		SetLoopCount(1);
-		return true;
-	}
-
-	assert(channelsThatNeedService > 0 && "Ref counting is broken");
-
-	ALint offset;
-	alGetSourcei(alSources[id], AL_SAMPLE_OFFSET, &offset);
-
-	// Rewound
-	if (offset < LastProcessedOffset) {
-		LoopCount--;
-		if (LoopCount == 1) {
-			// Playing last tune...
-			channelsThatNeedService--;
-			alSourcei(alSources[id], AL_LOOPING, AL_FALSE);
-		}
-	}
-	LastProcessedOffset = offset;
-	return true;
 }
 
 void CChannel::SetLoopPoints(ALint start, ALint end)
