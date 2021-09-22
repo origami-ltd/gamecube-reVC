@@ -1137,7 +1137,7 @@ cSampleManager::Initialise(void)
 			{
 #endif
 
-				for (int32 i = 0; i < SFX_MISSION_MOBR1; i++)
+				for (int32 i = 0; i < STREAMED_SOUND_CD_CHECK_1; i++)
 				{
 #ifdef PS2_AUDIO_PATHS
 					strcpy(filepath, m_MP3FilesPath);
@@ -1192,7 +1192,7 @@ cSampleManager::Initialise(void)
 #ifdef AUDIO_CACHE
 			if ( CreateCache )
 #endif
-				for ( int32 i = STREAMED_SOUND_MISSION_COMPLETED4; i < SFX_MISSION_PAGER; i++ )
+				for ( int32 i = STREAMED_SOUND_CD_CHECK_1; i < SFX_MISSION_MOBR1; i++ )
 				{
 #ifdef PS2_AUDIO_PATHS
 					strcpy(filepath, m_MiscomPath);
@@ -1467,7 +1467,7 @@ cSampleManager::CheckForAnAudioFileOnCD(void)
 	FILE *f;
 	
 	strcpy(filepath, m_MiscomPath);
-	strcat(filepath, StreamedNameTable[STREAMED_SOUND_MISSION_COMPLETED4]);
+	strcat(filepath, StreamedNameTable[STREAMED_SOUND_CD_CHECK_1]);
 
 	FILE *f = fopen(filepath, "rb");
 
@@ -2228,7 +2228,7 @@ cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 			
 			char filepath[MAX_PATH];
 #ifdef PS2_AUDIO_PATHS
-			strcpy(filepath, nFile < STREAMED_SOUND_MISSION_COMPLETED4 ? m_MP3FilesPath : (nFile < SFX_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
+			strcpy(filepath, nFile < STREAMED_SOUND_CD_CHECK_1 ? m_MP3FilesPath : (nFile < SFX_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
 			strcat(filepath, PS2StreamedNameTable[nFile]);
 
 			mp3Stream[nStream] = AIL_open_stream(DIG, filepath, 0);
@@ -2236,7 +2236,7 @@ cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 			if ( !mp3Stream[nStream] )
 #endif
 			{
-				strcpy(filepath, nFile < STREAMED_SOUND_MISSION_COMPLETED4 ? m_MP3FilesPath : (nFile < SFX_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
+				strcpy(filepath, nFile < STREAMED_SOUND_CD_CHECK_1 ? m_MP3FilesPath : (nFile < SFX_MISSION_MOBR1 ? m_MiscomPath : m_WavFilesPath));
 				strcat(filepath, StreamedNameTable[nFile]);
 			
 				mp3Stream[nStream] = AIL_open_stream(DIG, filepath, 0);
