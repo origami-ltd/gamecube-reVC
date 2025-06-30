@@ -236,7 +236,7 @@ CPhysical::GetBoundRect(void)
 void
 CPhysical::AddToMovingList(void)
 {
-	if (!bIsStaticWaitingForCollision)
+	if(!bIsStaticWaitingForCollision && !CWorld::GetMovingEntityList().FindItem(this))
 		m_movingListNode = CWorld::GetMovingEntityList().InsertItem(this);
 }
 

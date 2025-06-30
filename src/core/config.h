@@ -371,7 +371,7 @@ enum Config {
 #define LEGACY_MENU_OPTIONS			// i.e. frame sync(vsync)
 #define MUCH_SHORTER_OUTRO_SCREEN
 // #define XBOX_MESSAGE_SCREEN			// Blue background, no "saved successfully press OK" screen etc.
-#	define CUSTOM_FRONTEND_OPTIONS
+#define CUSTOM_FRONTEND_OPTIONS
 
 #	ifdef CUSTOM_FRONTEND_OPTIONS
 #		define GRAPHICS_MENU_OPTIONS // otherwise Display settings will be scrollable

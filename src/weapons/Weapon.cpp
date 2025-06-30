@@ -1587,15 +1587,13 @@ CWeapon::DoBulletImpact(CEntity *shooter, CEntity *victim,
 
 					if ( !victimObject->bInfiniteMass && victimObject->m_fCollisionDamageMultiplier < 99.9f)
 					{
-						bool notStatic = !victimObject->GetIsStatic();
-						if (notStatic && victimObject->m_fUprootLimit <= 0.0f)
+					    if(victimObject->GetIsStatic() && victimObject->m_fUprootLimit <= 0.0f)
 						{
 							victimObject->SetIsStatic(false);
 							victimObject->AddToMovingList();
 						}
 
-						notStatic = !victimObject->GetIsStatic();
-						if (!notStatic)
+					    if(!victimObject->GetIsStatic())
 						{
 							CVector moveForce = point->normal * -4.0f;
 							victimObject->ApplyMoveForce(moveForce.x, moveForce.y, moveForce.z);

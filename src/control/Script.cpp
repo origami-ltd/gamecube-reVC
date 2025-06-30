@@ -2711,10 +2711,9 @@ int8 CRunningScript::ProcessCommands200To299(int32 command)
 		CollectParameters(&m_nIp, 1);
 		CPed* ped = CPools::GetPedPool()->GetAt(ScriptParams[0]);
 		script_assert(ped);
-		CVehicle* pCurrent = nil;
-		if (ped->bInVehicle) {
-			pCurrent = ped->m_pMyVehicle;
-		}
+		if(!ped->bInVehicle)
+			return 0;
+		CVehicle* pCurrent = ped->m_pMyVehicle;
 		script_assert(pCurrent); // GetIndex(0) doesn't look good
 		int handle = CPools::GetVehiclePool()->GetIndex(pCurrent);
 		if (handle != CTheScripts::StoreVehicleIndex && m_bIsMissionScript){
