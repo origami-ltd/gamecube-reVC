@@ -42,11 +42,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.platform == 'ps2' || matrix.gl3_gfxlib == 'sdl2' || matrix.audio == 'miles' }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - name: "Checkout Miles SDK Import Library project"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         if: ${{ matrix.audio == 'miles' }}
         with:
           repository: 'withmorten/re3mss'
@@ -110,7 +110,7 @@ jobs:
         run: |
           cpack -C RelWithDebInfo
       - name: "Archive binary package (github artifacts)"
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: "${{ matrix.os }}-${{ matrix.platform }}"
           path: build/*.tar.xz
