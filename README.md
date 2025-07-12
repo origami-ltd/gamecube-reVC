@@ -91,6 +91,12 @@ When using premake, you may want to point GTA_VC_RE_DIR environment variable to 
 
 Clone the repository with `git clone --recursive -b miami https://github.com/mrxenginner/reVC.git reVC`. Then `cd reVC` into the cloned repository.
 
+<details><summary>Android Studio</summary>
+
+For Android using Android Studio, proceed: [Building on Android](https://github.com/mrxenginner/reVC/wiki/Building-on-Android)
+
+</details>
+
 <details><summary>Linux Premake</summary>
 
 For Linux using premake, proceed: [Building on Linux](https://github.com/mrxenginner/reVC/wiki/Building-on-Linux)
