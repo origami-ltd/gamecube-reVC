@@ -1,0 +1,86 @@
+name: reVC Android
+
+on:
+  push:
+    branches: [ "miami" ]
+    paths:
+      - 'android/launcher/**'
+      - 'src/**'
+  pull_request:
+    branches: [ "miami" ]
+    paths:
+      - 'android/launcher/**'
+      - 'src/**'
+  release:
+    types: published 
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+  
+jobs:
+  build-android:
+    name: Build Android APK (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        variant: [debug, release]
+
+    defaults:
+      run:
+        working-directory: android/launcher
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Declare build version
+        id: vars
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          echo "build_version=$(git describe --always --tags "refs/remotes/origin/${HEAD_REF}")" >> $GITHUB_OUTPUT
+
+      - name: Set up Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Clean build (manual only)
+        if: github.event_name == 'workflow_dispatch'
+        run: ./gradlew clean
+
+      - name: Set assemble task name
+        run: echo "ASSEMBLE_TASK=assemble${{ matrix.variant == 'debug' && 'Debug' || 'Release' }}" >> $GITHUB_ENV
+
+      - name: Build ${{ matrix.variant }} APK
+        run: ./gradlew $ASSEMBLE_TASK --no-daemon --stacktrace --parallel --build-cache
+
+      - name: Upload ${{ matrix.variant }} APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: revc-${{ matrix.variant }}
+          path: android/launcher/app/build/outputs/apk/${{ matrix.variant }}/app-${{ matrix.variant }}.apk
+          if-no-files-found: error
