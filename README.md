@@ -5,7 +5,7 @@
 
 ## Intro
 
-In this repository you'll find the fully reversed source code for GTA III ([master](https://github.com/mrxenginner/reVC/tree/master/) branch) and GTA VC ([miami](https://github.com/mrxenginner/reVC/tree/miami/) branch).
+In this repository you'll find the fully reversed source code for GTA VC ([miami](https://github.com/mrxenginner/reVC/tree/miami/) branch).
 
 It has been tested and works on Windows, Linux, MacOS and FreeBSD, on x86, amd64, arm and arm64.\
 Rendering is handled either by original RenderWare (D3D8)
@@ -102,7 +102,7 @@ Install python and conan, and then run build.
 conan export vendor/librw librw/master@
 mkdir build
 cd build
-conan install .. reVC/master@ -if build -o reVC:audio=openal -o librw:platform=gl3 -o librw:gl3_gfxlib=glfw --build missing -s reVC:build_type=RelWithDebInfo -s librw:build_type=RelWithDebInfo
+conan install .. reVC/miami@ -if build -o reVC:audio=openal -o librw:platform=gl3 -o librw:gl3_gfxlib=glfw --build missing -s reVC:build_type=RelWithDebInfo -s librw:build_type=RelWithDebInfo
 conan build .. -if build -bf build -pf package
 ```
 </details>
@@ -153,7 +153,7 @@ We accept only these kinds of PRs;
 - Translation fixes, for languages original game supported
 - Code that increase maintainability  
 
-We have a [Coding Style](https://github.com/mrxenginner/reVC/blob/master/CODING_STYLE.md) document that isn't followed or enforced very well.
+We have a [Coding Style](https://github.com/mrxenginner/reVC/blob/miami/CODING_STYLE.md) document that isn't followed or enforced very well.
 
 Do not use features from C++11 or later.
 
