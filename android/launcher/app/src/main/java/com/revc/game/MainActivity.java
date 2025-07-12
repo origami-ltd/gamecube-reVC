@@ -11,7 +11,7 @@ public class MainActivity extends AppCompatActivity {
 
     // Used to load the 'game' library on application startup.
     static {
-        System.loadLibrary("revc");
+        //System.loadLibrary("revc");
     }
 
     private ActivityMainBinding binding;
@@ -25,12 +25,12 @@ public class MainActivity extends AppCompatActivity {
 
         // Example of a call to a native method
         TextView tv = binding.sampleText;
-        tv.setText(stringFromJNI());
+      //  tv.setText(stringFromJNI());
     }
 
     /**
      * A native method that is implemented by the 'game' native library,
      * which is packaged with this application.
      */
-    public native String stringFromJNI();
+    //public native String stringFromJNI();
 }
