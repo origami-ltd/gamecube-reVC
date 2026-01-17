@@ -54,6 +54,11 @@
 
 bool bAllCarCheat;
 
+#if defined ANDROID
+int16 g_usLastProcessedModelIndexAutomobile = 0;
+int g_iLastProcessedModelIndexAutoEnt = 0;
+#endif
+
 RwObject *GetCurrentAtomicObjectCB(RwObject *object, void *data);
 
 bool CAutomobile::m_sAllTaxiLights;
@@ -3024,7 +3029,10 @@ CAutomobile::ProcessEntityCollision(CEntity *ent, CColPoint *colpoints)
 {
 	int i;
 	CColModel *colModel;
-
+#if defined ANDROID
+    g_usLastProcessedModelIndexAutomobile = ent->GetModelIndex();
+    g_iLastProcessedModelIndexAutoEnt = ent->GetModelIndex();
+#endif
 	if(GetStatus() != STATUS_SIMPLE)
 		bVehicleColProcessed = true;
 

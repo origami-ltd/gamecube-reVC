@@ -37,9 +37,21 @@ static myFILE myfiles[NUMFILES];
 // Case-insensitivity on linux (from https://github.com/OneSadCookie/fcaseopen)
 void mychdir(char const *path)
 {
+#if defined(ANDROID)
+	if(!path) {
+        return;
+    }
+#endif
 	char* r = casepath(path, false);
     if (r) {
+#if defined(ANDROID)
+		char path[MAX_PATH];
+		strcpy(path, CFileMgr::GetRootDirName());
+		strcat(path, r);
+        chdir(path);
+#else
         chdir(r);
+#endif
 		free(r);
     } else {
         errno = ENOENT;
@@ -200,8 +212,16 @@ char CFileMgr::ms_dirName[128];
 void
 CFileMgr::Initialise(void)
 {
-	_getcwd(ms_rootDirName, 128);
+#if defined(ANDROID)
+	if(getenv("STORAGE_ROOT") != NULL) {
+		strcpy(ms_rootDirName, getenv("STORAGE_ROOT"));
+		strcat(ms_rootDirName, "/");
+        debug("Android: Root Dir: %s\n", ms_rootDirName);
+	}
+#else
+    _getcwd(ms_rootDirName, 128);
 	strcat(ms_rootDirName, "\\");
+#endif
 }
 
 void
@@ -213,10 +233,13 @@ CFileMgr::ChangeDir(const char *dir)
 	}
 	if(*dir != '\0'){
 		strcat(ms_dirName, dir);
-		// BUG in the game it seems, it's off by one
+#ifndef ANDROID
+        // BUG in the game it seems, it's off by one
 		if(dir[strlen(dir)-1] != '\\')
 			strcat(ms_dirName, "\\");
+#endif
 	}
+	debug("CFileMgr::ChangeDir: %s", ms_dirName);
 	mychdir(ms_dirName);
 }
 
@@ -226,10 +249,13 @@ CFileMgr::SetDir(const char *dir)
 	strcpy(ms_dirName, ms_rootDirName);
 	if(*dir != '\0'){
 		strcat(ms_dirName, dir);
-		// BUG in the game it seems, it's off by one
+#ifndef ANDROID
+        // BUG in the game it seems, it's off by one
 		if(dir[strlen(dir)-1] != '\\')
 			strcat(ms_dirName, "\\");
+#endif
 	}
+	debug("CFileMgr::SetDir: %s", ms_dirName);
 	mychdir(ms_dirName);
 }
 
@@ -267,12 +293,14 @@ CFileMgr::LoadFile(const char *file, uint8 *buf, int maxlen, const char *mode)
 int
 CFileMgr::OpenFile(const char *file, const char *mode)
 {
+	debug("CFileMgr::OpenFile: %s", file);
 	return myfopen(file, mode);
 }
 
 int
 CFileMgr::OpenFileForWriting(const char *file)
 {
+	debug("CFileMgr::OpenFileForWriting: %s", file);
 	return OpenFile(file, "wb");
 }
 

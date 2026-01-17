@@ -499,11 +499,15 @@ _FindMP3s(void)
 		printf("MP3 folder path is too long, no place left for file names. MP3 finding aborted.\n");
 		return;
 	}
-	
+#if defined ANDROID
 	OutputDebugString("Finding MP3s...");
 	strcpy(path, _mp3DirectoryPath);
+	strcat(path, "/MP3/");
+#else
+    OutputDebugString("Finding MP3s...");
+	strcpy(path, _mp3DirectoryPath);
 	strcat(path, "\\MP3\\");
-
+#endif
 #if !defined(_WIN32)
 	char *actualPath = casepath(path);
 	if (actualPath) {

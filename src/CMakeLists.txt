@@ -20,14 +20,24 @@ header_directories(${PROJECT}_INCLUDES)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/extras/GitSHA1.cpp.in" "${CMAKE_CURRENT_BINARY_DIR}/extras/GitSHA1.cpp" @ONLY)
 list(APPEND ${PROJECT}_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/extras/GitSHA1.cpp")
 
-add_executable(${EXECUTABLE} WIN32
-    ${${PROJECT}_SOURCES}
-)
+if(NOT ANDROID)
+    add_executable(${EXECUTABLE} WIN32 ${${PROJECT}_SOURCES})
+elseif(ANDROID)
+    add_library(${EXECUTABLE} SHARED ${${PROJECT}_SOURCES})
+endif()
 
 target_link_libraries(${EXECUTABLE} PRIVATE
     librw::librw
     Threads::Threads
 )
+
+if(ANDROID)
+    target_link_libraries(${EXECUTABLE} PRIVATE
+            log
+            GLESv3
+            OpenSLES
+    )
+endif()
 
 target_include_directories(${EXECUTABLE}
     PRIVATE
@@ -49,8 +59,29 @@ if(LIBRW_PLATFORM_D3D9)
     )
 endif()
 
-target_compile_definitions(${EXECUTABLE} PRIVATE CMAKE_BUILD)
-target_compile_definitions(${EXECUTABLE} PRIVATE USE_OUR_VERSIONING)
+if(ANDROID)
+    target_compile_definitions(${EXECUTABLE} PRIVATE
+            ANDROID
+            _ANDROID
+            LINUX
+            _LINUX
+            POSIX
+            _POSIX
+            NO_HOOK_MALLOC
+            AL_LIBTYPE_STATIC
+            GNUC
+            RW_GL3
+            LIBRW_SDL2
+            LIBRW
+            AUDIO_OAL
+            USE_OUR_VERSIONING
+            HAVE_EFFICIENT_UNALIGNED_ACCESS
+            VECTORIZE_SINCOS
+        )
+else()
+    target_compile_definitions(${EXECUTABLE} PRIVATE CMAKE_BUILD)
+    target_compile_definitions(${EXECUTABLE} PRIVATE USE_OUR_VERSIONING)
+endif()
 
 if(${PROJECT}_AUDIO STREQUAL "OAL")
     find_package(OpenAL REQUIRED)
@@ -91,6 +122,12 @@ target_compile_definitions(${EXECUTABLE} PRIVATE )
 
 option(${PROJECT}_WITH_SANITIZERS "Use UB sanitizers (better crash log)" OFF)
 option(${PROJECT}_WITH_ASAN "Use Address sanitizer (better crash log)" OFF)
+option(${PROJECT}_DISABLE_WARNINGS "Disable build warnings" ON)
+
+if(${PROJECT}_DISABLE_WARNINGS)
+    target_compile_options(${EXECUTABLE} PRIVATE
+            -w)
+endif()
 
 if(${PROJECT}_WITH_SANITIZERS)
     target_compile_options(${EXECUTABLE} PUBLIC
@@ -105,6 +142,26 @@ if(${PROJECT}_WITH_ASAN)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    if(ANDROID)
+        target_compile_options(${EXECUTABLE}
+            PRIVATE
+                -pthread
+                -std=c++11
+                -fno-strict-aliasing
+                -fexceptions
+                -Wcast-align
+                -Wuninitialized
+                -Winit-self
+                -Wstrict-aliasing
+                -Wno-reorder
+                -Wno-unknown-pragmas
+                -Wno-unused-function
+                -Wno-unused-but-set-variable
+                -Wno-unused-value
+                -Wno-unused-command-line-argument
+                -faligned-new
+        )
+    endif()
     target_compile_options(${EXECUTABLE}
         PRIVATE
             "-Wall"

@@ -1,14 +1,22 @@
 #ifndef _WIN32
 #include "common.h"
-#ifdef GTA_PC
+#ifdef GTA_PC || GTA_MOBILE
 #include "crossplatform.h"
 #include <signal.h>
 #include <pthread.h>
+#ifndef ANDROID
 #include <semaphore.h>
+#endif
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/time.h>
+#ifndef ANDROID
 #include <sys/statvfs.h>
+#else
+#include "AndroidMain.h"
+#include <sys/vfs.h>
+#define statvfs statfs
+#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -24,7 +32,7 @@
 #include "MemoryMgr.h"
 
 #define CDDEBUG(f, ...)   debug ("%s: " f "\n", "cdvd_stream", ## __VA_ARGS__)
-#define CDTRACE(f, ...)   printf("%s: " f "\n", "cdvd_stream", ## __VA_ARGS__)
+#define CDTRACE(f, ...)   debug ("%s: " f "\n", "cdvd_stream trace", ## __VA_ARGS__)
 
 #ifdef FLUSHABLE_STREAMING
 bool flushStream[MAX_CDCHANNELS];
@@ -52,32 +60,32 @@ re3_sem_close(sem_t* sem)
 	free(sem);
 }
 
-#else
+#elifndef ANDROID
 
 #define RE3_SEM_OPEN re3_sem_open
 sem_t*
 re3_sem_open(const char* format, ...)
 {
-	char semName[21];
-	va_list va;
-	va_start(va, format);
-	vsprintf(semName, format, va);
+    char semName[21];
+    va_list va;
+    va_start(va, format);
+    vsprintf(semName, format, va);
 
-	return sem_open(semName, O_CREAT, 0644, 1);
+    return sem_open(semName, O_CREAT, 0644, 1);
 }
 
 #define RE3_SEM_CLOSE re3_sem_close
 void
 re3_sem_close(sem_t* sem, const char* format, ...)
 {
-	sem_close(sem);
+    sem_close(sem);
 
-	char semName[21];
-	va_list va;
-	va_start(va, format);
-	vsprintf(semName, format, va);
+    char semName[21];
+    va_list va;
+    va_start(va, format);
+    vsprintf(semName, format, va);
 
-	sem_unlink(semName);
+    sem_unlink(semName);
 }
 
 #endif
@@ -95,7 +103,11 @@ struct CdReadInfo
 	pthread_t pChannelThread;
 	sem_t *pStartSemaphore;
 #endif
+#ifndef ANDROID
 	sem_t *pDoneSemaphore; // used for CdStreamSync
+#elif ANDROID
+	pthread_mutex_t pDoneSemaphore; // used for CdStreamSync
+#endif
 	int32 hFile;
 };
 
@@ -108,7 +120,11 @@ char *gImgNames[MAX_CDIMAGES];
 
 #ifndef ONE_THREAD_PER_CHANNEL
 pthread_t _gCdStreamThread;
+#ifndef ANDROID
 sem_t *gCdStreamSema; // released when we have new thing to read(so channel is set)
+#elif ANDROID
+pthread_mutex_t gCdStreamSema; // released when we have new thing to read(so channel is set)
+#endif
 int8 gCdStreamThreadStatus; // 0: created 1:priority set up 2:abort now
 Queue gChannelRequestQ;
 bool _gbCdStreamOverlapped;
@@ -132,21 +148,26 @@ CdStreamInitThread(void)
 	gChannelRequestQ.tail = 0;
 	gChannelRequestQ.size = gNumChannels + 1;
 	ASSERT(gChannelRequestQ.items != nil );
-	gCdStreamSema = RE3_SEM_OPEN("/semaphore_cd_stream");
+#ifndef ANDROID
+    gCdStreamSema = RE3_SEM_OPEN("/semaphore_cd_stream");
 
 
-	if (gCdStreamSema == SEM_FAILED) {
-		CDTRACE("failed to create stream semaphore");
-		ASSERT(0);
-		return;
-	}
+    if (gCdStreamSema == SEM_FAILED) {
+        CDTRACE("failed to create stream semaphore");
+        ASSERT(0);
+        return;
+    }
+#elif ANDROID
+	//pthread_mutex_unlock(&gCdStreamSema);
+#endif
 #endif
 
 	if ( gNumChannels > 0 )
 	{
 		for ( int32 i = 0; i < gNumChannels; i++ )
 		{
-			gpReadInfo[i].pDoneSemaphore = RE3_SEM_OPEN("/semaphore_done%d", i);
+#ifndef ANDROID
+            gpReadInfo[i].pDoneSemaphore = RE3_SEM_OPEN("/semaphore_done%d", i);
 
 			if (gpReadInfo[i].pDoneSemaphore == SEM_FAILED)
 			{
@@ -154,6 +175,9 @@ CdStreamInitThread(void)
 				ASSERT(0);
 				return;
 			}
+#elif ANDROID
+			//pthread_mutex_unlock(&gpReadInfo[i].doneMutex);
+#endif
 
 #ifdef ONE_THREAD_PER_CHANNEL
 			gpReadInfo[i].pStartSemaphore = RE3_SEM_OPEN("/semaphore_start%d", i);
@@ -199,14 +223,32 @@ void
 CdStreamInit(int32 numChannels)
 {
 	struct statvfs fsInfo;
+#if defined ANDROID
+	char imgPath[MAX_PATH];
+	if(StorageRootBuffer == NULL) {
+		char pwd[128];
+		getcwd(pwd, 128);
+		setenv("STORAGE_ROOT", pwd, 1);
+        debug("%s\n", pwd);
+	}
+	
+	debug("FILES %s\n", StorageRootBuffer);
+	strcpy(imgPath, StorageRootBuffer);
+	strcat(imgPath, "/models/gta3.img");
+    debug("%s\n", imgPath);
 
-	if((statvfs("models/gta3.img", &fsInfo)) < 0)
+    if((statvfs(imgPath, &fsInfo)) < 0)
+#elifndef ANDROID
+    if((statvfs("models/gta3.img", &fsInfo)) < 0)
+#endif
 	{
 		CDTRACE("can't get filesystem info");
 		ASSERT(0);
 		return;
 	}
-#ifdef __linux__
+#if defined ANDROID
+	_gdwCdStreamFlags = O_RDONLY;
+#elif defined __linux__
 	_gdwCdStreamFlags = O_RDONLY | O_NOATIME;
 #else
 	_gdwCdStreamFlags = O_RDONLY;
@@ -271,7 +313,11 @@ CdStreamShutdown(void)
     // Destroying semaphores and free(gpReadInfo) will be done at threads
 #ifndef ONE_THREAD_PER_CHANNEL
 	gCdStreamThreadStatus = 2;
+#ifndef ANDROID
 	sem_post(gCdStreamSema);
+#elif ANDROID
+	pthread_mutex_unlock(&gCdStreamSema);
+#endif
 	pthread_join(_gCdStreamThread, nil);
 #else
 	for ( int32 i = 0; i < gNumChannels; i++ ) {
@@ -318,7 +364,11 @@ CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
 
 #ifndef ONE_THREAD_PER_CHANNEL
 	AddToQueue(&gChannelRequestQ, channel);
-	if ( sem_post(gCdStreamSema) != 0 )
+#if defined ANDROID
+	if ( pthread_mutex_unlock(&gCdStreamSema) != 0 )
+#else
+    if ( sem_post(gCdStreamSema) != 0 )
+#endif
 		printf("Signal Sema Error\n");
 #else
 	if ( sem_post(pChannel->pStartSemaphore) != 0 )
@@ -387,7 +437,11 @@ CdStreamSync(int32 channel)
 			pthread_kill(_gCdStreamThread, SIGUSR1);
 #endif
 			while (pChannel->bLocked)
+#ifndef ANDROID
 				sem_wait(pChannel->pDoneSemaphore);
+#elif ANDROID
+				pthread_mutex_lock(&pChannel->pDoneSemaphore);
+#endif
 		}
 		pChannel->bReading = false;
 		flushStream[channel] = false;
@@ -399,7 +453,11 @@ CdStreamSync(int32 channel)
 	{
 		pChannel->bLocked = true;
 		while (pChannel->bLocked && pChannel->nSectorsToRead != 0){
+#ifndef ANDROID
 			sem_wait(pChannel->pDoneSemaphore);
+#elif ANDROID
+			pthread_mutex_lock(&pChannel->pDoneSemaphore);
+#endif
 		}
 		pChannel->bLocked = false;
 	}
@@ -452,7 +510,11 @@ void *CdStreamThread(void *param)
 
 #ifndef ONE_THREAD_PER_CHANNEL
 	while (gCdStreamThreadStatus != 2) {
+#ifndef ANDROID
 		sem_wait(gCdStreamSema);
+#elif ANDROID
+		pthread_mutex_lock(&gCdStreamSema);
+#endif
 
 		int32 channel = GetFirstInQueue(&gChannelRequestQ);
 		
@@ -510,7 +572,11 @@ void *CdStreamThread(void *param)
 		if ( pChannel->bLocked )
 		{
 			pChannel->bLocked = 0;
+#ifndef ANDROID
 			sem_post(pChannel->pDoneSemaphore);
+#else
+            pthread_mutex_unlock(&pChannel->pDoneSemaphore);
+#endif
 		}
 		pChannel->bReading = false;
 	}
@@ -518,9 +584,17 @@ void *CdStreamThread(void *param)
 #ifndef ONE_THREAD_PER_CHANNEL
 	for ( int32 i = 0; i < gNumChannels; i++ )
 	{
+#ifndef ANDROID
 		RE3_SEM_CLOSE(gpReadInfo[i].pDoneSemaphore, "/semaphore_done%d", i);
+#elif ANDROID
+		pthread_mutex_destroy(&gpReadInfo[i].pDoneSemaphore);
+#endif
 	}
+#ifndef ANDROID
 	RE3_SEM_CLOSE(gCdStreamSema, "/semaphore_cd_stream");
+#elif ANDROID
+    pthread_mutex_destroy(&gCdStreamSema);
+#endif
 	free(gChannelRequestQ.items);
 #else
 	RE3_SEM_CLOSE(gpReadInfo[channel].pStartSemaphore, "/semaphore_start%d", channel);

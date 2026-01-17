@@ -1,5 +1,6 @@
 #include "common.h"
 #include "crossplatform.h"
+#include "FileMgr.h"
 
 // Codes compatible with Windows and Linux
 #ifndef _WIN32
@@ -91,7 +92,11 @@ void GetDateFormat(int unused1, int unused2, SYSTEMTIME* in, int unused3, char* 
 	linuxTime.tm_hour = in->wHour;
 	linuxTime.tm_min = in->wMinute;
 	linuxTime.tm_sec = in->wSecond;
-	strftime(out, size, nl_langinfo(D_FMT), &linuxTime);
+#if defined ANDROID
+	strftime(out, size, "%Y-%m-%d", &linuxTime);
+#else
+    strftime(out, size,  nl_langinfo(D_FMT), &linuxTime);
+#endif
 }
 
 void FileTimeToSystemTime(time_t* writeTime, SYSTEMTIME* out) {
@@ -212,6 +217,20 @@ char* casepath(char const* path, bool checkPathFirst)
     }
     else
     #endif
+#if defined(ANDROID) // TODO: Android is fuck!!!
+    char cwd[MAX_PATH];
+    getcwd(cwd, sizeof(cwd));
+
+    char* pos = strstr(p, CFileMgr::GetRootDirName());
+    if (pos != NULL) {
+        pos += strlen(CFileMgr::GetRootDirName());
+        p = pos;
+    }
+    d = opendir(cwd);
+    out[0] = '.';
+    out[1] = 0;
+    rl = 1;
+#else
     if (p[0] == '/' || p[0] == '\\')
     {
         d = opendir("/");
@@ -223,6 +242,7 @@ char* casepath(char const* path, bool checkPathFirst)
         out[1] = 0;
         rl = 1;
     }
+#endif
 
     bool cantProceed = false; // just convert slashes in what's left in string, don't correct case of letters(because we can't)
     bool mayBeTrailingSlash = false;
@@ -273,7 +293,7 @@ char* casepath(char const* path, bool checkPathFirst)
 
         if (!e)
         {
-            printf("casepath couldn't find dir/file \"%s\", full path was %s\n", c, path);
+            debug("casepath couldn't find dir/file \"%s\", full path was %s\n", c, path);
             // No match, add original name and continue converting further slashes.
             strcpy(out + rl, c);
             rl += strlen(c);
@@ -288,7 +308,7 @@ char* casepath(char const* path, bool checkPathFirst)
     }
 
     if (rl > l + 2) {
-        printf("\n\ncasepath: Corrected path length is longer then original+2:\n\tOriginal: %s (%zu chars)\n\tCorrected: %s (%zu chars)\n\n", path, l, out, rl);
+        debug("\n\ncasepath: Corrected path length is longer then original+2:\n\tOriginal: %s (%zu chars)\n\tCorrected: %s (%zu chars)\n\n", path, l, out, rl);
     }
     return out;
 }

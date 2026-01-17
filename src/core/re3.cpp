@@ -136,6 +136,9 @@ CustomFrontendOptionsPopulate(void)
 #ifdef EXTENDED_PIPELINES
 	const char *vehPipelineNames[] = { "FED_MFX", "FED_NEO" };
 	const char *off_on[] = { "FEM_OFF", "FEM_ON" };
+#if defined ANDROID
+	CFileMgr::ChangeDir("\\");
+#endif
 	fd = CFileMgr::OpenFile("neo/neo.txd","r");
 	if (fd) {
 #ifdef GRAPHICS_MENU_OPTIONS
@@ -1212,7 +1215,7 @@ void re3_assert(const char *expr, const char *filename, unsigned int lineno, con
 	strcat_s(re3_buff, re3_buffsize, "(Press Retry to debug the application)");
 
 
-	nCode = ::MessageBoxA(nil, re3_buff, "REVC Assertion Failed!",
+	nCode = ::MessageBoxA(nil, re3_buff, "reVC Assertion Failed!",
 		MB_ABORTRETRYIGNORE|MB_ICONHAND|MB_SETFOREGROUND|MB_TASKMODAL);
 
 	if (nCode == IDABORT)
@@ -1233,7 +1236,7 @@ void re3_assert(const char *expr, const char *filename, unsigned int lineno, con
 	abort();
 #else
 	// TODO
-	printf("\nREVC ASSERT FAILED\n\tFile: %s\n\tLine: %d\n\tFunction: %s\n\tExpression: %s\n",filename,lineno,func,expr);
+	printf("\nreVC ASSERT FAILED\n\tFile: %s\n\tLine: %d\n\tFunction: %s\n\tExpression: %s\n",filename,lineno,func,expr);
 	assert(false);
 #endif
 }
@@ -1250,7 +1253,9 @@ void re3_debug(const char *format, ...)
 	vsprintf(re3_buff, format, va);
 #endif
 	va_end(va);
-
+#if defined ANDROID
+    __android_log_print(ANDROID_LOG_DEBUG, "reVC-DEBUG", re3_buff);
+#endif
 	printf("%s", re3_buff);
 	CDebug::DebugAddText(re3_buff);
 #endif
@@ -1273,7 +1278,9 @@ void re3_trace(const char *filename, unsigned int lineno, const char *func, cons
 	
 	sprintf(buff, "[%s.%s:%d]: %s", filename, func, lineno, re3_buff);
 #endif
-
+#if defined ANDROID
+    __android_log_print(ANDROID_LOG_DEBUG, "reVC-TRACE", buff);
+#endif
 	OutputDebugString(buff);
 }
 #endif
@@ -1287,14 +1294,17 @@ void re3_usererror(const char *format, ...)
 	vsprintf_s(re3_buff, re3_buffsize, format, va);
 	va_end(va);
 	
-	::MessageBoxA(nil, re3_buff, "REVC Error!",
+	::MessageBoxA(nil, re3_buff, "reVC Error!",
 		MB_OK|MB_ICONHAND|MB_SETFOREGROUND|MB_TASKMODAL);
 
 	raise(SIGABRT);
 	_exit(3);
 #else
 	vsprintf(re3_buff, format, va);
-	printf("\nREVC Error!\n\t%s\n",re3_buff);
+#if defined ANDROID
+    __android_log_print(ANDROID_LOG_ERROR, "reVC-ERROR", re3_buff);
+#endif
+	printf("\nreVC Error!\n\t%s\n",re3_buff);
 	assert(false);
 #endif
 }

@@ -104,18 +104,18 @@ class CMouseControllerState;
 class CControllerState;
 
 
-#define JOY_BUTTONS 16
+#define JOY_BUTTONS 32
 #define MAX_BUTTONS (JOY_BUTTONS+1)
 
 #define ACTIONNAME_LENGTH 40
 
 #ifdef RW_GL3
-struct GlfwJoyState {
-	int8 id;
-	bool isGamepad;
-	uint8 numButtons;
-	uint8* buttons;
-	bool mappedButtons[17];
+struct JoyState {
+    int8 id;
+    bool isGamepad;
+    uint8 numButtons;
+    uint8 buttons[MAX_BUTTONS];
+    bool mappedButtons[MAX_BUTTONS];
 };
 #endif
 
@@ -136,8 +136,8 @@ public:
 
 	bool                  m_bFirstCapture;
 #if defined RW_GL3
-	GlfwJoyState           m_OldState;
-	GlfwJoyState           m_NewState;
+    JoyState              m_OldState;
+    JoyState              m_NewState;
 #else
 	DIJOYSTATE2           m_OldState;
 	DIJOYSTATE2           m_NewState;
@@ -147,6 +147,8 @@ public:
 	tControllerConfigBind m_aSettings[MAX_CONTROLLERACTIONS][MAX_CONTROLLERTYPES];
 	bool                  m_aSimCheckers[MAX_SIMS][MAX_CONTROLLERTYPES];
 	bool                  m_bMouseAssociated;
+    float                 m_lStickSensX, m_lStickSensY, m_rStickSensX, m_rStickSensY;
+    float                 m_lStickDeadzone, m_rStickDeadzone;
 
 #ifdef LOAD_INI_SETTINGS
 	static uint32 ms_padButtonsInited;

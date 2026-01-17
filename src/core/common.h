@@ -21,6 +21,10 @@
 #include <string.h>
 #include <math.h>
 
+#if defined ANDROID
+#include <android/log.h>
+#endif
+
 #ifdef __MWERKS__
 #define AUDIO_MSS
 #define RWLIBS // codewarrior doesn't support project level defines - so not even this is enough, but still catches most ifdefs
@@ -341,7 +345,7 @@ void re3_usererror(const char *format, ...);
 #define DEBUGBREAK() __debugbreak();
 
 // Switch to enable development messages.
-#if 1 
+#if 0
 #define DEV(f, ...)
 #else
 #define DEV(f, ...)   re3_debug("[DEV]: " f, ## __VA_ARGS__)

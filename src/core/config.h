@@ -26,9 +26,11 @@ enum Config {
 	PEDMODELSIZE = 130,
 	VEHICLEMODELSIZE = 110,
 	TWODFXSIZE = 1210,
-
-	MAXVEHICLESLOADED = 50, // 70 on mobile
-
+#if defined ANDROID
+	MAXVEHICLESLOADED = 70,
+#else
+    MAXVEHICLESLOADED = 50, // 70 on mobile
+#endif
 	NUMOBJECTINFO = 210,
 
 	// Pool sizes
@@ -154,12 +156,14 @@ enum Config {
 #define GTA_PC
 //#define GTA_PS2
 //#define GTA_XBOX
+#define GTA_MOBILE
 
 // Version defines
 #define GTAVC_PS2	400
 #define GTAVC_PC_10	410
 #define GTAVC_PC_11	411
 #define GTAVC_PC_JAP	412
+#define GTAVC_ANDROID 413 // ANDROID 413?
 // TODO? maybe something for xbox or android?
 
 #define GTA_VERSION	GTAVC_PC_11
@@ -290,7 +294,7 @@ enum Config {
 #define EXTENDED_OFFSCREEN_DESPAWN_RANGE // Use onscreen despawn range for offscreen peds and vehicles to avoid them despawning in the distance when you look
                                          // away
 
-#if defined(__LP64__) || defined(_WIN64)
+#if defined(__LP64__) || defined(_WIN64) || defined(__aarch64__)
 #define FIX_BUGS_64 // Must have fixes to be able to run 64 bit build
 #endif
 
@@ -304,6 +308,10 @@ enum Config {
 #ifdef DEBUGMENU
 #define RELOADABLES			// some debug menu options to reload TXD files
 #define MISSION_SWITCHER // from debug menu
+#endif
+
+#ifdef ANDROID
+#define USE_FILE_LOG
 #endif
 
 // Rendering/display

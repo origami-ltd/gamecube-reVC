@@ -633,10 +633,11 @@ CMenuManager::CentreMousePointer()
 		Point.y = SCREEN_HEIGHT / 2;
 		ClientToScreen(PSGLOBAL(window), &Point);
 		SetCursorPos(Point.x, Point.y);
-#elif defined RW_GL3
+#elif defined RW_GL3 && !defined(LIBRW_SDL2)
 		glfwSetCursorPos(PSGLOBAL(window), SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
+#elif defined(RW_GL3) && defined(LIBRW_SDL2)
+        SDL_WarpMouseInWindow(PSGLOBAL(window), SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
 #endif
-
 		PSGLOBAL(lastMousePos.x) = SCREEN_WIDTH / 2;
 		PSGLOBAL(lastMousePos.y) = SCREEN_HEIGHT / 2;
 	}
@@ -4946,6 +4947,13 @@ CMenuManager::ProcessUserInput(uint8 goDown, uint8 goUp, uint8 optionSelected, u
 						PSGLOBAL(joy1)->GetCapabilities(&devCaps);
 						ControlsManager.InitDefaultControlConfigJoyPad(devCaps.dwButtons);
 					}
+#elif defined(LIBRW_SDL2)		// TODO SDL2 the part below seems unnecessary SDL2 (at least on Linux), remove in the future
+                    /*if (PSGLOBAL(joy1id) != -1 && SDL_IsGameController(PSGLOBAL(joy1id))) {
+                        SDL_Joystick* joy1 = SDL_JoystickOpen(PSGLOBAL(joy1id));
+                        int count = SDL_JoystickNumButtons(joy1);
+                        SDL_JoystickClose(joy1);
+                        ControlsManager.InitDefaultControlConfigJoyPad(count);
+                    }*/
 #else
 					if (PSGLOBAL(joy1id) != -1 && glfwJoystickPresent(PSGLOBAL(joy1id))) {
 						int count;

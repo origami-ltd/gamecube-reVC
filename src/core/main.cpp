@@ -1084,8 +1084,10 @@ DisplayGameDebugText()
 	sprintf(verA,
 #if defined _WIN32
 			"Win "
-#elif defined __linux__
+#elif defined __linux__ && !defined ANDROID
 		    "Linux "
+#elif defined(ANDROID)
+            "Android "
 #elif defined __APPLE__
 		    "Mac OS X "
 #elif defined __FreeBSD__
@@ -1093,8 +1095,14 @@ DisplayGameDebugText()
 #else
 		    "Posix-compliant "
 #endif
-#if defined __LP64__ || defined _WIN64
+#if defined __LP64__ || defined _WIN64 || defined __aarch64__
+#if defined ANDROID
+            "arm64-v8a "
+#else
 			"64-bit "
+#endif
+#elif defined ANDROID
+            "armeabi-v7a "
 #else
 			"32-bit "
 #endif

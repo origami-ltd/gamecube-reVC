@@ -29,6 +29,9 @@
 #include "SaveBuf.h"
 
 int gBuildings;
+#if defined ANDROID
+int g_iLastRenderedObject;
+#endif
 
 CEntity::CEntity(void)
 {
@@ -415,6 +418,9 @@ CEntity::PreRender(void)
 void
 CEntity::Render(void)
 {
+#if defined ANDROID
+    g_iLastRenderedObject = this->m_modelIndex;
+#endif
 	if(m_rwObject){
 		bImBeingRendered = true;
 		if(RwObjectGetType(m_rwObject) == rpATOMIC)

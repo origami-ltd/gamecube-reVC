@@ -871,9 +871,13 @@ CMouseControllerState CMousePointerStateHelper::GetMouseSetUp()
 	}
 #else
 	// It seems there is no way to get number of buttons on mouse, so assign all buttons if we have mouse.
-	double xpos = 1.0f, ypos;
+#if !defined(LIBRW_SDL2)
+    double xpos = 1.0f, ypos;
 	glfwGetCursorPos(PSGLOBAL(window), &xpos, &ypos);
-
+#else
+    int xpos = 1, ypos;
+    SDL_GetMouseState(&xpos, &ypos);
+#endif
 	if (xpos != 0.f) {
 		state.MMB = true;
 		state.RMB = true;
@@ -931,8 +935,13 @@ void CPad::UpdateMouse()
 #else
 	if ( IsForegroundApp() && PSGLOBAL(cursorIsInWindow) )
 	{
-		double xpos = 1.0f, ypos;
+#ifdef LIBRW_SDL2
+        int xpos = 1, ypos;
+        int mouseState = SDL_GetMouseState(&xpos, &ypos);
+#else
+        double xpos = 1.0f, ypos;
 		glfwGetCursorPos(PSGLOBAL(window), &xpos, &ypos);
+#endif
 		if (xpos == 0.f)
 			return;
 
@@ -951,12 +960,19 @@ void CPad::UpdateMouse()
 
 		PCTempMouseControllerState.x = (float)(signX * (xpos - PSGLOBAL(lastMousePos.x)));
 		PCTempMouseControllerState.y = (float)(signy * (ypos - PSGLOBAL(lastMousePos.y)));
+#ifdef LIBRW_SDL2
+        PCTempMouseControllerState.LMB = !!(mouseState & SDL_BUTTON(1));
+        PCTempMouseControllerState.RMB = !!(mouseState & SDL_BUTTON(3));
+        PCTempMouseControllerState.MMB = !!(mouseState & SDL_BUTTON(2));
+        PCTempMouseControllerState.MXB1 = !!(mouseState & SDL_BUTTON(4));
+        PCTempMouseControllerState.MXB2 = !!(mouseState & SDL_BUTTON(5));
+#else
 		PCTempMouseControllerState.LMB = glfwGetMouseButton(PSGLOBAL(window), GLFW_MOUSE_BUTTON_LEFT);
 		PCTempMouseControllerState.RMB = glfwGetMouseButton(PSGLOBAL(window), GLFW_MOUSE_BUTTON_RIGHT);
 		PCTempMouseControllerState.MMB = glfwGetMouseButton(PSGLOBAL(window), GLFW_MOUSE_BUTTON_MIDDLE);
 		PCTempMouseControllerState.MXB1 = glfwGetMouseButton(PSGLOBAL(window), GLFW_MOUSE_BUTTON_4);
 		PCTempMouseControllerState.MXB2 = glfwGetMouseButton(PSGLOBAL(window), GLFW_MOUSE_BUTTON_5);
-
+#endif
 		if (PSGLOBAL(mouseWheel) > 0)
 			PCTempMouseControllerState.WHEELUP = 1;
 		else if (PSGLOBAL(mouseWheel) < 0)
@@ -1631,14 +1647,14 @@ void CPad::AffectFromXinput(uint32 pad)
 		float rx = (float)xstate.Gamepad.sThumbRX / (float)0x7FFF;
 		float ry = (float)xstate.Gamepad.sThumbRY / (float)0x7FFF;
 
-		if (Abs(lx) > 0.3f || Abs(ly) > 0.3f) {
-			PCTempJoyState.LeftStickX = (int32)(lx * 128.0f);
-			PCTempJoyState.LeftStickY = (int32)(-ly * 128.0f);
+		if (Abs(lx) > ControlsManager.m_lStickDeadzone || Abs(ly) > ControlsManager.m_lStickDeadzone) {
+			PCTempJoyState.LeftStickX = (int32)(lx * 128.0f * ControlsManager.m_lStickSensX);
+			PCTempJoyState.LeftStickY = (int32)(-ly * 128.0f * ControlsManager.m_lStickSensY);
 		}
 
-		if (Abs(rx) > 0.3f || Abs(ry) > 0.3f) {
-			PCTempJoyState.RightStickX = (int32)(rx * 128.0f);
-			PCTempJoyState.RightStickY = (int32)(-ry * 128.0f);
+		if (Abs(rx) > ControlsManager.m_rStickDeadzone || Abs(ry) > ControlsManager.m_rStickDeadzone) {
+			PCTempJoyState.RightStickX = (int32)(rx * 128.0f * ControlsManager.m_rStickSensX);
+			PCTempJoyState.RightStickY = (int32)(-ry * 128.0f * ControlsManager.m_rStickSensY);
 		}
 
 		XINPUT_VIBRATION VibrationState;
