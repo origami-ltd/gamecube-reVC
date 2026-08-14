@@ -87,6 +87,16 @@ psGlobalType;
 
 void CapturePad(RwInt32 padID);
 void joysChangeCB(int jid, int event);
+#elif defined(GTA_OGC)
+typedef struct
+{
+	RwV2d lastMousePos;
+}
+psGlobalType;
+
+#define PSGLOBAL(var) (((psGlobalType *)(RsGlobal.ps))->var)
+
+void CapturePad(RwInt32 padID);
 #endif
 
 #ifdef DETECT_JOYSTICK_MENU

@@ -1,7 +1,14 @@
-find_package(Threads REQUIRED)
-set(THREADS_PREFER_PTHREAD_FLAG ON)
+if(NOT NINTENDO_OGC)
+    find_package(Threads REQUIRED)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+endif()
 
 file(GLOB_RECURSE ${PROJECT}_SOURCES "*.cpp" "*.h" "*.rc")
+if(NINTENDO_OGC)
+    list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "CdStream_posix\\.cpp$")
+    list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "/audio/(eax|oal)/")
+    list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "/audio/sampman_(miles|oal)\\.cpp$")
+endif()
 
 function(header_directories RETURN_LIST)
     file(GLOB_RECURSE ALL_SRCS *.h *.cpp *.c)
@@ -28,8 +35,17 @@ endif()
 
 target_link_libraries(${EXECUTABLE} PRIVATE
     librw::librw
-    Threads::Threads
 )
+if(NOT NINTENDO_OGC)
+    target_link_libraries(${EXECUTABLE} PRIVATE Threads::Threads)
+else()
+    target_link_libraries(${EXECUTABLE} PRIVATE fat iso9660)
+    target_link_options(${EXECUTABLE} PRIVATE -Wl,--gc-sections)
+    # Marks the libogc/console path, shared verbatim by GameCube and Wii.
+    # libogc rejects defining both __gamecube__ and __wii__, so this is its own
+    # macro rather than a reuse of either.
+    target_compile_definitions(${EXECUTABLE} PRIVATE GTA_OGC)
+endif()
 
 if(ANDROID)
     target_link_libraries(${EXECUTABLE} PRIVATE
@@ -99,10 +115,12 @@ elseif(${PROJECT}_AUDIO STREQUAL "MSS")
     target_link_libraries(${EXECUTABLE} PRIVATE MilesSDK::MilesSDK)
 endif()
 
-find_package(mpg123 REQUIRED)
-target_link_libraries(${EXECUTABLE} PRIVATE
-    MPG123::libmpg123
-)
+if(NOT NINTENDO_OGC)
+    find_package(mpg123 REQUIRED)
+    target_link_libraries(${EXECUTABLE} PRIVATE
+        MPG123::libmpg123
+    )
+endif()
 if(${PROJECT}_WITH_OPUS)
     find_package(opusfile REQUIRED)
     target_link_libraries(${EXECUTABLE} PRIVATE
@@ -122,7 +140,7 @@ target_compile_definitions(${EXECUTABLE} PRIVATE )
 
 option(${PROJECT}_WITH_SANITIZERS "Use UB sanitizers (better crash log)" OFF)
 option(${PROJECT}_WITH_ASAN "Use Address sanitizer (better crash log)" OFF)
-option(${PROJECT}_DISABLE_WARNINGS "Disable build warnings" ON)
+option(${PROJECT}_DISABLE_WARNINGS "Disable build warnings" OFF)
 
 if(${PROJECT}_DISABLE_WARNINGS)
     target_compile_options(${EXECUTABLE} PRIVATE

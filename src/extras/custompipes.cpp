@@ -467,11 +467,12 @@ void
 CustomPipeInit(void)
 {
 	RwStream *stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, "neo/neo.txd");
+	RwUInt32 size;
 	if(stream == nil)
 		printf("Error: couldn't open 'neo/neo.txd'\n");
 	else{
-		if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, nil, nil))
-			neoTxd = RwTexDictionaryGtaStreamRead(stream);
+		if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil))
+			neoTxd = RwTexDictionaryGtaStreamRead(stream, size);
 		RwStreamClose(stream, nil);
 	}
 

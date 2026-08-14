@@ -1871,7 +1871,6 @@ void InitialiseLanguage()
 		}
 	}
 
-	TheText.Unload();
 	TheText.Load();
 }
 
@@ -2198,7 +2197,6 @@ WinMain(HINSTANCE instance,
 	{
 		LoadingScreen(nil, nil, "loadsc0");
 		
-		TheText.Unload();
 		TheText.Load();
 		
 		CFont::Initialise();
@@ -2211,11 +2209,13 @@ WinMain(HINSTANCE instance,
 	if (gbModelViewer) {
 		// This is TheModelViewer in LCS
 		LoadingScreen("Loading the ModelViewer", NULL, GetRandomSplashScreen());
-		CAnimViewer::Initialise();
-		CTimer::Update();
+		if (CAnimViewer::Initialise()) {
+			CTimer::Update();
 #ifndef PS2_MENU
-		FrontEndMenuManager.m_bGameNotLoaded = false;
+			FrontEndMenuManager.m_bGameNotLoaded = false;
 #endif
+		} else
+			RsGlobal.quit = TRUE;
 	}
 #endif
 
@@ -2440,7 +2440,10 @@ WinMain(HINSTANCE instance,
 						if ( FrontEndMenuManager.m_bWantToLoad )
 #endif
 						{
-							InitialiseGame();
+							if(!InitialiseGame()){
+								RsGlobal.quit = TRUE;
+								break;
+							}
 							FrontEndMenuManager.m_bGameNotLoaded = false;
 							gGameState = GS_PLAYING_GAME;
 							TRACE("gGameState = GS_PLAYING_GAME;");
@@ -2452,7 +2455,10 @@ WinMain(HINSTANCE instance,
 					case GS_INIT_PLAYING_GAME:
 					{
 #ifdef PS2_MENU
-						CGame::Initialise("DATA\\GTA3.DAT");
+						if(!CGame::Initialise("DATA\\GTA3.DAT")){
+							RsGlobal.quit = TRUE;
+							break;
+						}
 						
 						//LoadingScreen("Starting Game", NULL, GetRandomSplashScreen());
 					
@@ -2467,14 +2473,16 @@ WinMain(HINSTANCE instance,
 							if (CMenuManager::m_PrefsLanguage != TheMemoryCard.GetLanguageToLoad())
 							{
 								CMenuManager::m_PrefsLanguage = TheMemoryCard.GetLanguageToLoad();
-								TheText.Unload();
 								TheText.Load();
 							}
 					
 							CGame::currLevel = (eLevelName)TheMemoryCard.GetLevelToLoad();
 						}
 #else
-						InitialiseGame();
+						if(!InitialiseGame()){
+							RsGlobal.quit = TRUE;
+							break;
+						}
 
 						FrontEndMenuManager.m_bGameNotLoaded = false;
 #endif
@@ -2542,7 +2550,8 @@ WinMain(HINSTANCE instance,
 				TheMemoryCard.m_bWantToLoad = true;
 			}
 
-			CGame::InitialiseWhenRestarting();
+			if(!CGame::InitialiseWhenRestarting())
+				break;
 			DMAudio.ChangeMusicMode(MUSICMODE_GAME);
 			FrontEndMenuManager.m_bWantToRestart = false;
 			
@@ -2557,7 +2566,8 @@ WinMain(HINSTANCE instance,
 		if ( FrontEndMenuManager.m_bWantToLoad )
 		{
 			CGame::ShutDownForRestart();
-			CGame::InitialiseWhenRestarting();
+			if(!CGame::InitialiseWhenRestarting())
+				break;
 			DMAudio.ChangeMusicMode(MUSICMODE_GAME);
 			LoadSplash(GetLevelSplashScreen(CGame::currLevel));
 			FrontEndMenuManager.m_bWantToLoad = false;

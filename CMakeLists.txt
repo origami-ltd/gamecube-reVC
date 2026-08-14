@@ -11,6 +11,26 @@ include(GetGitRevisionDescription)
 get_git_head_revision(GIT_REFSPEC GIT_SHA1 "ALLOW_LOOKING_ABOVE_CMAKE_SOURCE_DIR")
 message(STATUS "Building ${CMAKE_PROJECT_NAME} GIT SHA1: ${GIT_SHA1}")
 
+# GameCube and Wii share the same toolchain, libogc and GX GPU. Wii is used as
+# a boot vehicle (Dolphin emulates its SD card); the memory budget stays
+# GameCube-sized, so allocations must live in MEM1 and never touch MEM2.
+if(NINTENDO_GAMECUBE OR NINTENDO_WII)
+    set(NINTENDO_OGC TRUE)
+endif()
+
+if(NINTENDO_OGC)
+    # NULL stays the default (headless/CI builds); pass -DLIBRW_PLATFORM=GAMECUBE
+    # for the GX backend.
+    set(LIBRW_PLATFORM "NULL" CACHE STRING "")
+    set(LIBRW_TOOLS OFF CACHE BOOL "" FORCE)
+    set(LIBRW_INSTALL OFF CACHE BOOL "" FORCE)
+
+    function(reVC_platform_target TARGET)
+        target_link_libraries(${TARGET} PRIVATE iso9660)
+        ogc_create_dol(${TARGET})
+    endfunction()
+endif()
+
 
 if(NINTENDO_SWITCH)
     list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/nx")
@@ -22,13 +42,19 @@ if(NOT COMMAND reVC_platform_target)
     endfunction()
 endif()
 
-if(WIN32)
+if(NINTENDO_OGC)
+    set(${PROJECT}_AUDIOS "NULL")
+elseif(WIN32)
     set(${PROJECT}_AUDIOS "OAL" "MSS")
 else()
     set(${PROJECT}_AUDIOS "OAL")
 endif()
 
-set(${PROJECT}_AUDIO "OAL" CACHE STRING "Audio")
+if(NINTENDO_OGC)
+    set(${PROJECT}_AUDIO "NULL" CACHE STRING "Audio" FORCE)
+else()
+    set(${PROJECT}_AUDIO "OAL" CACHE STRING "Audio")
+endif()
 
 option(${PROJECT}_WITH_OPUS "Build ${EXECUTABLE} with opus support" OFF)
 option(${PROJECT}_WITH_LIBSNDFILE "Build ${EXECUTABLE} with libsndfile (instead of internal decoder)" OFF)
@@ -43,6 +69,9 @@ endif()
 option(${PROJECT}_VENDORED_LIBRW "Use vendored librw" ON)
 if(${PROJECT}_VENDORED_LIBRW)
     add_subdirectory(vendor/librw)
+    if(NINTENDO_OGC)
+        target_compile_definitions(librw PUBLIC BIGENDIAN)
+    endif()
 else()
     find_package(librw REQUIRED)
 endif()

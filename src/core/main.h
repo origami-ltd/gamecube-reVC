@@ -42,8 +42,11 @@ bool DoRWStuffStartOfFrame(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 Bo
 bool DoRWStuffStartOfFrame_Horizon(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 BottomRed, int16 BottomGreen, int16 BottomBlue, int16 Alpha);
 void DoRWStuffEndOfFrame(void);
 void PreAllocateRwObjects(void);
-void InitialiseGame(void);
+bool InitialiseGame(void);
 void LoadingScreen(const char *str1, const char *str2, const char *splashscreen);
+#ifdef GTA_OGC
+void BootLog(const char *msg);
+#endif
 void LoadingIslandScreen(const char *levelName);
 CSprite2d *LoadSplash(const char *name);
 void DestroySplashScreen(void);

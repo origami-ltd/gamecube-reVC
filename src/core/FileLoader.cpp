@@ -1,5 +1,6 @@
 #include "common.h"
 #include <ctype.h>
+#include <new>
 #include "main.h"
 
 #include "General.h"
@@ -46,7 +47,7 @@ LoadingScreenLoadingFile(const char *filename)
 	LoadingScreen("Loading the Game", gString, nil);
 }
 
-void
+bool
 CFileLoader::LoadLevel(const char *filename)
 {
 	int fd;
@@ -62,7 +63,8 @@ CFileLoader::LoadLevel(const char *filename)
 		RwTexDictionarySetCurrent(savedTxd);
 	}
 	fd = CFileMgr::OpenFile(filename, "r");
-	assert(fd > 0);
+	if(fd <= 0)
+		return false;
 
 	for(line = LoadLine(fd); line; line = LoadLine(fd)){
 		if(*line == '#')
@@ -83,7 +85,11 @@ CFileLoader::LoadLevel(const char *filename)
 			POP_MEMID();
 		}else if(strncmp(line, "COLFILE", 7) == 0){
 			LoadingScreenLoadingFile(line+10);
-			LoadCollisionFile(line+10, 0);
+			if(!LoadCollisionFile(line+10, 0)){
+				CFileMgr::CloseFile(fd);
+				RwTexDictionarySetCurrent(savedTxd);
+				return false;
+			}
 		}else if(strncmp(line, "MODELFILE", 9) == 0){
 			LoadingScreenLoadingFile(line + 10);
 			LoadModelFile(line + 10);
@@ -98,7 +104,12 @@ CFileLoader::LoadLevel(const char *filename)
 				LoadingScreenLoadingFile("Collision");
 				PUSH_MEMID(MEMID_WORLD);
 				CObjectData::Initialise("DATA\\OBJECT.DAT");
-				CStreaming::Init();
+				if(!CStreaming::Init()){
+					POP_MEMID();
+					CFileMgr::CloseFile(fd);
+					RwTexDictionarySetCurrent(savedTxd);
+					return false;
+				}
 				POP_MEMID();
 				PUSH_MEMID(MEMID_COLLISION);
 				CColStore::LoadAllCollision();
@@ -118,7 +129,11 @@ CFileLoader::LoadLevel(const char *filename)
 #endif
 #ifndef GTA_PS2
 		}else if(strncmp(line, "CDIMAGE", 7) == 0){
-			CdStreamAddImage(line + 8);
+			if(!CdStreamAddImage(line + 8)){
+				CFileMgr::CloseFile(fd);
+				RwTexDictionarySetCurrent(savedTxd);
+				return false;
+			}
 #endif
 		}
 	}
@@ -132,6 +147,7 @@ CFileLoader::LoadLevel(const char *filename)
 			CColStore::GetBoundingBox(i).Grow(120.0f);
 	CWorld::RepositionCertainDynamicObjects();
 	CColStore::RemoveAllCollision();
+	return true;
 }
 
 char*
@@ -154,13 +170,14 @@ CFileLoader::LoadTexDictionary(const char *filename)
 {
 	RwTexDictionary *txd;
 	RwStream *stream;
+	RwUInt32 size;
 
 	txd = nil;
 	stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, filename);
 	debug("Loading texture dictionary file %s\n", filename);
 	if(stream){
-		if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, nil, nil))
-			txd = RwTexDictionaryGtaStreamRead(stream);
+		if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil))
+			txd = RwTexDictionaryGtaStreamRead(stream, size);
 		RwStreamClose(stream, nil);
 	}
 	if(txd == nil)
@@ -168,206 +185,643 @@ CFileLoader::LoadTexDictionary(const char *filename)
 	return txd;
 }
 
-struct ColHeader
+namespace {
+
+struct CollisionCursor
 {
-	uint32 ident;
+	const uint8 *data;
+	uint32 remaining;
+
+	CollisionCursor(const uint8 *data, uint32 size) : data(data), remaining(size) {}
+
+	bool Skip(uint32 size)
+	{
+		if(size > remaining)
+			return false;
+		data += size;
+		remaining -= size;
+		return true;
+	}
+
+	bool ReadU16(uint16 &value)
+	{
+		if(remaining < sizeof(uint16))
+			return false;
+		value = ReadLE16(data);
+		return Skip(sizeof(uint16));
+	}
+
+	bool ReadU32(uint32 &value)
+	{
+		if(remaining < sizeof(uint32))
+			return false;
+		value = ReadLE32(data);
+		return Skip(sizeof(uint32));
+	}
+
+	bool ReadFloat(float &value)
+	{
+		if(remaining < sizeof(float))
+			return false;
+		value = ReadLEFloat32(data);
+		return Skip(sizeof(float));
+	}
+
+	bool ArraySize(uint32 count, uint32 stride, uint32 &size) const
+	{
+		if(stride != 0 && count > UINT32_MAX / stride)
+			return false;
+		size = count * stride;
+		return size <= remaining;
+	}
+};
+
+struct CollisionModelLayout
+{
+	CSphere boundingSphere;
+	CBox boundingBox;
+	uint16 numSpheres;
+	uint16 numBoxes;
+	uint16 numVertices;
+	uint16 numTriangles;
+	const uint8 *spheres;
+	const uint8 *boxes;
+	const uint8 *vertices;
+	const uint8 *triangles;
+};
+
+struct CollisionRecord
+{
+	char name[23];
+	int16 modelId;
+	const uint8 *data;
 	uint32 size;
 };
 
-void
+struct LoadedCollisionModel
+{
+	CColSphere *spheres;
+	CColBox *boxes;
+	CompressedVector *vertices;
+	CColTriangle *triangles;
+
+	LoadedCollisionModel(void) : spheres(nil), boxes(nil), vertices(nil), triangles(nil) {}
+	~LoadedCollisionModel(void)
+	{
+		if(spheres)
+			RwFree(spheres);
+		if(boxes)
+			RwFree(boxes);
+		if(vertices)
+			RwFree(vertices);
+		if(triangles)
+			RwFree(triangles);
+	}
+};
+
+struct StagedCollisionModel
+{
+	CollisionModelLayout layout;
+	LoadedCollisionModel loaded;
+	CBaseModelInfo *modelInfo;
+	CColModel *target;
+	CColModel *replacement;
+	int modelIndex;
+	bool includeModelIndex;
+
+	StagedCollisionModel(void) : modelInfo(nil), target(nil), replacement(nil),
+		modelIndex(-1), includeModelIndex(false) {}
+	~StagedCollisionModel(void)
+	{
+		if(replacement)
+			delete replacement;
+	}
+};
+
+static bool
+ReadCollisionVector(CollisionCursor &cursor, CVector &vector)
+{
+	return cursor.ReadFloat(vector.x) && cursor.ReadFloat(vector.y) && cursor.ReadFloat(vector.z);
+}
+
+static bool
+IsFiniteCollisionVector(const CVector &vector)
+{
+	return isfinite(vector.x) && isfinite(vector.y) && isfinite(vector.z);
+}
+
+static bool
+IsValidCollisionBox(const CBox &box)
+{
+	return IsFiniteCollisionVector(box.min) && IsFiniteCollisionVector(box.max) &&
+	       box.min.x <= box.max.x && box.min.y <= box.max.y && box.min.z <= box.max.z;
+}
+
+static bool
+IsValidCollisionVertex(const CVector &vertex)
+{
+	if(!IsFiniteCollisionVector(vertex))
+		return false;
+#ifdef COMPRESSED_COL_VECTORS
+	float x = vertex.x * 128.0f;
+	float y = vertex.y * 128.0f;
+	float z = vertex.z * 128.0f;
+	return isfinite(x) && isfinite(y) && isfinite(z) &&
+	       x >= INT16_MIN && x <= INT16_MAX &&
+	       y >= INT16_MIN && y <= INT16_MAX &&
+	       z >= INT16_MIN && z <= INT16_MAX;
+#else
+	return true;
+#endif
+}
+
+static bool
+ReadCollisionSectionHeader(CollisionCursor &cursor, uint16 &count)
+{
+	return cursor.ReadU16(count) && count <= INT16_MAX && cursor.Skip(2);
+}
+
+static bool
+ValidateCollisionModel(const uint8 *data, uint32 size, CollisionModelLayout &layout)
+{
+	if(data == nil)
+		return false;
+
+	CollisionCursor cursor(data, size);
+	if(!cursor.ReadFloat(layout.boundingSphere.radius) ||
+	   !ReadCollisionVector(cursor, layout.boundingSphere.center) ||
+	   !ReadCollisionVector(cursor, layout.boundingBox.min) ||
+	   !ReadCollisionVector(cursor, layout.boundingBox.max) ||
+	   !isfinite(layout.boundingSphere.radius) || layout.boundingSphere.radius < 0.0f ||
+	   !IsFiniteCollisionVector(layout.boundingSphere.center) ||
+	   !IsValidCollisionBox(layout.boundingBox))
+		return false;
+
+	uint32 sectionSize;
+	if(!ReadCollisionSectionHeader(cursor, layout.numSpheres) ||
+	   !cursor.ArraySize(layout.numSpheres, 20, sectionSize))
+		return false;
+	layout.spheres = cursor.data;
+	CollisionCursor spheres(cursor.data, sectionSize);
+	for(uint32 i = 0; i < layout.numSpheres; i++){
+		float radius;
+		CVector center;
+		if(!spheres.ReadFloat(radius) || !ReadCollisionVector(spheres, center) || !spheres.Skip(4) ||
+		   !isfinite(radius) || radius < 0.0f || !IsFiniteCollisionVector(center))
+			return false;
+	}
+	if(!cursor.Skip(sectionSize))
+		return false;
+
+	uint16 numLines;
+	if(!ReadCollisionSectionHeader(cursor, numLines) || !cursor.ArraySize(numLines, 24, sectionSize))
+		return false;
+	CollisionCursor lines(cursor.data, sectionSize);
+	for(uint32 i = 0; i < numLines; i++){
+		CVector start, end;
+		if(!ReadCollisionVector(lines, start) || !ReadCollisionVector(lines, end) ||
+		   !IsFiniteCollisionVector(start) || !IsFiniteCollisionVector(end))
+			return false;
+	}
+	if(!cursor.Skip(sectionSize))
+		return false;
+
+	if(!ReadCollisionSectionHeader(cursor, layout.numBoxes) ||
+	   !cursor.ArraySize(layout.numBoxes, 28, sectionSize))
+		return false;
+	layout.boxes = cursor.data;
+	CollisionCursor boxes(cursor.data, sectionSize);
+	for(uint32 i = 0; i < layout.numBoxes; i++){
+		CBox box;
+		if(!ReadCollisionVector(boxes, box.min) || !ReadCollisionVector(boxes, box.max) ||
+		   !boxes.Skip(4) || !IsValidCollisionBox(box))
+			return false;
+	}
+	if(!cursor.Skip(sectionSize))
+		return false;
+
+	if(!ReadCollisionSectionHeader(cursor, layout.numVertices) ||
+	   !cursor.ArraySize(layout.numVertices, 12, sectionSize))
+		return false;
+	layout.vertices = cursor.data;
+	CollisionCursor vertices(cursor.data, sectionSize);
+	for(uint32 i = 0; i < layout.numVertices; i++){
+		CVector vertex;
+		if(!ReadCollisionVector(vertices, vertex) || !IsValidCollisionVertex(vertex))
+			return false;
+	}
+	if(!cursor.Skip(sectionSize))
+		return false;
+
+	if(!ReadCollisionSectionHeader(cursor, layout.numTriangles) ||
+	   !cursor.ArraySize(layout.numTriangles, 16, sectionSize))
+		return false;
+	layout.triangles = cursor.data;
+	CollisionCursor triangles(cursor.data, sectionSize);
+	for(uint32 i = 0; i < layout.numTriangles; i++){
+		uint32 a, b, c;
+		if(!triangles.ReadU32(a) || !triangles.ReadU32(b) || !triangles.ReadU32(c) ||
+		   !triangles.Skip(4) || a >= layout.numVertices || b >= layout.numVertices || c >= layout.numVertices)
+			return false;
+	}
+	return cursor.Skip(sectionSize) && cursor.remaining == 0;
+}
+
+template<typename T>
+static bool
+AllocateCollisionArray(uint16 count, T *&array)
+{
+	array = nil;
+	if(count == 0)
+		return true;
+	if((size_t)count > SIZE_MAX / sizeof(T))
+		return false;
+	array = (T*)RwMalloc((size_t)count * sizeof(T));
+	return array != nil;
+}
+
+static bool
+AllocateCollisionModel(const CollisionModelLayout &layout, LoadedCollisionModel &loaded)
+{
+	return AllocateCollisionArray(layout.numSpheres, loaded.spheres) &&
+	       AllocateCollisionArray(layout.numBoxes, loaded.boxes) &&
+	       AllocateCollisionArray(layout.numVertices, loaded.vertices) &&
+	       AllocateCollisionArray(layout.numTriangles, loaded.triangles);
+}
+
+static void
+PopulateCollisionModel(const CollisionModelLayout &layout, LoadedCollisionModel &loaded)
+{
+	for(uint32 i = 0; i < layout.numSpheres; i++){
+		const uint8 *data = layout.spheres + i * 20;
+		loaded.spheres[i].radius = ReadLEFloat32(data);
+		loaded.spheres[i].center.x = ReadLEFloat32(data + 4);
+		loaded.spheres[i].center.y = ReadLEFloat32(data + 8);
+		loaded.spheres[i].center.z = ReadLEFloat32(data + 12);
+		loaded.spheres[i].surface = data[16];
+		loaded.spheres[i].piece = data[17];
+	}
+	for(uint32 i = 0; i < layout.numBoxes; i++){
+		const uint8 *data = layout.boxes + i * 28;
+		loaded.boxes[i].min.x = ReadLEFloat32(data);
+		loaded.boxes[i].min.y = ReadLEFloat32(data + 4);
+		loaded.boxes[i].min.z = ReadLEFloat32(data + 8);
+		loaded.boxes[i].max.x = ReadLEFloat32(data + 12);
+		loaded.boxes[i].max.y = ReadLEFloat32(data + 16);
+		loaded.boxes[i].max.z = ReadLEFloat32(data + 20);
+		loaded.boxes[i].surface = data[24];
+		loaded.boxes[i].piece = data[25];
+	}
+	for(uint32 i = 0; i < layout.numVertices; i++){
+		const uint8 *data = layout.vertices + i * 12;
+		loaded.vertices[i].Set(ReadLEFloat32(data), ReadLEFloat32(data + 4), ReadLEFloat32(data + 8));
+	}
+	for(uint32 i = 0; i < layout.numTriangles; i++){
+		const uint8 *data = layout.triangles + i * 16;
+		loaded.triangles[i].Set(ReadLE32(data), ReadLE32(data + 4), ReadLE32(data + 8), data[12]);
+	}
+}
+
+static bool
+DecodeCollisionRecord(const uint8 *data, uint32 size, CollisionRecord &record)
+{
+	if(data == nil || size < 84)
+		return false;
+	memcpy(record.name, data, 22);
+	record.name[22] = '\0';
+	record.modelId = (int16)ReadLE16(data + 22);
+	record.data = data + 24;
+	record.size = size - 24;
+	CollisionModelLayout layout;
+	return ValidateCollisionModel(record.data, record.size, layout);
+}
+
+static void
+CommitLoadedCollisionModel(const CollisionModelLayout &layout, LoadedCollisionModel &loaded,
+                           CColModel &model)
+{
+	model.RemoveCollisionVolumes();
+	model.boundingSphere = layout.boundingSphere;
+	model.boundingBox = layout.boundingBox;
+	model.numSpheres = (int16)layout.numSpheres;
+	model.numLines = 0;
+	model.numBoxes = (int16)layout.numBoxes;
+	model.numTriangles = (int16)layout.numTriangles;
+	model.spheres = loaded.spheres;
+	model.lines = nil;
+	model.boxes = loaded.boxes;
+	model.vertices = loaded.vertices;
+	model.triangles = loaded.triangles;
+	model.ownsCollisionVolumes = true;
+	REGISTER_MEMPTR(&model.spheres);
+	REGISTER_MEMPTR(&model.boxes);
+	REGISTER_MEMPTR(&model.vertices);
+	REGISTER_MEMPTR(&model.triangles);
+	loaded.spheres = nil;
+	loaded.boxes = nil;
+	loaded.vertices = nil;
+	loaded.triangles = nil;
+}
+
+static StagedCollisionModel*
+AllocateCollisionStages(uint32 count)
+{
+	if(count == 0 || (size_t)count > SIZE_MAX / sizeof(StagedCollisionModel))
+		return nil;
+	StagedCollisionModel *stages =
+		(StagedCollisionModel*)RwMalloc((size_t)count * sizeof(StagedCollisionModel));
+	if(stages == nil)
+		return nil;
+	for(uint32 i = 0; i < count; i++)
+		new (&stages[i]) StagedCollisionModel;
+	return stages;
+}
+
+static void
+DestroyCollisionStages(StagedCollisionModel *stages, uint32 count)
+{
+	if(stages == nil)
+		return;
+	for(uint32 i = 0; i < count; i++)
+		stages[i].~StagedCollisionModel();
+	RwFree(stages);
+}
+
+static bool
+StageCollisionRecord(const CollisionRecord &record, CBaseModelInfo *modelInfo, int modelIndex,
+                     bool includeModelIndex, StagedCollisionModel *stages, uint32 stageIndex)
+{
+	StagedCollisionModel &stage = stages[stageIndex];
+	stage.modelInfo = modelInfo;
+	stage.modelIndex = modelIndex;
+	stage.includeModelIndex = includeModelIndex;
+	if(modelInfo == nil)
+		return true;
+	for(uint32 i = 0; i < stageIndex; i++)
+		if(stages[i].modelInfo == modelInfo)
+			return false;
+
+	CColModel *current = modelInfo->GetColModel();
+	if(current && modelInfo->DoesOwnColModel() && current->ownsCollisionVolumes){
+		stage.target = current;
+	}else{
+		stage.replacement = new CColModel;
+		if(stage.replacement == nil)
+			return false;
+		stage.target = stage.replacement;
+	}
+	if(!ValidateCollisionModel(record.data, record.size, stage.layout) ||
+	   !AllocateCollisionModel(stage.layout, stage.loaded))
+		return false;
+	PopulateCollisionModel(stage.layout, stage.loaded);
+	return true;
+}
+
+static void
+CommitCollisionStages(StagedCollisionModel *stages, uint32 count, uint8 colSlot)
+{
+	for(uint32 i = 0; i < count; i++){
+		StagedCollisionModel &stage = stages[i];
+		if(stage.modelInfo == nil)
+			continue;
+		CommitLoadedCollisionModel(stage.layout, stage.loaded, *stage.target);
+		stage.target->level = colSlot;
+		if(stage.replacement){
+			CColModel *current = stage.modelInfo->GetColModel();
+			if(current && stage.modelInfo->DoesOwnColModel())
+				stage.modelInfo->DeleteCollisionModel();
+			stage.modelInfo->SetColModel(stage.replacement, true);
+			stage.replacement = nil;
+		}
+		if(stage.includeModelIndex)
+			CColStore::IncludeModelIndex(colSlot, stage.modelIndex);
+	}
+}
+
+static bool
+IsZeroCollisionPadding(const uint8 *data, uint32 size)
+{
+	if(size == 0 || size >= CDSTREAM_SECTOR_SIZE)
+		return false;
+	for(uint32 i = 0; i < size; i++)
+		if(data[i] != 0)
+			return false;
+	return true;
+}
+
+static bool
+ReadCollisionRecord(CollisionCursor &cursor, CollisionRecord &record, bool &hasRecord)
+{
+	hasRecord = false;
+	if(cursor.remaining == 0)
+		return true;
+	if(cursor.remaining < 8 || memcmp(cursor.data, "COLL", 4) != 0){
+		if(!IsZeroCollisionPadding(cursor.data, cursor.remaining))
+			return false;
+		return cursor.Skip(cursor.remaining);
+	}
+
+	uint32 modelSize = ReadLE32(cursor.data + 4);
+	if(modelSize < 84 || modelSize > cursor.remaining - 8)
+		return false;
+	const uint8 *data = cursor.data + 8;
+	if(!DecodeCollisionRecord(data, modelSize, record) || !cursor.Skip(8 + modelSize))
+		return false;
+	hasRecord = true;
+	return true;
+}
+
+static bool
+CountCollisionBufferRecords(const uint8 *buffer, uint32 size, uint32 &recordCount)
+{
+	if(buffer == nil || size == 0)
+		return false;
+	recordCount = 0;
+	CollisionCursor cursor(buffer, size);
+	while(cursor.remaining != 0){
+		CollisionRecord record;
+		bool hasRecord;
+		if(!ReadCollisionRecord(cursor, record, hasRecord))
+			return false;
+		if(!hasRecord)
+			break;
+		if(recordCount == UINT32_MAX)
+			return false;
+		recordCount++;
+	}
+	return recordCount != 0;
+}
+
+static bool
+StageCollisionBuffer(const uint8 *buffer, uint32 size, uint8 colSlot, bool firstTime,
+                     StagedCollisionModel *stages, uint32 recordCount)
+{
+	ColDef *slot = nil;
+	if(!firstTime){
+		slot = CColStore::GetSlot(colSlot);
+		if(slot == nil)
+			return false;
+	}
+
+	CollisionCursor cursor(buffer, size);
+	uint32 stageIndex = 0;
+	while(cursor.remaining != 0){
+		CollisionRecord record;
+		bool hasRecord;
+		if(!ReadCollisionRecord(cursor, record, hasRecord))
+			return false;
+		if(!hasRecord)
+			break;
+		if(stageIndex >= recordCount)
+			return false;
+
+		if(record.size + 24 > 15 * 1024)
+			debug("colmodel %s is huge, size %u\n", record.name, record.size + 24);
+		int modelIndex = -1;
+		CBaseModelInfo *modelInfo = firstTime ?
+			CModelInfo::GetModelInfo(record.name, &modelIndex) :
+			CModelInfo::GetModelInfo(record.name, slot->minIndex, slot->maxIndex);
+		if(!modelInfo)
+			debug("colmodel %s can't find a modelinfo\n", record.name);
+		if(!StageCollisionRecord(record, modelInfo, modelIndex, firstTime,
+		                         stages, stageIndex))
+			return false;
+		stageIndex++;
+	}
+	return stageIndex == recordCount;
+}
+
+static bool
+LoadCollisionBuffer(const uint8 *buffer, uint32 size, uint8 colSlot, bool firstTime)
+{
+	uint32 recordCount = 0;
+	if(!CountCollisionBufferRecords(buffer, size, recordCount))
+		return false;
+	StagedCollisionModel *stages = AllocateCollisionStages(recordCount);
+	if(stages == nil)
+		return false;
+	bool success = StageCollisionBuffer(buffer, size, colSlot, firstTime, stages, recordCount);
+	if(success)
+		CommitCollisionStages(stages, recordCount, colSlot);
+	DestroyCollisionStages(stages, recordCount);
+	return success;
+}
+
+static bool
+ReadCollisionFileRecord(int fd, CollisionRecord &record, bool &hasRecord)
+{
+	hasRecord = false;
+	uint8 header[8];
+	size_t bytesRead = CFileMgr::Read(fd, (char*)header, sizeof(header));
+	if(bytesRead == 0)
+		return CFileMgr::GetErrorReadWrite(fd) != 0;
+	if(bytesRead != sizeof(header) || memcmp(header, "COLL", 4) != 0)
+		return false;
+
+	uint32 modelSize = ReadLE32(header + 4);
+	if(modelSize < 84 || modelSize > sizeof(work_buff) ||
+	   CFileMgr::Read(fd, (char*)work_buff, modelSize) != modelSize ||
+	   !DecodeCollisionRecord(work_buff, modelSize, record))
+		return false;
+	hasRecord = true;
+	return true;
+}
+
+static bool
+CountCollisionFileRecords(int fd, uint32 &recordCount)
+{
+	recordCount = 0;
+	for(;;){
+		CollisionRecord record;
+		bool hasRecord;
+		if(!ReadCollisionFileRecord(fd, record, hasRecord))
+			return false;
+		if(!hasRecord)
+			return recordCount != 0;
+		if(recordCount == UINT32_MAX)
+			return false;
+		recordCount++;
+	}
+}
+
+static bool
+StageCollisionFile(int fd, StagedCollisionModel *stages, uint32 recordCount)
+{
+	uint32 stageIndex = 0;
+	for(;;){
+		CollisionRecord record;
+		bool hasRecord;
+		if(!ReadCollisionFileRecord(fd, record, hasRecord))
+			return false;
+		if(!hasRecord)
+			return stageIndex == recordCount;
+		if(stageIndex >= recordCount)
+			return false;
+
+		if(record.size + 24 > 15 * 1024)
+			debug("colmodel %s is huge, size %u\n", record.name, record.size + 24);
+		CBaseModelInfo *modelInfo = CModelInfo::GetModelInfo(record.name, nil);
+		if(!modelInfo)
+			debug("colmodel %s can't find a modelinfo\n", record.name);
+		if(!StageCollisionRecord(record, modelInfo, -1, false, stages, stageIndex))
+			return false;
+		stageIndex++;
+	}
+}
+
+}
+
+bool
 CFileLoader::LoadCollisionFile(const char *filename, uint8 colSlot)
 {
-	int fd;
-	char modelname[24];
-	CBaseModelInfo *mi;
-	ColHeader header;
+	if(filename == nil)
+		return false;
 
 	PUSH_MEMID(MEMID_COLLISION);
-
 	debug("Loading collision file %s\n", filename);
-	fd = CFileMgr::OpenFile(filename, "rb");
-	assert(fd > 0);
-
-	while(CFileMgr::Read(fd, (char*)&header, sizeof(header))){
-		assert(header.ident == 'LLOC');
-		CFileMgr::Read(fd, (char*)work_buff, header.size);
-		memcpy(modelname, work_buff, 24);
-
-		mi = CModelInfo::GetModelInfo(modelname, nil);
-		if(mi){
-			if(mi->GetColModel() && mi->DoesOwnColModel()){
-				LoadCollisionModel(work_buff+24, *mi->GetColModel(), modelname);
-			}else{
-				CColModel *model = new CColModel;
-				model->level = colSlot;
-				LoadCollisionModel(work_buff+24, *model, modelname);
-				mi->SetColModel(model, true);
-			}
-		}else{
-			debug("colmodel %s can't find a modelinfo\n", modelname);
-		}
-	}
-
-	CFileMgr::CloseFile(fd);
-
+	int fd = CFileMgr::OpenFile(filename, "rb");
+	uint32 recordCount = 0;
+	bool success = fd > 0 && CountCollisionFileRecords(fd, recordCount);
+	StagedCollisionModel *stages = success ? AllocateCollisionStages(recordCount) : nil;
+	if(success)
+		success = stages != nil && CFileMgr::Seek(fd, 0, SEEK_SET) &&
+		          StageCollisionFile(fd, stages, recordCount);
+	if(success)
+		CommitCollisionStages(stages, recordCount, colSlot);
+	DestroyCollisionStages(stages, recordCount);
+	if(fd > 0)
+		CFileMgr::CloseFile(fd);
 	POP_MEMID();
-}
-
-
-bool
-CFileLoader::LoadCollisionFileFirstTime(uint8 *buffer, uint32 size, uint8 colSlot)
-{
-	uint32 modelsize;
-	char modelname[24];
-	CBaseModelInfo *mi;
-	ColHeader *header;
-	int modelIndex;
-
-	while(size > 8){
-		header = (ColHeader*)buffer;
-		modelsize = header->size;
-		if(header->ident != 'LLOC')
-			return size-8 < CDSTREAM_SECTOR_SIZE;
-		memcpy(modelname, buffer+8, 24);
-		memcpy(work_buff, buffer+32, modelsize-24);
-		size -= 32 + (modelsize-24);
-		buffer += 32 + (modelsize-24);
-		if(modelsize > 15*1024)
-			debug("colmodel %s is huge, size %d\n", modelname, modelsize);
-
-		mi = CModelInfo::GetModelInfo(modelname, &modelIndex);
-		if(mi){
-			CColStore::IncludeModelIndex(colSlot, modelIndex);
-			CColModel *model = new CColModel;
-			model->level = colSlot;
-			LoadCollisionModel(work_buff, *model, modelname);
-			mi->SetColModel(model, true);
-		}else{
-			debug("colmodel %s can't find a modelinfo\n", modelname);
-		}
-	}
-	return true;
+	return success;
 }
 
 bool
-CFileLoader::LoadCollisionFile(uint8 *buffer, uint32 size, uint8 colSlot)
+CFileLoader::LoadCollisionFileFirstTime(const uint8 *buffer, uint32 size, uint8 colSlot)
 {
-	uint32 modelsize;
-	char modelname[24];
-	CBaseModelInfo *mi;
-	ColHeader *header;
-
-	while(size > 8){
-		header = (ColHeader*)buffer;
-		modelsize = header->size;
-		if(header->ident != 'LLOC')
-			return size-8 < CDSTREAM_SECTOR_SIZE;
-		memcpy(modelname, buffer+8, 24);
-		memcpy(work_buff, buffer+32, modelsize-24);
-		size -= 32 + (modelsize-24);
-		buffer += 32 + (modelsize-24);
-		if(modelsize > 15*1024)
-			debug("colmodel %s is huge, size %d\n", modelname, modelsize);
-
-		mi = CModelInfo::GetModelInfo(modelname, CColStore::GetSlot(colSlot)->minIndex, CColStore::GetSlot(colSlot)->maxIndex);
-		if(mi){
-			if(mi->GetColModel()){
-				LoadCollisionModel(work_buff, *mi->GetColModel(), modelname);
-			}else{
-				CColModel *model = new CColModel;
-				model->level = colSlot;
-				LoadCollisionModel(work_buff, *model, modelname);
-				mi->SetColModel(model, true);
-			}
-		}else{
-			debug("colmodel %s can't find a modelinfo\n", modelname);
-		}
-	}
-	return true;
+	return LoadCollisionBuffer(buffer, size, colSlot, true);
 }
 
-void
-CFileLoader::LoadCollisionModel(uint8 *buf, CColModel &model, char *modelname)
+bool
+CFileLoader::LoadCollisionFile(const uint8 *buffer, uint32 size, uint8 colSlot)
 {
-	int i;
+	return LoadCollisionBuffer(buffer, size, colSlot, false);
+}
 
-	model.boundingSphere.radius = *(float*)(buf);
-	model.boundingSphere.center.x = *(float*)(buf+4);
-	model.boundingSphere.center.y = *(float*)(buf+8);
-	model.boundingSphere.center.z = *(float*)(buf+12);
-	model.boundingBox.min.x = *(float*)(buf+16);
-	model.boundingBox.min.y = *(float*)(buf+20);
-	model.boundingBox.min.z = *(float*)(buf+24);
-	model.boundingBox.max.x = *(float*)(buf+28);
-	model.boundingBox.max.y = *(float*)(buf+32);
-	model.boundingBox.max.z = *(float*)(buf+36);
-	model.numSpheres = *(int16*)(buf+40);
-	buf += 44;
-	if(model.numSpheres > 0){
-		model.spheres = (CColSphere*)RwMalloc(model.numSpheres*sizeof(CColSphere));
-		REGISTER_MEMPTR(&model.spheres);
-		for(i = 0; i < model.numSpheres; i++){
-			model.spheres[i].Set(*(float*)buf, *(CVector*)(buf+4), buf[16], buf[17]);
-			buf += 20;
-		}
-	}else
-		model.spheres = nil;
+bool
+CFileLoader::LoadCollisionModel(const uint8 *data, uint32 size, CColModel &model)
+{
+	if(!model.ownsCollisionVolumes)
+		return false;
+	CollisionModelLayout layout;
+	if(!ValidateCollisionModel(data, size, layout))
+		return false;
 
-	model.numLines = *(int16*)buf;
-	buf += 4;
-	if(model.numLines > 0){
-		//model.lines = (CColLine*)RwMalloc(model.numLines*sizeof(CColLine));
-		REGISTER_MEMPTR(&model.lines);
-		for(i = 0; i < model.numLines; i++){
-			//model.lines[i].Set(*(CVector*)buf, *(CVector*)(buf+12));
-			buf += 24;
-		}
-	}else
-		model.lines = nil;
-	model.numLines = 0;
-	model.lines = nil;
-
-	model.numBoxes = *(int16*)buf;
-	buf += 4;
-	if(model.numBoxes > 0){
-		model.boxes = (CColBox*)RwMalloc(model.numBoxes*sizeof(CColBox));
-		REGISTER_MEMPTR(&model.boxes);
-		for(i = 0; i < model.numBoxes; i++){
-			model.boxes[i].Set(*(CVector*)buf, *(CVector*)(buf+12), buf[24], buf[25]);
-			buf += 28;
-		}
-	}else
-		model.boxes = nil;
-
-	int32 numVertices = *(int16*)buf;
-	buf += 4;
-	if(numVertices > 0){
-		model.vertices = (CompressedVector*)RwMalloc(numVertices*sizeof(CompressedVector));
-		REGISTER_MEMPTR(&model.vertices);
-		for(i = 0; i < numVertices; i++){
-			model.vertices[i].Set(*(float*)buf, *(float*)(buf+4), *(float*)(buf+8));
-#if 0
-			if(Abs(*(float*)buf) >= 256.0f ||
-			   Abs(*(float*)(buf+4)) >= 256.0f ||
-			   Abs(*(float*)(buf+8)) >= 256.0f)
-				printf("%s:Collision volume too big\n", modelname);
-#endif
-			buf += 12;
-		}
-	}else
-		model.vertices = nil;
-
-	model.numTriangles = *(int16*)buf;
-	buf += 4;
-	if(model.numTriangles > 0){
-		model.triangles = (CColTriangle*)RwMalloc(model.numTriangles*sizeof(CColTriangle));
-		REGISTER_MEMPTR(&model.triangles);
-		for(i = 0; i < model.numTriangles; i++){
-			model.triangles[i].Set(*(int32*)buf, *(int32*)(buf+4), *(int32*)(buf+8), buf[12]);
-			buf += 16;
-		}
-	}else
-		model.triangles = nil;
+	LoadedCollisionModel loaded;
+	if(!AllocateCollisionModel(layout, loaded))
+		return false;
+	PopulateCollisionModel(layout, loaded);
+	CommitLoadedCollisionModel(layout, loaded, model);
+	return true;
 }
 
 static void
@@ -490,9 +944,10 @@ CFileLoader::LoadClumpFile(RwStream *stream, uint32 id)
 bool
 CFileLoader::StartLoadClumpFile(RwStream *stream, uint32 id)
 {
-	if(RwStreamFindChunk(stream, rwID_CLUMP, nil, nil)){
+	RwUInt32 size;
+	if(RwStreamFindChunk(stream, rwID_CLUMP, &size, nil)){
 		printf("Start loading %s\n", CModelInfo::GetModelInfo(id)->GetModelName());
-		return RpClumpGtaStreamRead1(stream);
+		return RpClumpGtaStreamRead1(stream, size);
 	}else{
 		printf("FAILED\n");
 		return false;

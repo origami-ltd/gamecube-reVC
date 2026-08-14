@@ -6,7 +6,7 @@ public:
 	static int animTxdSlot;
 	static CEntity *pTarget;
 	
-	static void Initialise();
+	static bool Initialise();
 	static void Render();
 	static void Shutdown();
 	static void Update();

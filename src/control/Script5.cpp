@@ -1390,9 +1390,11 @@ void CRunningScript::DoDeatharrestCheck()
 	script_assert(m_nStackPointer > 0);
 	while (m_nStackPointer > 1)
 		--m_nStackPointer;
-	m_nIp = m_anStack[--m_nStackPointer];
+	if(!SetIP(m_anStack[m_nStackPointer - 1]))
+		return;
+	--m_nStackPointer;
 	CMessages::ClearSmallMessagesOnly();
-	*(int32*)&CTheScripts::ScriptSpace[CTheScripts::OnAMissionFlag] = 0;
+	*CTheScripts::GetPointerToScriptVariable(CTheScripts::OnAMissionFlag) = 0;
 	m_bDeatharrestExecuted = true;
 	m_nWakeTime = 0;
 }
@@ -2183,9 +2185,10 @@ INITSAVEBUF
 VALIDATESAVEBUF(*size)
 }
 
-void CTheScripts::LoadAllScripts(uint8* buf, uint32 size)
+bool CTheScripts::LoadAllScripts(uint8* buf, uint32 size)
 {
-	Init();
+	if(!Init())
+		return false;
 INITSAVEBUF
 	CheckSaveHeader(buf, 'S', 'C', 'R', '\0', size - SAVE_HEADER_SIZE);
 	uint32 varSpace, type, handle;
@@ -2263,6 +2266,7 @@ INITSAVEBUF
 	for (uint32 i = 0; i < runningScripts; i++)
 		StartNewScript(0)->Load(buf);
 VALIDATESAVEBUF(size)
+	return true;
 }
 
 #undef SCRIPT_DATA_SIZE
@@ -2791,20 +2795,5 @@ void CTheScripts::UpdateObjectIndices()
 			sprintf(error, "CTheScripts::UpdateObjectIndices - Couldn't find %s", UsedObjectArray[i].name);
 			debug("%s\n", error);
 		}
-	}
-}
-
-void CTheScripts::ReadMultiScriptFileOffsetsFromScript()
-{
-	int32 varSpace = GetSizeOfVariableSpace();
-	uint32 ip = varSpace + 3;
-	int32 objectSize = Read4BytesFromScript(&ip);
-	ip = objectSize + 8;
-	MainScriptSize = Read4BytesFromScript(&ip);
-	LargestMissionScriptSize = Read4BytesFromScript(&ip);
-	NumberOfMissionScripts = Read2BytesFromScript(&ip);
-	NumberOfExclusiveMissionScripts = Read2BytesFromScript(&ip);
-	for (int i = 0; i < NumberOfMissionScripts; i++) {
-		MultiScriptArray[i] = Read4BytesFromScript(&ip);
 	}
 }

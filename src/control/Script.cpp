@@ -53,7 +53,7 @@
 #include <stdarg.h>
 #endif
 
-uint8 CTheScripts::ScriptSpace[SIZE_SCRIPT_SPACE];
+alignas(int32) uint8 CTheScripts::ScriptSpace[SIZE_SCRIPT_SPACE];
 CRunningScript CTheScripts::ScriptsArray[MAX_NUM_SCRIPTS];
 intro_text_line CTheScripts::IntroTextLines[MAX_NUM_INTRO_TEXT_LINES];
 intro_script_rectangle CTheScripts::IntroRectangles[MAX_NUM_INTRO_RECTANGLES];
@@ -78,6 +78,8 @@ bool CTheScripts::bUsingAMultiScriptFile;
 uint16 CTheScripts::NumberOfMissionScripts;
 uint32 CTheScripts::LargestMissionScriptSize;
 uint32 CTheScripts::MainScriptSize;
+uint32 CTheScripts::ScriptFileSize;
+uint32 CTheScripts::CurrentMissionScriptSize;
 uint8 CTheScripts::FailCurrentMission;
 uint16 CTheScripts::NumScriptDebugLines;
 uint16 CTheScripts::NumberOfIntroRectanglesThisFrame;
@@ -627,7 +629,7 @@ void CRunningScript::CollectParameters(uint32* pIp, int16 total)
 		case ARGUMENT_GLOBALVAR:
 			varIndex = CTheScripts::Read2BytesFromScript(pIp);
 			script_assert(varIndex >= 8 && varIndex < CTheScripts::GetSizeOfVariableSpace());
-			ScriptParams[i] = *((int32*)&CTheScripts::ScriptSpace[varIndex]);
+			ScriptParams[i] = *CTheScripts::GetPointerToScriptVariable(varIndex);
 			break;
 		case ARGUMENT_LOCALVAR:
 			varIndex = CTheScripts::Read2BytesFromScript(pIp);
@@ -655,7 +657,7 @@ int32 CRunningScript::CollectNextParameterWithoutIncreasingPC(uint32 ip)
 	case ARGUMENT_INT32:
 		return CTheScripts::Read4BytesFromScript(pIp);
 	case ARGUMENT_GLOBALVAR:
-		return *((int32*)&CTheScripts::ScriptSpace[(uint16)CTheScripts::Read2BytesFromScript(pIp)]);
+		return *CTheScripts::GetPointerToScriptVariable((uint16)CTheScripts::Read2BytesFromScript(pIp));
 	case ARGUMENT_LOCALVAR:
 		return m_anLocalVariables[CTheScripts::Read2BytesFromScript(pIp)];
 	case ARGUMENT_INT8:
@@ -675,7 +677,7 @@ void CRunningScript::StoreParameters(uint32* pIp, int16 number)
 	for (int16 i = 0; i < number; i++){
 		switch (CTheScripts::Read1ByteFromScript(pIp)) {
 		case ARGUMENT_GLOBALVAR:
-			*(int32*)&CTheScripts::ScriptSpace[(uint16)CTheScripts::Read2BytesFromScript(pIp)] = ScriptParams[i];
+			*CTheScripts::GetPointerToScriptVariable((uint16)CTheScripts::Read2BytesFromScript(pIp)) = ScriptParams[i];
 			break;
 		case ARGUMENT_LOCALVAR:
 			m_anLocalVariables[CTheScripts::Read2BytesFromScript(pIp)] = ScriptParams[i];
@@ -692,7 +694,7 @@ int32 *CRunningScript::GetPointerToScriptVariable(uint32* pIp, int16 type)
 	{
 	case ARGUMENT_GLOBALVAR:
 		script_assert(type == VAR_GLOBAL);
-		return (int32*)&CTheScripts::ScriptSpace[(uint16)CTheScripts::Read2BytesFromScript(pIp)];
+		return CTheScripts::GetPointerToScriptVariable((uint16)CTheScripts::Read2BytesFromScript(pIp));
 	case ARGUMENT_LOCALVAR:
 		script_assert(type == VAR_LOCAL);
 		return &m_anLocalVariables[CTheScripts::Read2BytesFromScript(pIp)];
@@ -706,7 +708,7 @@ void CRunningScript::Init()
 {
 	strcpy(m_abScriptName, "noname");
 	next = prev = nil;
-	SetIP(0);
+	m_nIp = 0;
 	for (int i = 0; i < MAX_STACK_DEPTH; i++)
 		m_anStack[i] = 0;
 	m_nStackPointer = 0;
@@ -724,25 +726,37 @@ void CRunningScript::Init()
 	m_bMissionFlag = false;
 }
 
+bool CTheScripts::Init()
+{
 #ifdef USE_DEBUG_SCRIPT_LOADER
-int CTheScripts::ScriptToLoad = 0;
-
-int CTheScripts::OpenScript()
-{
-	CFileMgr::ChangeDir("\\");
-	switch (ScriptToLoad) {
-	case 0: return CFileMgr::OpenFile("data\\main.scm", "rb");
-	case 1: return CFileMgr::OpenFile("data\\freeroam_miami.scm", "rb");
-	case 2: return CFileMgr::OpenFile("data\\main_d.scm", "rb");
-	}
-	return CFileMgr::OpenFile("data\\main.scm", "rb");
-}
+	// glfwGetKey doesn't work because of CGame::Initialise is blocking
+	CPad::UpdatePads();
+	if(CPad::GetPad(0)->GetChar('G')) ScriptToLoad = 0;
+	if(CPad::GetPad(0)->GetChar('R')) ScriptToLoad = 1;
+	if(CPad::GetPad(0)->GetChar('D')) ScriptToLoad = 2;
 #endif
+	int selection = 0;
+#ifdef USE_DEBUG_SCRIPT_LOADER
+	selection = ScriptToLoad;
+#endif
+	uint8 *mainScript = (uint8*)RwMalloc(SIZE_MAIN_SCRIPT);
+	uint32 fileSize = 0;
+	bool loaded = mainScript != nil && LoadScriptFile(mainScript, fileSize, selection);
+#ifdef USE_DEBUG_SCRIPT_LOADER
+	if(loaded)
+		ScriptToLoad = selection;
+#endif
+	if(!loaded){
+		if(mainScript != nil)
+			RwFree(mainScript);
+		return false;
+	}
 
-void CTheScripts::Init()
-{
-	for (int i = 0; i < SIZE_SCRIPT_SPACE; i++)
-		ScriptSpace[i] = 0;
+	loaded = InstallScriptFile(mainScript, fileSize);
+	RwFree(mainScript);
+	if(!loaded)
+		return false;
+
 	pActiveScripts = pIdleScripts = nil;
 	for (int i = 0; i < MAX_NUM_SCRIPTS; i++){
 		ScriptsArray[i].Init();
@@ -751,21 +765,6 @@ void CTheScripts::Init()
 	MissionCleanUp.Init();
 	UpsideDownCars.Init();
 	StuckCars.Init();
-#ifdef USE_DEBUG_SCRIPT_LOADER
-	// glfwGetKey doesn't work because of CGame::Initialise is blocking
-	CPad::UpdatePads();
-	if(CPad::GetPad(0)->GetChar('G')) ScriptToLoad = 0;
-	if(CPad::GetPad(0)->GetChar('R')) ScriptToLoad = 1;
-	if(CPad::GetPad(0)->GetChar('D')) ScriptToLoad = 2;
-
-	int mainf = OpenScript();
-#else
-	CFileMgr::SetDir("data");
-	int mainf = CFileMgr::OpenFile("main.scm", "rb");
-#endif
-	CFileMgr::Read(mainf, (char*)ScriptSpace, SIZE_MAIN_SCRIPT);
-	CFileMgr::CloseFile(mainf);
-	CFileMgr::SetDir("");
 	StoreVehicleIndex = -1;
 	StoreVehicleWasRandom = true;
 	OnAMissionFlag = 0;
@@ -780,13 +779,6 @@ void CTheScripts::Init()
 	UpdateObjectIndices();
 	bAlreadyRunningAMissionScript = false;
 	bUsingAMultiScriptFile = true;
-	for (int i = 0; i < MAX_NUM_MISSION_SCRIPTS; i++)
-		MultiScriptArray[i] = 0;
-	NumberOfExclusiveMissionScripts = 0;
-	NumberOfMissionScripts = 0;
-	LargestMissionScriptSize = 0;
-	MainScriptSize = 0;
-	ReadMultiScriptFileOffsetsFromScript();
 	FailCurrentMission = 0;
 	DbgFlag = false;
 	NumScriptDebugLines = 0;
@@ -829,6 +821,7 @@ void CTheScripts::Init()
 	UsingMobileScript = false;
 	AlreadySavedGame = false;
 #endif
+	return true;
 }
 
 void CTheScripts::RemoveScriptTextureDictionary()
@@ -862,13 +855,47 @@ void CRunningScript::AddScriptToList(CRunningScript** ppScript)
 CRunningScript* CTheScripts::StartNewScript(uint32 ip)
 {
 	CRunningScript* pNew = pIdleScripts;
-	script_assert(pNew);
+	if(pNew == nil || !IsValidScriptAddress(ip))
+		return nil;
 	pNew->RemoveScriptFromList(&pIdleScripts);
 	pNew->Init();
 	pNew->SetIP(ip);
 	pNew->AddScriptToList(&pActiveScripts);
 	pNew->m_bIsActive = true;
 	return pNew;
+}
+
+bool
+CTheScripts::IsValidScriptAddress(uint32 ip)
+{
+	if(MainScriptSize >= sizeof(uint16) && ip <= MainScriptSize - sizeof(uint16))
+		return true;
+	return CurrentMissionScriptSize >= sizeof(uint16) && ip >= SIZE_MAIN_SCRIPT &&
+	       ip - SIZE_MAIN_SCRIPT <= CurrentMissionScriptSize - sizeof(uint16);
+}
+
+bool
+CRunningScript::SetIP(uint32 ip)
+{
+	if(!CTheScripts::IsValidScriptAddress(ip))
+		return false;
+	m_nIp = ip;
+	return true;
+}
+
+bool
+CRunningScript::SetIPFromScript(int32 ip)
+{
+	uint32 address;
+	if(ip >= 0)
+		address = (uint32)ip;
+	else{
+		uint64 missionOffset = (uint64)-(int64)ip;
+		if(missionOffset > UINT32_MAX - SIZE_MAIN_SCRIPT)
+			return false;
+		address = SIZE_MAIN_SCRIPT + (uint32)missionOffset;
+	}
+	return SetIP(address);
 }
 
 void CTheScripts::Process()
@@ -972,7 +999,7 @@ CRunningScript* CTheScripts::StartTestScript()
 
 bool CTheScripts::IsPlayerOnAMission()
 {
-	return OnAMissionFlag && *(int32*)&ScriptSpace[OnAMissionFlag] == 1;
+	return OnAMissionFlag && *GetPointerToScriptVariable(OnAMissionFlag) == 1;
 }
 
 void CRunningScript::Process()
@@ -982,8 +1009,11 @@ void CRunningScript::Process()
 #endif
 	if (m_bIsMissionScript)
 		DoDeatharrestCheck();
-	if (m_bMissionFlag && CTheScripts::FailCurrentMission == 1 && m_nStackPointer == 1)
-		SetIP(m_anStack[--m_nStackPointer]);
+	if (m_bMissionFlag && CTheScripts::FailCurrentMission == 1 && m_nStackPointer == 1){
+		if(!SetIP(m_anStack[m_nStackPointer - 1]))
+			return;
+		--m_nStackPointer;
+	}
 	if (CTimer::GetTimeInMilliseconds() >= m_nWakeTime){
 		while (!ProcessOneCommand())
 			;
@@ -1073,7 +1103,8 @@ int8 CRunningScript::ProcessCommands0To99(int32 command)
 		return 1;
 	case COMMAND_GOTO:
 		CollectParameters(&m_nIp, 1);
-		SetIP(ScriptParams[0] >= 0 ? ScriptParams[0] : SIZE_MAIN_SCRIPT - ScriptParams[0]);
+		if(!SetIPFromScript(ScriptParams[0]))
+			return 1;
 		/* Known issue: GOTO to 0. It might have been "better" to use > instead of >= */
 		/* simply because it never makes sense to jump to start of the script */
 		/* but jumping to start of a custom mission is an issue for simple mission-like scripts */
@@ -1532,13 +1563,15 @@ int8 CRunningScript::ProcessCommands0To99(int32 command)
 	case COMMAND_GOTO_IF_TRUE:
 		CollectParameters(&m_nIp, 1);
 		if (m_bCondResult)
-			SetIP(ScriptParams[0] >= 0 ? ScriptParams[0] : SIZE_MAIN_SCRIPT - ScriptParams[0]);
+			if(!SetIPFromScript(ScriptParams[0]))
+				return 1;
 		return 0;
 	*/
 	case COMMAND_GOTO_IF_FALSE:
 		CollectParameters(&m_nIp, 1);
 		if (!m_bCondResult)
-			SetIP(ScriptParams[0] >= 0 ? ScriptParams[0] : SIZE_MAIN_SCRIPT - ScriptParams[0]);
+			if(!SetIPFromScript(ScriptParams[0]))
+				return 1;
 		/* Check COMMAND_GOTO note. */
 		return 0;
 	case COMMAND_TERMINATE_THIS_SCRIPT:
@@ -1564,8 +1597,9 @@ int8 CRunningScript::ProcessCommands0To99(int32 command)
 	case COMMAND_START_NEW_SCRIPT:
 	{
 		CollectParameters(&m_nIp, 1);
-		script_assert(ScriptParams[0] >= 0);
 		CRunningScript* pNew = CTheScripts::StartNewScript(ScriptParams[0]);
+		if(pNew == nil)
+			return 1;
 		pNew->m_bIsActive = true;
 		int8 type = CTheScripts::Read1ByteFromScript(&m_nIp);
 		float tmp;
@@ -1575,7 +1609,7 @@ int8 CRunningScript::ProcessCommands0To99(int32 command)
 				pNew->m_anLocalVariables[i] = CTheScripts::Read4BytesFromScript(&m_nIp);
 				break;
 			case ARGUMENT_GLOBALVAR:
-				pNew->m_anLocalVariables[i] = *(int32*)&CTheScripts::ScriptSpace[(uint16)CTheScripts::Read2BytesFromScript(&m_nIp)];
+				pNew->m_anLocalVariables[i] = *CTheScripts::GetPointerToScriptVariable((uint16)CTheScripts::Read2BytesFromScript(&m_nIp));
 				break;
 			case ARGUMENT_LOCALVAR:
 				pNew->m_anLocalVariables[i] = m_anLocalVariables[CTheScripts::Read2BytesFromScript(&m_nIp)];
@@ -1600,11 +1634,16 @@ int8 CRunningScript::ProcessCommands0To99(int32 command)
 		CollectParameters(&m_nIp, 1);
 		script_assert(m_nStackPointer < MAX_STACK_DEPTH);
 		m_anStack[m_nStackPointer++] = m_nIp;
-		SetIP(ScriptParams[0] >= 0 ? ScriptParams[0] : SIZE_MAIN_SCRIPT - ScriptParams[0]);
+		if(!SetIPFromScript(ScriptParams[0])){
+			--m_nStackPointer;
+			return 1;
+		}
 		return 0;
 	case COMMAND_RETURN:
 		script_assert(m_nStackPointer > 0); /* No more SSU */
-		SetIP(m_anStack[--m_nStackPointer]);
+		if(!SetIP(m_anStack[m_nStackPointer - 1]))
+			return 1;
+		--m_nStackPointer;
 		return 0;
 	case COMMAND_LINE:
 		CollectParameters(&m_nIp, 6);
@@ -2696,6 +2735,8 @@ int8 CRunningScript::ProcessCommands200To299(int32 command)
 	{
 		CollectParameters(&m_nIp, 1);
 		CRunningScript* pNew = CTheScripts::StartNewScript(ScriptParams[0]);
+		if(pNew == nil)
+			return 1;
 		pNew->m_bIsMissionScript = true;
 		return 0;
 	}

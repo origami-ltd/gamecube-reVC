@@ -836,7 +836,9 @@ CMouseControllerState CMousePointerStateHelper::GetMouseSetUp()
 {
 	CMouseControllerState state;
 
-#if defined RW_D3D9 || defined RWLIBS
+#if defined(GTA_OGC)
+	state.Clear();
+#elif defined RW_D3D9 || defined RWLIBS
 	if ( PSGLOBAL(mouse) == nil )
 		_InputInitialiseMouse(!FrontEndMenuManager.m_bMenuActive && _InputMouseNeedsExclusive());
 
@@ -892,7 +894,10 @@ CMouseControllerState CMousePointerStateHelper::GetMouseSetUp()
 
 void CPad::UpdateMouse()
 {
-#if defined RW_D3D9 || defined RWLIBS
+#if defined(GTA_OGC)
+	OldMouseControllerState = NewMouseControllerState;
+	NewMouseControllerState.Clear();
+#elif defined RW_D3D9 || defined RWLIBS
 	if ( IsForegroundApp() )
 	{
 		if ( PSGLOBAL(mouse) == nil )

@@ -298,7 +298,8 @@ public:
 	bool m_bMissionFlag;
 
 public:
-	void SetIP(uint32 ip) { m_nIp = ip; }
+	bool SetIP(uint32 ip);
+	bool SetIPFromScript(int32 ip);
 	CRunningScript* GetNext() const { return next; }
 
 	void Save(uint8*& buf);
@@ -424,7 +425,7 @@ enum {
 class CTheScripts
 {
 public:
-	static uint8 ScriptSpace[SIZE_SCRIPT_SPACE];
+	alignas(int32) static uint8 ScriptSpace[SIZE_SCRIPT_SPACE];
 	static CRunningScript ScriptsArray[MAX_NUM_SCRIPTS];
 	static intro_text_line IntroTextLines[MAX_NUM_INTRO_TEXT_LINES];
 	static intro_script_rectangle IntroRectangles[MAX_NUM_INTRO_RECTANGLES];
@@ -452,6 +453,8 @@ public:
 	static uint16 NumberOfMissionScripts;
 	static uint32 LargestMissionScriptSize;
 	static uint32 MainScriptSize;
+	static uint32 ScriptFileSize;
+	static uint32 CurrentMissionScriptSize;
 	static uint8 FailCurrentMission;
 	static uint16 NumScriptDebugLines;
 	static uint16 NumberOfIntroRectanglesThisFrame;
@@ -474,7 +477,7 @@ public:
 	static uint8 RiotIntensity;
 	static bool bPlayerHasMetDebbieHarry;
 
-	static void Init();
+	static bool Init();
 	static void Process();
 
 	static CRunningScript* StartTestScript();
@@ -488,20 +491,26 @@ public:
 	static void RenderTheScriptDebugLines();
 
 	static void SaveAllScripts(uint8*, uint32*);
-	static void LoadAllScripts(uint8*, uint32);
+	static bool LoadAllScripts(uint8*, uint32);
 
 	static bool IsDebugOn() { return DbgFlag; };
 	static void InvertDebugFlag() { DbgFlag = !DbgFlag; }
 
-	static int32* GetPointerToScriptVariable(int32 offset) { assert(offset >= 8 && offset < CTheScripts::GetSizeOfVariableSpace()); return (int32*)&ScriptSpace[offset]; }
+	static bool IsValidGlobalVariableOffset(int32 offset) {
+		return offset >= 8 && !(offset & 3) && offset <= GetSizeOfVariableSpace() - (int32)sizeof(int32);
+	}
+	static int32* GetPointerToScriptVariable(int32 offset) {
+		assert(IsValidGlobalVariableOffset(offset));
+		return (int32*)&ScriptSpace[offset];
+	}
 
 	static int32 Read4BytesFromScript(uint32* pIp) {
-		int32 retval = ScriptSpace[*pIp + 3] << 24 | ScriptSpace[*pIp + 2] << 16 | ScriptSpace[*pIp + 1] << 8 | ScriptSpace[*pIp];
+		int32 retval = (int32)::ReadLE32(&ScriptSpace[*pIp]);
 		*pIp += 4;
 		return retval;
 	}
 	static int16 Read2BytesFromScript(uint32* pIp) {
-		int16 retval = ScriptSpace[*pIp + 1] << 8 | ScriptSpace[*pIp];
+		int16 retval = (int16)::ReadLE16(&ScriptSpace[*pIp]);
 		*pIp += 2;
 		return retval;
 	}
@@ -528,6 +537,12 @@ public:
 	}
 
 	static CRunningScript* StartNewScript(uint32);
+	static bool LoadScriptFile(uint8 *data, uint32 &fileSize, int &selection);
+	static bool InstallScriptFile(const uint8 *data, uint32 fileSize);
+	static bool LoadMissionScript(uint32 mission);
+	static bool IsValidScriptAddress(uint32 ip);
+	static bool ValidateScriptFile(const uint8 *data, uint32 dataSize, uint32 fileSize);
+	static void NormalizeScriptGlobals(uint8 *data);
 
 	static void CleanUpThisVehicle(CVehicle*);
 	static void CleanUpThisPed(CPed*);
@@ -593,8 +608,8 @@ public:
 
 #ifdef USE_DEBUG_SCRIPT_LOADER
 	static int ScriptToLoad;
-	static int OpenScript();
 #endif
+	static int OpenScript();
 
 #ifdef USE_ADVANCED_SCRIPT_DEBUG_OUTPUT
 	static void LogAfterScriptInitializing();

@@ -207,6 +207,11 @@ DoRWStuffStartOfFrame(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 BottomR
 	CRGBA TopColor(TopRed, TopGreen, TopBlue, Alpha);
 	CRGBA BottomColor(BottomRed, BottomGreen, BottomBlue, Alpha);
 
+	// Startup paths can draw before CGame::InitialiseRenderWare creates the
+	// camera; skip the frame instead of faulting on a nil camera.
+	if(Scene.camera == nil)
+		return false;
+
 	CDraw::CalculateAspectRatio();
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
@@ -226,6 +231,9 @@ DoRWStuffStartOfFrame(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 BottomR
 bool
 DoRWStuffStartOfFrame_Horizon(int16 TopRed, int16 TopGreen, int16 TopBlue, int16 BottomRed, int16 BottomGreen, int16 BottomBlue, int16 Alpha)
 {
+	if(Scene.camera == nil)
+		return false;
+
 	CDraw::CalculateAspectRatio();
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
@@ -645,10 +653,36 @@ ResetLoadingScreenBar()
 	NumberOfChunksLoaded = 0.0f;
 }
 
+#ifdef GTA_OGC
+// Boot-stage breadcrumbs: the last line in this file names the load stage
+// that hung or crashed. Console loads are slow and opaque otherwise.
+void
+BootLog(const char *msg)
+{
+	// open/append/close per line: libfat only commits its sector cache on
+	// fclose, and a killed emulator discards anything still cached.
+	FILE *progress = fopen("dvd:/boot_progress.log", "a");
+	if(progress){
+		fprintf(progress, "%s\n", msg);
+		fclose(progress);
+	}
+}
+#endif
+
 void
 LoadingScreen(const char *str1, const char *str2, const char *splashscreen)
 {
 	CSprite2d *splash;
+
+#ifdef GTA_OGC
+	{
+		char line[256];
+		snprintf(line, sizeof(line), "%s | %s | %s",
+		    str1 ? str1 : "-", str2 ? str2 : "-",
+		    splashscreen ? splashscreen : "-");
+		BootLog(line);
+	}
+#endif
 
 #ifdef DISABLE_LOADING_SCREEN
 	if (str1 && str2)
@@ -660,6 +694,9 @@ LoadingScreen(const char *str1, const char *str2, const char *splashscreen)
 #endif
 
 	splash = LoadSplash(splashscreen);
+#ifdef GTA_OGC
+	BootLog("  splash loaded");
+#endif
 
 #ifndef GTA_PS2
 	if(RsGlobal.quit)
@@ -1734,11 +1771,11 @@ FrontendIdle(void)
 	DoRWStuffEndOfFrame();
 }
 
-void
+bool
 InitialiseGame(void)
 {
 	LoadingScreen(nil, nil, "loadsc0");
-	CGame::Initialise("DATA\\GTA_VC.DAT");
+	return CGame::Initialise("DATA\\GTA_VC.DAT");
 }
 
 RsEventStatus
@@ -1863,7 +1900,8 @@ void TheGame(void)
 
 	CTimer::Initialise();
 
-	CGame::Initialise("DATA\\GTA3.DAT");
+	if(!CGame::Initialise("DATA\\GTA3.DAT"))
+		return;
 
 	Const char *splash = GetRandomSplashScreen(); // inlined here
 
@@ -1882,7 +1920,6 @@ void TheGame(void)
 		if (FrontEndMenuManager.m_PrefsLanguage != TheMemoryCard.GetLanguageToLoad())
 		{
 			FrontEndMenuManager.m_PrefsLanguage = TheMemoryCard.GetLanguageToLoad();
-			TheText.Unload();
 			TheText.Load();
 		}
 
@@ -2013,7 +2050,8 @@ void TheGame(void)
 				WANT_TO_LOAD = true;
 			}
 
-			CGame::InitialiseWhenRestarting();
+			if(!CGame::InitialiseWhenRestarting())
+				break;
 			DMAudio.ChangeMusicMode(MUSICMODE_GAME);
 			FrontEndMenuManager.m_bWantToRestart = false;
 
@@ -2415,7 +2453,6 @@ main(int argc, char *argv[])
 	{
 		GameInit(true);
 		
-		TheText.Unload();
 		TheText.Load();
 		
 		CFont::Initialise();

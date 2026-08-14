@@ -317,7 +317,11 @@ RsRwInitialize(void *displayID)
 	/*
 	 * Install any platform specific file systems...
 	 */
-	psInstallFileSystem();
+	if(!psInstallFileSystem())
+	{
+		RwEngineTerm();
+		return (FALSE);
+	}
 	
 	/*
 	 * Initialize debug message handling...

@@ -114,13 +114,13 @@ public:
 	static int32 ms_imageSize;
 	static size_t ms_memoryAvailable;
 
-	static void Init(void);
-	static void Init2(void);
+	static bool Init(void);
+	static bool Init2(void);
 	static void ReInit(void);
 	static void Shutdown(void);
 	static void Update(void);
-	static void LoadCdDirectory(void);
-	static void LoadCdDirectory(const char *dirname, int32 n);
+	static bool LoadCdDirectory(void);
+	static bool LoadCdDirectory(const char *dirname, int32 n);
 	static bool ConvertBufferToObject(int8 *buf, int32 streamId);
 	static bool FinishLoadingLargeFile(int8 *buf, int32 streamId);
 	static bool HasModelLoaded(int32 id) { return ms_aInfoForModel[id].m_loadState == STREAMSTATE_LOADED; }

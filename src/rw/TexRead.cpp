@@ -6,6 +6,8 @@
 #define WITHD3D
 #endif
 #include "common.h"
+
+#include <new>
 #ifdef ANISOTROPIC_FILTERING
 #include "rpanisot.h"
 #endif
@@ -38,20 +40,31 @@ int32 texNumLoaded;
 #endif
 
 RwTexture*
-RwTextureGtaStreamRead(RwStream *stream)
+RwTextureGtaStreamRead(RwStream *stream, uint32 end)
 {
 	RwUInt32 size, version;
-	RwTexture *tex;
+	RwTexture *tex = nil;
 
+	uint32 position = STREAMPOS(stream);
+	if(position == UINT32_MAX || position > end || end - position < 12)
+		return nil;
 	if(!RwStreamFindChunk(stream, rwID_TEXTURENATIVE, &size, &version))
+		return nil;
+	uint32 nativeStart = STREAMPOS(stream);
+	if(size > INT32_MAX || nativeStart == UINT32_MAX ||
+	   nativeStart > end || size > end - nativeStart)
 		return nil;
 
 #ifdef GTA_PC
 	float preloadTime = (float)CTimer::GetCurrentTimeInCycles() / (float)CTimer::GetCyclesPerMillisecond();
 #endif
 
-	if(!READNATIVE(stream, &tex, size))
+	if(!READNATIVE(stream, &tex, size) || tex == nil)
 		return nil;
+	if(STREAMPOS(stream) != nativeStart + size){
+		RwTextureDestroy(tex);
+		return nil;
+	}
 
 #ifdef GTA_PC
 	if (gGameState == GS_INIT_PLAYING_GAME) {
@@ -76,16 +89,25 @@ destroyTexture(RwTexture *texture, void *data)
 }
 
 RwTexDictionary*
-RwTexDictionaryGtaStreamRead(RwStream *stream)
+RwTexDictionaryGtaStreamRead(RwStream *stream, uint32 dictionarySize)
 {
 	RwUInt32 size, version;
 	RwInt32 numTextures;
 	RwTexDictionary *texDict;
 	RwTexture *tex;
+	uint32 position = STREAMPOS(stream);
+	uint32 end;
 
+	if(position == UINT32_MAX || !GetRwStreamEnd(stream, dictionarySize, end) ||
+	   end - position < 12)
+		return nil;
 	if(!RwStreamFindChunk(stream, rwID_STRUCT, &size, &version))
 		return nil;
-	if(RwStreamRead(stream, &numTextures, size) != size)
+	uint32 structStart = STREAMPOS(stream);
+	if(structStart == UINT32_MAX || structStart > end || size > end - structStart ||
+	   size != sizeof(numTextures) || !ReadStreamLE32(stream, numTextures))
+		return nil;
+	if(numTextures < 0 || numTextures > INT16_MAX)
 		return nil;
 
 	texDict = RwTexDictionaryCreate();
@@ -93,7 +115,7 @@ RwTexDictionaryGtaStreamRead(RwStream *stream)
 		return nil;
 
 	while(numTextures--){
-		tex = RwTextureGtaStreamRead(stream);
+		tex = RwTextureGtaStreamRead(stream, end);
 		if(tex == nil){
 			RwTexDictionaryForAllTextures(texDict, destroyTexture, nil);
 			RwTexDictionaryDestroy(texDict);
@@ -101,26 +123,42 @@ RwTexDictionaryGtaStreamRead(RwStream *stream)
 		}
 		RwTexDictionaryAddTexture(texDict, tex);
 	}
+	position = STREAMPOS(stream);
+	if(position == UINT32_MAX || position > end){
+		RwTexDictionaryForAllTextures(texDict, destroyTexture, nil);
+		RwTexDictionaryDestroy(texDict);
+		return nil;
+	}
 
 	return texDict;
 }
 
 static int32 numberTextures = -1;
-static int32 streamPosition;
+static uint32 streamPosition;
+static uint32 textureDictionaryEnd;
 
 RwTexDictionary*
-RwTexDictionaryGtaStreamRead1(RwStream *stream)
+RwTexDictionaryGtaStreamRead1(RwStream *stream, uint32 dictionarySize)
 {
 	RwUInt32 size, version;
 	RwInt32 numTextures;
 	RwTexDictionary *texDict;
 	RwTexture *tex;
+	uint32 position = STREAMPOS(stream);
 
-	numberTextures = 0;
+	numberTextures = -1;
+	if(position == UINT32_MAX ||
+	   !GetRwStreamEnd(stream, dictionarySize, textureDictionaryEnd) ||
+	   textureDictionaryEnd - position < 12)
+		return nil;
 	if(!RwStreamFindChunk(stream, rwID_STRUCT, &size, &version))
 		return nil;
-	assert(size == 4);
-	if(RwStreamRead(stream, &numTextures, size) != size)
+	uint32 structStart = STREAMPOS(stream);
+	if(structStart == UINT32_MAX || structStart > textureDictionaryEnd ||
+	   size > textureDictionaryEnd - structStart || size != sizeof(numTextures) ||
+	   !ReadStreamLE32(stream, numTextures))
+		return nil;
+	if(numTextures < 0 || numTextures > INT16_MAX)
 		return nil;
 
 	texDict = RwTexDictionaryCreate();
@@ -132,7 +170,7 @@ RwTexDictionaryGtaStreamRead1(RwStream *stream)
 	while(numTextures > numberTextures){
 		numTextures--;
 
-		tex = RwTextureGtaStreamRead(stream);
+		tex = RwTextureGtaStreamRead(stream, textureDictionaryEnd);
 		if(tex == nil){
 			RwTexDictionaryForAllTextures(texDict, destroyTexture, nil);
 			RwTexDictionaryDestroy(texDict);
@@ -143,6 +181,12 @@ RwTexDictionaryGtaStreamRead1(RwStream *stream)
 
 	numberTextures = numTextures;
 	streamPosition = STREAMPOS(stream);
+	if(streamPosition == UINT32_MAX){
+		RwTexDictionaryForAllTextures(texDict, destroyTexture, nil);
+		RwTexDictionaryDestroy(texDict);
+		numberTextures = -1;
+		return nil;
+	}
 
 	return texDict;
 }
@@ -151,20 +195,37 @@ RwTexDictionary*
 RwTexDictionaryGtaStreamRead2(RwStream *stream, RwTexDictionary *texDict)
 {
 	RwTexture *tex;
+	uint32 position = STREAMPOS(stream);
 
-	RwStreamSkip(stream, streamPosition - STREAMPOS(stream));
-
-	while(numberTextures--){
-		tex = RwTextureGtaStreamRead(stream);
-		if(tex == nil){
-			RwTexDictionaryForAllTextures(texDict, destroyTexture, nil);
-			RwTexDictionaryDestroy(texDict);
-			return nil;
-		}
-		RwTexDictionaryAddTexture(texDict, tex);
+	if(texDict == nil){
+		numberTextures = -1;
+		return nil;
 	}
+	if(numberTextures < 0 || position == UINT32_MAX || position > streamPosition)
+		goto fail;
+	RwStreamSkip(stream, streamPosition - position);
+	if(STREAMPOS(stream) != streamPosition)
+		goto fail;
+
+	while(numberTextures > 0){
+		tex = RwTextureGtaStreamRead(stream, textureDictionaryEnd);
+		if(tex == nil)
+			goto fail;
+		RwTexDictionaryAddTexture(texDict, tex);
+		numberTextures--;
+	}
+	position = STREAMPOS(stream);
+	if(position == UINT32_MAX || position > textureDictionaryEnd)
+		goto fail;
+	numberTextures = -1;
 
 	return texDict;
+
+fail:
+	numberTextures = -1;
+	RwTexDictionaryForAllTextures(texDict, destroyTexture, nil);
+	RwTexDictionaryDestroy(texDict);
+	return nil;
 }
 
 #ifdef GTA_PC
@@ -373,9 +434,14 @@ DealWithTxdWriteError(uint32 num, uint32 count, const char *text)
 bool
 CreateTxdImageForVideoCard()
 {
-	uint8 *buf = new uint8[CDSTREAM_SECTOR_SIZE];
-	CDirectory *pDir = new CDirectory(TXDSTORESIZE);
+	uint8 *buf = new(std::nothrow) uint8[CDSTREAM_SECTOR_SIZE];
+	CDirectory *pDir = new(std::nothrow) CDirectory(TXDSTORESIZE);
 	CDirectory::DirectoryInfo dirInfo;
+	if(buf == nil || pDir == nil || !pDir->IsValid()){
+		delete []buf;
+		delete pDir;
+		return false;
+	}
 
 	CStreaming::FlushRequestList();
 
@@ -457,7 +523,13 @@ CreateTxdImageForVideoCard()
 				dirInfo.offset = pos / CDSTREAM_SECTOR_SIZE;
 				dirInfo.size = size;
 				strncpy(dirInfo.name, filename, sizeof(dirInfo.name));
-				pDir->AddItem(dirInfo);
+				if(!pDir->AddItem(dirInfo)){
+					RwStreamClose(img, nil);
+					delete []buf;
+					delete pDir;
+					CStreaming::RemoveTxd(i);
+					return false;
+				}
 				CStreaming::RemoveTxd(i);
 			}
 			CStreaming::FlushRequestList();

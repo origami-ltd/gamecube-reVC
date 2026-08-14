@@ -5,13 +5,13 @@ class CFileLoader
 {
 	static char ms_line[256];
 public:
-	static void LoadLevel(const char *filename);
+	static bool LoadLevel(const char *filename);
 	static char *LoadLine(int fd);
 	static RwTexDictionary *LoadTexDictionary(const char *filename);
-	static void LoadCollisionFile(const char *filename, uint8 colSlot);
-	static bool LoadCollisionFileFirstTime(uint8 *buffer, uint32 size, uint8 colSlot);
-	static bool LoadCollisionFile(uint8 *buffer, uint32 size, uint8 colSlot);
-	static void LoadCollisionModel(uint8 *buf, struct CColModel &model, char *name);
+	static bool LoadCollisionFile(const char *filename, uint8 colSlot);
+	static bool LoadCollisionFileFirstTime(const uint8 *buffer, uint32 size, uint8 colSlot);
+	static bool LoadCollisionFile(const uint8 *buffer, uint32 size, uint8 colSlot);
+	static bool LoadCollisionModel(const uint8 *data, uint32 size, struct CColModel &model);
 	static void LoadModelFile(const char *filename);
 	static RpAtomic *FindRelatedModelInfoCB(RpAtomic *atomic, void *data);
 	static void LoadClumpFile(const char *filename);

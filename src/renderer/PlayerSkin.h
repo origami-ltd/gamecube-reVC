@@ -10,7 +10,7 @@ public:
 	static void Initialise();
 	static void Shutdown();
 	static RwTexture *GetSkinTexture(const char *texName);
-	static void BeginFrontendSkinEdit();
+	static bool BeginFrontendSkinEdit();
 	static void EndFrontendSkinEdit();
 	static void RenderFrontendSkinEdit();
 };

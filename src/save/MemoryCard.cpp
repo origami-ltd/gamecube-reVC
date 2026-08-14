@@ -435,7 +435,11 @@ CMemoryCard::LoadSavedGame(void)
 	
 
 	printf("Loading Scripts \n");
-	ReadDataFromBlock(CTheScripts::LoadAllScripts);
+	ReadDataFromBufferPointer(buf, size);
+	if(!CTheScripts::LoadAllScripts(buf, size))
+		return RES_FAILED;
+	size = align4bytes(size);
+	buf += size;
 	
 	printf("Loading PedPool \n");
 	ReadDataFromBlock(CPools::LoadPedPool);
@@ -514,7 +518,6 @@ CMemoryCard::LoadSavedGame(void)
 	
 	if ( oldLang != CMenuManager::m_PrefsLanguage )
 	{
-		TheText.Unload();
 		TheText.Load();
 	}
 	

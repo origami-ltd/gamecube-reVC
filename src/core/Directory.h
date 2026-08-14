@@ -15,11 +15,14 @@ public:
 
 	CDirectory(int32 maxEntries);
 	~CDirectory(void);
+	bool IsValid(void) const { return entries != nil; }
 
-	void ReadDirFile(const char *filename);
+	static int32 ReadEntry(int fd, DirectoryInfo &dirinfo);
+	static bool WriteEntry(int fd, const DirectoryInfo &dirinfo);
+	bool ReadDirFile(const char *filename);
 	bool WriteDirFile(const char *filename);
-	void AddItem(const DirectoryInfo &dirinfo);
-	void AddItem(const DirectoryInfo &dirinfo, int32 imgId);
+	bool AddItem(const DirectoryInfo &dirinfo);
+	bool AddItem(const DirectoryInfo &dirinfo, int32 imgId);
 	bool FindItem(const char *name, uint32 &offset, uint32 &size);
 };
 

@@ -31,6 +31,8 @@
 #include "SurfaceTable.h"
 #include "WaterCreatures.h"
 
+#include <new>
+
 #define RwIm3DVertexSet_RGBA(vert, rgba) RwIm3DVertexSetRGBA(vert, rgba.red, rgba.green, rgba.blue, rgba.alpha) // (RwRGBAAssign(&(_dst)->color, &_src))
 
 float TEXTURE_ADDU;
@@ -111,35 +113,93 @@ float fFlatWaterBlendRange    = 0.05f;
 float fStartBlendDistanceAdd  = 64.0f;
 float fMinWaterAlphaMult      = -30.0f;
 
+static const size_t WATER_LEVEL_FILE_SIZE = 21444;
 
-void
+bool
+DecodeWaterLevelFile(const uint8 *fileData, size_t fileSize, CWaterLevelData &water)
+{
+	if(fileData == nil || fileSize != WATER_LEVEL_FILE_SIZE)
+		return false;
+	uint32 count = ReadLE32(fileData);
+	if(count > 48)
+		return false;
+
+	size_t cursor = sizeof(uint32);
+	for(int i = 0; i < 48; i++, cursor += sizeof(float))
+		if(!isfinite(ReadLEFloat32(fileData + cursor)))
+			return false;
+	for(int i = 0; i < 48 * 4; i++, cursor += sizeof(float))
+		if(!isfinite(ReadLEFloat32(fileData + cursor)))
+			return false;
+	for(size_t i = 0; i < MAX_LARGE_SECTORS * MAX_LARGE_SECTORS +
+	                         MAX_SMALL_SECTORS * MAX_SMALL_SECTORS; i++){
+		uint8 index = fileData[cursor + i];
+		if(index != (uint8)NO_WATER && index >= count)
+			return false;
+	}
+
+	water.count = (int32)count;
+	cursor = sizeof(uint32);
+	for(int i = 0; i < 48; i++, cursor += sizeof(float))
+		water.levels[i] = ReadLEFloat32(fileData + cursor);
+	for(int i = 0; i < 48; i++){
+		water.rectangles[i].left = ReadLEFloat32(fileData + cursor);
+		cursor += sizeof(float);
+		water.rectangles[i].bottom = ReadLEFloat32(fileData + cursor);
+		cursor += sizeof(float);
+		water.rectangles[i].right = ReadLEFloat32(fileData + cursor);
+		cursor += sizeof(float);
+		water.rectangles[i].top = ReadLEFloat32(fileData + cursor);
+		cursor += sizeof(float);
+	}
+	memcpy(water.blocks, fileData + cursor, sizeof(water.blocks));
+	cursor += sizeof(water.blocks);
+	memcpy(water.fineBlocks, fileData + cursor, sizeof(water.fineBlocks));
+	return true;
+}
+
+static bool
+LoadWaterLevelFile(CWaterLevelData &water)
+{
+	int32 file = CFileMgr::OpenFile("DATA\\waterpro.dat", "rb");
+	size_t fileSize = 0;
+	bool success = file > 0 && CFileMgr::GetFileSize(file, &fileSize) &&
+	               fileSize == WATER_LEVEL_FILE_SIZE;
+	uint8 *fileData = nil;
+	if(success){
+		fileData = new(std::nothrow) uint8[fileSize];
+		success = fileData != nil && CFileMgr::Read(file, (char*)fileData, fileSize) == fileSize &&
+		          DecodeWaterLevelFile(fileData, fileSize, water);
+	}
+	delete[] fileData;
+	if(file > 0 && CFileMgr::CloseFile(file) != 0)
+		success = false;
+	return success;
+}
+
+static void
+PublishWaterLevelData(const CWaterLevelData &water)
+{
+	CWaterLevel::ms_nNoOfWaterLevels = water.count;
+	memcpy(CWaterLevel::ms_aWaterZs, water.levels, sizeof(water.levels));
+	memcpy(CWaterLevel::ms_aWaterRects, water.rectangles, sizeof(water.rectangles));
+	memcpy(CWaterLevel::aWaterBlockList, water.blocks, sizeof(water.blocks));
+	memcpy(CWaterLevel::aWaterFineBlockList, water.fineBlocks, sizeof(water.fineBlocks));
+}
+
+
+bool
 CWaterLevel::Initialise(Const char *pWaterDat)
 {
-	ms_nNoOfWaterLevels = 0;
-	
-#ifdef MASTER
-	int32 hFile = -1;
+	(void)pWaterDat;
+	CWaterLevelData *staged = new(std::nothrow) CWaterLevelData;
+	bool loaded = staged != nil && LoadWaterLevelFile(*staged);
+	if(loaded)
+		PublishWaterLevelData(*staged);
+	delete staged;
 
-	do
-	{
-		hFile = CFileMgr::OpenFile("DATA\\waterpro.dat", "rb");
-	}
-	while ( hFile < 0 );
-#else
-	int32 hFile = CFileMgr::OpenFile("DATA\\waterpro.dat", "rb");
-#endif
-	
-	if (hFile > 0)
-	{
-		CFileMgr::Read(hFile, (char *)&ms_nNoOfWaterLevels, sizeof(ms_nNoOfWaterLevels));
-		CFileMgr::Read(hFile, (char *)ms_aWaterZs,	sizeof(ms_aWaterZs));
-		CFileMgr::Read(hFile, (char *)ms_aWaterRects, sizeof(ms_aWaterRects));
-		CFileMgr::Read(hFile, (char *)aWaterBlockList, sizeof(aWaterBlockList));
-		CFileMgr::Read(hFile, (char *)aWaterFineBlockList, sizeof(aWaterFineBlockList));
-		CFileMgr::CloseFile(hFile);
-	}
-#ifndef MASTER
-	else
+#if !defined(MASTER) && !defined(GTA_OGC)
+	if(!loaded)
 	{
 		printf("Init waterlevels\n");
 
@@ -147,7 +207,10 @@ CWaterLevel::Initialise(Const char *pWaterDat)
 		CColStore::LoadAllCollision();
 
 		CFileMgr::SetDir("");
-		hFile = CFileMgr::OpenFile(pWaterDat, "r");
+		int32 hFile = CFileMgr::OpenFile(pWaterDat, "r");
+		if(hFile <= 0)
+			return false;
+		ms_nNoOfWaterLevels = 0;
 
 		char *line;
 
@@ -272,8 +335,11 @@ CWaterLevel::Initialise(Const char *pWaterDat)
 
 		// collision is streamed in VC
 		CColStore::RemoveAllCollision();
+		loaded = true;
 	}
 #endif
+	if(!loaded)
+		return false;
 	
 	CTxdStore::PushCurrentTxd();
 
@@ -303,6 +369,7 @@ CWaterLevel::Initialise(Const char *pWaterDat)
 	CreateWavyAtomic();
 	
 	printf("Done Initing waterlevels\n");
+	return true;
 }
 
 void

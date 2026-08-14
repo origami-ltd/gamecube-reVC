@@ -73,7 +73,7 @@ public:
 	CAnimBlendSequence(void);
 	virtual ~CAnimBlendSequence(void);
 	void SetName(char *name);
-	void SetNumFrames(int numFrames, bool translation, bool compressed);
+	bool SetNumFrames(int numFrames, bool translation, bool compressed);
 	void RemoveQuaternionFlips(void);
 	KeyFrame *GetKeyFrame(int n) {
 		return type & KF_TRANS ?

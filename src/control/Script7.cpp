@@ -1079,7 +1079,8 @@ int8 CRunningScript::ProcessCommands1300To1399(int32 command)
 		char key[8];
 		CTheScripts::ReadTextLabelFromScript(&m_nIp, key);
 		m_nIp += KEY_LENGTH_IN_SCRIPT;
-		TheText.LoadMissionText(key);
+		if(!TheText.LoadMissionText(key))
+			return 1;
 		return 0;
 	}
 	case COMMAND_SET_TONIGHTS_EVENT:

@@ -1042,7 +1042,6 @@ void InitialiseLanguage()
     setlocale(LC_COLLATE, "C");
     setlocale(LC_NUMERIC, "C");
 
-    TheText.Unload();
     TheText.Load();
 }
 
@@ -1443,7 +1442,6 @@ main(int argc, char *argv[])
 	{
 		LoadingScreen(nil, nil, "loadsc0");
 
-		TheText.Unload();
 		TheText.Load();
 
 		CFont::Initialise();
@@ -1472,11 +1470,13 @@ main(int argc, char *argv[])
         if (gbModelViewer) {
             // This is TheModelViewer in LCS
             LoadingScreen("Loading the ModelViewer", NULL, GetRandomSplashScreen());
-            CAnimViewer::Initialise();
-            CTimer::Update();
+            if (CAnimViewer::Initialise()) {
+                CTimer::Update();
 #ifndef PS2_MENU
-            FrontEndMenuManager.m_bGameNotLoaded = false;
+                FrontEndMenuManager.m_bGameNotLoaded = false;
 #endif
+            } else
+                RsGlobal.quit = TRUE;
         }
 #endif
 
@@ -1651,7 +1651,10 @@ main(int argc, char *argv[])
                         if ( FrontEndMenuManager.m_bWantToLoad )
 #endif
                         {
-                            InitialiseGame();
+                            if(!InitialiseGame()){
+                                RsGlobal.quit = TRUE;
+                                break;
+                            }
                             FrontEndMenuManager.m_bGameNotLoaded = false;
                             gGameState = GS_PLAYING_GAME;
                             TRACE("gGameState = GS_PLAYING_GAME;");
@@ -1663,7 +1666,10 @@ main(int argc, char *argv[])
                     case GS_INIT_PLAYING_GAME:
                     {
 #ifdef PS2_MENU
-                        CGame::Initialise("DATA\\GTA3.DAT");
+                        if(!CGame::Initialise("DATA\\GTA3.DAT")){
+                            RsGlobal.quit = TRUE;
+                            break;
+                        }
 
 						//LoadingScreen("Starting Game", NULL, GetRandomSplashScreen());
 
@@ -1678,14 +1684,16 @@ main(int argc, char *argv[])
 							if (CMenuManager::m_PrefsLanguage != TheMemoryCard.GetLanguageToLoad())
 							{
 								CMenuManager::m_PrefsLanguage = TheMemoryCard.GetLanguageToLoad();
-								TheText.Unload();
 								TheText.Load();
 							}
 
 							CGame::currLevel = (eLevelName)TheMemoryCard.GetLevelToLoad();
 						}
 #else
-                        InitialiseGame();
+                        if(!InitialiseGame()){
+                            RsGlobal.quit = TRUE;
+                            break;
+                        }
 
                         FrontEndMenuManager.m_bGameNotLoaded = false;
 #endif
@@ -1753,7 +1761,8 @@ main(int argc, char *argv[])
 				TheMemoryCard.m_bWantToLoad = true;
 			}
 
-			CGame::InitialiseWhenRestarting();
+			if(!CGame::InitialiseWhenRestarting())
+				break;
 			DMAudio.ChangeMusicMode(MUSICMODE_GAME);
 			FrontEndMenuManager.m_bWantToRestart = false;
 
@@ -1768,7 +1777,8 @@ main(int argc, char *argv[])
         if ( FrontEndMenuManager.m_bWantToLoad )
         {
             CGame::ShutDownForRestart();
-            CGame::InitialiseWhenRestarting();
+			if(!CGame::InitialiseWhenRestarting())
+				break;
             DMAudio.ChangeMusicMode(MUSICMODE_GAME);
             LoadSplash(GetLevelSplashScreen(CGame::currLevel));
             FrontEndMenuManager.m_bWantToLoad = false;

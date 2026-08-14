@@ -11,6 +11,9 @@
 #include "AnimBlendAssocGroup.h"
 #include "AnimManager.h"
 #include "Streaming.h"
+#include "main.h"
+
+#include <new>
 
 CAnimBlock CAnimManager::ms_aAnimBlocks[NUMANIMBLOCKS];
 CAnimBlendHierarchy CAnimManager::ms_aAnimations[NUMANIMATIONS];
@@ -989,6 +992,7 @@ CAnimManager::Shutdown(void)
 	ms_animCache.Shutdown();
 
 	delete[] ms_aAnimAssocGroups;
+	ms_aAnimAssocGroups = nil;
 }
 
 void
@@ -1052,12 +1056,16 @@ CAnimManager::GetAnimationBlockIndex(const char *name)
 int32
 CAnimManager::RegisterAnimBlock(const char *name)
 {
+	if(name == nil || strlen(name) >= MAX_ANIMBLOCK_NAME)
+		return -1;
 	CAnimBlock *animBlock = GetAnimationBlock(name);
 	if(animBlock == nil){
+		if(ms_numAnimBlocks >= NUMANIMBLOCKS)
+			return -1;
 		animBlock = &ms_aAnimBlocks[ms_numAnimBlocks++];
-		strncpy(animBlock->name, name, MAX_ANIMBLOCK_NAME);
+		memset(animBlock, 0, sizeof(*animBlock));
+		strcpy(animBlock->name, name);
 		animBlock->numAnims = 0;
-		assert(animBlock->refCount == 0);
 	}
 	return animBlock - ms_aAnimBlocks;
 }
@@ -1230,12 +1238,24 @@ CAnimManager::BlendAnimation(RpClump *clump, AssocGroupId groupId, AnimationId a
 	return found;
 }
 
-void
+bool
 CAnimManager::LoadAnimFiles(void)
 {
-	LoadAnimFile("ANIM\\PED.IFP");
-	ms_aAnimAssocGroups = new CAnimBlendAssocGroup[NUM_ANIM_ASSOC_GROUPS];
+	if(ms_aAnimAssocGroups != nil)
+		return false;
+	ms_aAnimAssocGroups = new(std::nothrow) CAnimBlendAssocGroup[NUM_ANIM_ASSOC_GROUPS];
+	if(ms_aAnimAssocGroups == nil)
+		return false;
+	if(!LoadAnimFile("ANIM\\PED.IFP")){
+		delete[] ms_aAnimAssocGroups;
+		ms_aAnimAssocGroups = nil;
+		return false;
+	}
+#ifdef GTA_OGC
+	BootLog("  assoc groups");
+#endif
 	CreateAnimAssocGroups();
+	return true;
 }
 
 void
@@ -1244,18 +1264,31 @@ CAnimManager::CreateAnimAssocGroups(void)
 	int i, j;
 
 	for(i = 0; i < NUM_ANIM_ASSOC_GROUPS; i++){
+#ifdef GTA_OGC
+		{
+			char line[64];
+			snprintf(line, sizeof(line), "  assoc %d/%d", i, NUM_ANIM_ASSOC_GROUPS);
+			BootLog(line);
+		}
+#endif
 		CAnimBlock *block = GetAnimationBlock(ms_aAnimAssocDefinitions[i].blockName);
 		if(block == nil || !block->isLoaded || ms_aAnimAssocGroups[i].assocList)
 			continue;
 
 		CBaseModelInfo *mi = CModelInfo::GetModelInfo(ms_aAnimAssocDefinitions[i].modelIndex);
 		RpClump *clump = (RpClump*)mi->CreateInstance();
+#ifdef GTA_OGC
+		BootLog(clump ? "   inst ok" : "   inst NIL");
+#endif
 		RpAnimBlendClumpInit(clump);
 		CAnimBlendAssocGroup *group = &ms_aAnimAssocGroups[i];
 		const AnimAssocDefinition *def = &ms_aAnimAssocDefinitions[i];
 		group->groupId = i;
 		group->firstAnimId = def->animDescs[0].animId;
 		group->CreateAssociations(def->blockName, clump, def->animNames, def->numAnims);
+#ifdef GTA_OGC
+		BootLog("   assocs made");
+#endif
 		for(j = 0; j < group->numAssociations; j++)
 			// GetAnimation(i) in III (but it's in LoadAnimFiles), GetAnimation(group->animDesc[j].animId) in VC
 			group->GetAnimation(def->animDescs[j].animId)->flags |= def->animDescs[j].flags;
@@ -1265,60 +1298,188 @@ CAnimManager::CreateAnimAssocGroups(void)
 	}
 }
 
-void
+bool
 CAnimManager::LoadAnimFile(const char *filename)
 {
-	RwStream *stream;
-	stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, filename);
-	assert(stream);
-	LoadAnimFile(stream, true);
+#ifdef GTA_OGC
+	BootLog("  ifp open");
+#endif
+	RwStream *stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, filename);
+	if(stream == nil)
+		return false;
+	bool success = LoadAnimFile(stream, true);
+#ifdef GTA_OGC
+	BootLog(success ? "  ifp parsed" : "  ifp parse FAILED");
+#endif
 	RwStreamClose(stream, nil);
+	return success;
 }
 
-void
-CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedAnims)[32])
+struct IfpHeader
 {
-	#define ROUNDSIZE(x) if((x) & 3) (x) += 4 - ((x)&3)
-	struct IfpHeader {
-		char ident[4];
-		uint32 size;
-	};
-	IfpHeader anpk, info, name, dgan, cpan, anim;
-	char buf[256];
-	int j, k, l;
-	float *fbuf = (float*)buf;
+	char ident[4];
+	uint32 rawSize;
+	uint32 paddedSize;
+};
 
-	// block name
-	RwStreamRead(stream, &anpk, sizeof(IfpHeader));
-	ROUNDSIZE(anpk.size);
-	RwStreamRead(stream, &info, sizeof(IfpHeader));
-	ROUNDSIZE(info.size);
-	RwStreamRead(stream, buf, info.size);
-	CAnimBlock *animBlock = GetAnimationBlock(buf+4);
-	if(animBlock){
-		if(animBlock->numAnims == 0){
-			animBlock->numAnims = *(int*)buf;
-			animBlock->firstIndex = ms_numAnimations;
-		}
-	}else{
-		animBlock = &ms_aAnimBlocks[ms_numAnimBlocks++];
-		strncpy(animBlock->name, buf+4, MAX_ANIMBLOCK_NAME);
-		animBlock->numAnims = *(int*)buf;
-		animBlock->firstIndex = ms_numAnimations;
+struct IfpReader
+{
+	RwStream *stream;
+	uint64 position;
+
+	IfpReader(RwStream *stream) : stream(stream), position(0) {}
+
+	bool Read(void *data, uint32 size, uint64 end)
+	{
+		if(position > end || size > end - position ||
+		   RwStreamRead(stream, data, size) != size)
+			return false;
+		position += size;
+		return true;
 	}
 
-	debug("Loading ANIMS %s\n", animBlock->name);
-	animBlock->isLoaded = true;
+	bool ReadHeader(IfpHeader &header, const char *ident, uint64 parentEnd, uint64 &chunkEnd)
+	{
+		uint8 data[8];
+		if(!Read(data, sizeof(data), parentEnd))
+			return false;
+		memcpy(header.ident, data, sizeof(header.ident));
+		if(ident && memcmp(header.ident, ident, sizeof(header.ident)) != 0)
+			return false;
+		header.rawSize = ReadLE32(&data[4]);
+		if(header.rawSize > 0xFFFFFFFC)
+			return false;
+		header.paddedSize = (header.rawSize + 3) & ~3;
+		if(position > parentEnd || header.paddedSize > parentEnd - position)
+			return false;
+		chunkEnd = position + header.paddedSize;
+		return true;
+	}
+};
 
-	int animIndex = animBlock->firstIndex;
-	for(j = 0; j < animBlock->numAnims; j++){
-		assert(animIndex < ARRAY_SIZE(ms_aAnimations));
-		CAnimBlendHierarchy *hier = &ms_aAnimations[animIndex++];
+static bool
+ReadIfpData(IfpReader &reader, void *data, const IfpHeader &header, uint32 capacity, uint64 end)
+{
+	if(header.paddedSize > capacity || reader.position + header.paddedSize != end)
+		return false;
+	memset(data, 0, capacity);
+	return reader.Read(data, header.paddedSize, end) && reader.position == end;
+}
 
-		// animation name
-		RwStreamRead(stream, &name, sizeof(IfpHeader));
-		ROUNDSIZE(name.size);
-		RwStreamRead(stream, buf, name.size);
+static bool
+ReadIfpFloats(IfpReader &reader, float *values, uint32 count, uint64 end)
+{
+	uint8 data[11*sizeof(float)];
+	if(count > 11 || !reader.Read(data, count*sizeof(float), end))
+		return false;
+	for(uint32 i = 0; i < count; i++)
+		values[i] = ReadLEFloat32(&data[i*sizeof(float)]);
+	return true;
+}
+
+static bool
+FitsCompressedIfpValue(float value, float scale, float bias = 0.0f)
+{
+	float encoded = value*scale + bias;
+	return encoded >= INT16_MIN && encoded <= INT16_MAX;
+}
+
+static bool
+FitsCompressedIfpRotationValue(float value)
+{
+	float encoded = value*4096.0f;
+	return encoded >= -INT16_MAX && encoded <= INT16_MAX;
+}
+
+static bool
+FitsCompressedIfpFrame(const CQuaternion &rotation, const CVector *translation, float time)
+{
+	if(!FitsCompressedIfpRotationValue(rotation.x) ||
+	   !FitsCompressedIfpRotationValue(rotation.y) ||
+	   !FitsCompressedIfpRotationValue(rotation.z) ||
+	   !FitsCompressedIfpRotationValue(rotation.w) ||
+	   !FitsCompressedIfpValue(time, 60.0f, 0.5f))
+		return false;
+	return translation == nil ||
+	       (FitsCompressedIfpValue(translation->x, 1024.0f) &&
+	        FitsCompressedIfpValue(translation->y, 1024.0f) &&
+	        FitsCompressedIfpValue(translation->z, 1024.0f));
+}
+
+bool
+CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedAnims)[32], uint64 maxBytes)
+{
+	IfpReader reader(stream);
+	IfpHeader anpk, info, name, dgan, cpan, anim, keys;
+	uint64 anpkEnd, infoEnd, nameEnd, dganEnd, cpanEnd, animEnd, keysEnd;
+	char buf[256];
+	char blockName[MAX_ANIMBLOCK_NAME];
+	int32 fileNumAnims;
+	int32 firstIndex = 0;
+	int32 createdHierarchies = 0;
+	int32 oldNumAnimBlocks = ms_numAnimBlocks;
+	int32 oldNumAnimations = ms_numAnimations;
+	CAnimBlock *animBlock = nil;
+	bool newBlock = false;
+	int j, k, l;
+	float fbuf[11];
+
+	if(stream == nil ||
+	   !reader.ReadHeader(anpk, "ANPK", maxBytes, anpkEnd) ||
+	   !reader.ReadHeader(info, "INFO", anpkEnd, infoEnd) ||
+	   info.rawSize <= 4 || !ReadIfpData(reader, buf, info, sizeof(buf), infoEnd) ||
+	   memchr(buf + 4, '\0', info.rawSize - 4) == nil ||
+	   strlen(buf + 4) >= sizeof(blockName))
+		goto fail;
+	fileNumAnims = (int32)ReadLE32(buf);
+	if(fileNumAnims < 0)
+		goto fail;
+	strcpy(blockName, buf + 4);
+	animBlock = GetAnimationBlock(blockName);
+	if(animBlock){
+		if(animBlock->isLoaded ||
+		   (animBlock->numAnims != 0 && animBlock->numAnims != fileNumAnims))
+			goto fail;
+		if(animBlock->numAnims == 0){
+			if(fileNumAnims > NUMANIMATIONS - ms_numAnimations)
+				goto fail;
+			firstIndex = ms_numAnimations;
+		}else{
+			firstIndex = animBlock->firstIndex;
+			if(firstIndex < 0 || firstIndex > NUMANIMATIONS ||
+			   fileNumAnims > NUMANIMATIONS - firstIndex)
+				goto fail;
+		}
+	}else{
+		if(ms_numAnimBlocks >= NUMANIMBLOCKS ||
+		   fileNumAnims > NUMANIMATIONS - ms_numAnimations)
+			goto fail;
+		animBlock = &ms_aAnimBlocks[ms_numAnimBlocks];
+		newBlock = true;
+		firstIndex = ms_numAnimations;
+	}
+	for(j = 0; j < fileNumAnims; j++)
+		if(ms_aAnimations[firstIndex + j].sequences != nil ||
+		   ms_aAnimations[firstIndex + j].linkPtr != nil)
+			goto fail;
+
+	for(j = 0; j < fileNumAnims; j++){
+#ifdef GTA_OGC
+		if(j % 100 == 0){
+			char line[64];
+			snprintf(line, sizeof(line), "  anim %d/%d", j, fileNumAnims);
+			BootLog(line);
+		}
+#endif
+		CAnimBlendHierarchy *hier = &ms_aAnimations[firstIndex + j];
+		createdHierarchies++;
+		hier->totalLength = 0.0f;
+		hier->keepCompressed = false;
+
+		if(!reader.ReadHeader(name, "NAME", anpkEnd, nameEnd) ||
+		   name.rawSize == 0 || !ReadIfpData(reader, buf, name, sizeof(buf), nameEnd) ||
+		   memchr(buf, '\0', name.rawSize) == nil || strlen(buf) >= sizeof(hier->name))
+			goto fail;
 		hier->SetName(buf);
 
 #ifdef ANIM_COMPRESSION
@@ -1338,53 +1499,79 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 		hier->compressed = compressHier;
 		hier->keepCompressed = false;
 
-		// DG info has number of nodes/sequences
-		RwStreamRead(stream, (char*)&dgan, sizeof(IfpHeader));
-		ROUNDSIZE(dgan.size);
-		RwStreamRead(stream, (char*)&info, sizeof(IfpHeader));
-		ROUNDSIZE(info.size);
-		RwStreamRead(stream, buf, info.size);
-		hier->numSequences = *(int*)buf;
-		hier->sequences = new CAnimBlendSequence[hier->numSequences];
+		// VC's ped.ifp writes 8-byte DGAN INFOs; only the first int matters.
+		if(!reader.ReadHeader(dgan, "DGAN", anpkEnd, dganEnd) ||
+		   !reader.ReadHeader(info, "INFO", dganEnd, infoEnd) ||
+		   info.rawSize < 4 || !ReadIfpData(reader, buf, info, sizeof(buf), infoEnd))
+			goto fail;
+		int32 numSequences = (int32)ReadLE32(buf);
+		if(numSequences < 0 || numSequences > INT16_MAX ||
+		   (uint64)(uint32)numSequences * 48 > dganEnd - reader.position)
+			goto fail;
+		hier->numSequences = (int16)numSequences;
+		if(numSequences > 0){
+			hier->sequences = new(std::nothrow) CAnimBlendSequence[numSequences];
+			if(hier->sequences == nil){
+				hier->numSequences = 0;
+				goto fail;
+			}
+		}
 
 		CAnimBlendSequence *seq = hier->sequences;
 		for(k = 0; k < hier->numSequences; k++, seq++){
-			// Each node has a name and key frames
-			RwStreamRead(stream, &cpan, sizeof(IfpHeader));
-			ROUNDSIZE(dgan.size);
-			RwStreamRead(stream, &anim, sizeof(IfpHeader));
-			ROUNDSIZE(anim.size);
-			RwStreamRead(stream, buf, anim.size);
-			int numFrames = *(int*)(buf+28);
+			// 32 = III-style, 44 = +boneTag, 48 = VC ped.ifp (+4 unknown).
+			if(!reader.ReadHeader(cpan, "CPAN", dganEnd, cpanEnd) ||
+			   !reader.ReadHeader(anim, "ANIM", cpanEnd, animEnd) ||
+			   (anim.rawSize != 32 && anim.rawSize != 44 && anim.rawSize != 48) ||
+			   !ReadIfpData(reader, buf, anim, sizeof(buf), animEnd) ||
+			   memchr(buf, '\0', 24) == nil)
+				goto fail;
+			int numFrames = (int32)ReadLE32(buf+28);
+			if(numFrames < 0)
+				goto fail;
 			seq->SetName(buf);
-			if(anim.size == 44)
-				seq->SetBoneTag(*(int*)(buf+40));
-			if(numFrames == 0)
+			if(anim.rawSize >= 44)
+				seq->SetBoneTag((int32)ReadLE32(buf+40));
+			if(numFrames == 0){
+				if(reader.position != cpanEnd)
+					goto fail;
 				continue;
+			}
 
 			bool hasScale = false;
 			bool hasTranslation = false;
-			RwStreamRead(stream, &info, sizeof(info));
-			if(strncmp(info.ident, "KRTS", 4) == 0){
+			uint32 floatsPerFrame;
+			if(!reader.ReadHeader(keys, nil, cpanEnd, keysEnd) ||
+			   (memcmp(keys.ident, "KRTS", 4) != 0 &&
+			    memcmp(keys.ident, "KRT0", 4) != 0 &&
+			    memcmp(keys.ident, "KR00", 4) != 0))
+				goto fail;
+			if(memcmp(keys.ident, "KRTS", 4) == 0){
 				hasScale = true;
-				seq->SetNumFrames(numFrames, true, compressHier);
-			}else if(strncmp(info.ident, "KRT0", 4) == 0){
+				floatsPerFrame = 11;
+			}else if(memcmp(keys.ident, "KRT0", 4) == 0){
 				hasTranslation = true;
-				seq->SetNumFrames(numFrames, true, compressHier);
-			}else if(strncmp(info.ident, "KR00", 4) == 0){
-				seq->SetNumFrames(numFrames, false, compressHier);
-			}
+				floatsPerFrame = 8;
+			}else
+				floatsPerFrame = 5;
+			uint64 keyBytes = (uint64)(uint32)numFrames * floatsPerFrame * sizeof(float);
+			if(keyBytes > UINT32_MAX || keys.rawSize != keyBytes ||
+			   !seq->SetNumFrames(numFrames, hasScale || hasTranslation, compressHier))
+				goto fail;
 			if(strstr(seq->name, "L Toe"))
 				debug("anim %s has toe keyframes\n", hier->name); // BUG: seq->name
 
 			for(l = 0; l < numFrames; l++){
 				if(hasScale){
-					RwStreamRead(stream, buf, 0x2C);
+					if(!ReadIfpFloats(reader, fbuf, 11, keysEnd))
+						goto fail;
 					CQuaternion rot(fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
 					rot.Invert();
 					CVector trans(fbuf[4], fbuf[5], fbuf[6]);
 
 					if(compressHier){
+						if(!FitsCompressedIfpFrame(rot, &trans, fbuf[10]))
+							goto fail;
 						KeyFrameTransCompressed *kf = (KeyFrameTransCompressed*)seq->GetKeyFrameCompressed(l);
 						kf->SetRotation(rot);
 						kf->SetTranslation(trans);
@@ -1398,12 +1585,15 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 						kf->deltaTime = fbuf[10];	// absolute time here
 					}
 				}else if(hasTranslation){
-					RwStreamRead(stream, buf, 0x20);
+					if(!ReadIfpFloats(reader, fbuf, 8, keysEnd))
+						goto fail;
 					CQuaternion rot(fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
 					rot.Invert();
 					CVector trans(fbuf[4], fbuf[5], fbuf[6]);
 
 					if(compressHier){
+						if(!FitsCompressedIfpFrame(rot, &trans, fbuf[7]))
+							goto fail;
 						KeyFrameTransCompressed *kf = (KeyFrameTransCompressed*)seq->GetKeyFrameCompressed(l);
 						kf->SetRotation(rot);
 						kf->SetTranslation(trans);
@@ -1415,11 +1605,14 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 						kf->deltaTime = fbuf[7];	// absolute time here
 					}
 				}else{
-					RwStreamRead(stream, buf, 0x14);
+					if(!ReadIfpFloats(reader, fbuf, 5, keysEnd))
+						goto fail;
 					CQuaternion rot(fbuf[0], fbuf[1], fbuf[2], fbuf[3]);
 					rot.Invert();
 
 					if(compressHier){
+						if(!FitsCompressedIfpFrame(rot, nil, fbuf[4]))
+							goto fail;
 						KeyFrameCompressed *kf = (KeyFrameCompressed*)seq->GetKeyFrameCompressed(l);
 						kf->SetRotation(rot);
 						kf->SetTime(fbuf[4]);	// absolute time here
@@ -1430,15 +1623,38 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 					}
 				}
 			}
+			if(reader.position != keysEnd || reader.position != cpanEnd)
+				goto fail;
 		}
+		if(reader.position != dganEnd)
+			goto fail;
 
 		if(!compressHier){
 			hier->RemoveQuaternionFlips();
 			hier->CalcTotalTime();
 		}
 	}
-	if(animIndex > ms_numAnimations)
-		ms_numAnimations = animIndex;
+	if(reader.position != anpkEnd)
+		goto fail;
+	if(newBlock){
+		memset(animBlock, 0, sizeof(*animBlock));
+		strcpy(animBlock->name, blockName);
+		ms_numAnimBlocks++;
+	}
+	animBlock->numAnims = fileNumAnims;
+	animBlock->firstIndex = firstIndex;
+	animBlock->isLoaded = true;
+	if(firstIndex + fileNumAnims > ms_numAnimations)
+		ms_numAnimations = firstIndex + fileNumAnims;
+	debug("Loading ANIMS %s\n", animBlock->name);
+	return true;
+
+fail:
+	for(j = 0; j < createdHierarchies; j++)
+		ms_aAnimations[firstIndex + j].Shutdown();
+	ms_numAnimBlocks = oldNumAnimBlocks;
+	ms_numAnimations = oldNumAnimations;
+	return false;
 }
 
 void

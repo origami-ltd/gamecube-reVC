@@ -28,8 +28,8 @@ void RenderSkeleton(RpHAnimHierarchy *hier);
 RwBool Im2DRenderQuad(RwReal x1, RwReal y1, RwReal x2, RwReal y2, RwReal z, RwReal recipCamZ, RwReal uvOffset);
 RpClump *RpClumpGetBoundingSphere(RpClump *clump, RwSphere *sphere, bool useLTM);
 
-RwTexDictionary *RwTexDictionaryGtaStreamRead(RwStream *stream);
-RwTexDictionary *RwTexDictionaryGtaStreamRead1(RwStream *stream);
+RwTexDictionary *RwTexDictionaryGtaStreamRead(RwStream *stream, uint32 payloadSize);
+RwTexDictionary *RwTexDictionaryGtaStreamRead1(RwStream *stream, uint32 payloadSize);
 RwTexDictionary *RwTexDictionaryGtaStreamRead2(RwStream *stream, RwTexDictionary *texDict);
 void ReadVideoCardCapsFile(uint32&, uint32&, uint32&, uint32&);
 bool CheckVideoCardCaps(void);
@@ -39,7 +39,7 @@ void ConvertingTexturesScreen(uint32, uint32, const char*);
 void DealWithTxdWriteError(uint32, uint32, const char*);
 bool CreateTxdImageForVideoCard();
 
-bool RpClumpGtaStreamRead1(RwStream *stream);
+bool RpClumpGtaStreamRead1(RwStream *stream, uint32 payloadSize);
 RpClump *RpClumpGtaStreamRead2(RwStream *stream);
 void RpClumpGtaCancelStream(void);
 

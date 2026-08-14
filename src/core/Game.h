@@ -61,10 +61,10 @@ public:
 	static void FinalShutdown(void);
 	static bool Initialise(const char *datFile);
 	static bool ShutDown(void);
-	static void ReInitGameObjectVariables(void);
+	static bool ReInitGameObjectVariables(void);
 	static void ReloadIPLs(void);
 	static void ShutDownForRestart(void);
-	static void InitialiseWhenRestarting(void);
+	static bool InitialiseWhenRestarting(void);
 	static void Process(void);
 
 	static void InitAfterFocusLoss(void);

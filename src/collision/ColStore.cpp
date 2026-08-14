@@ -44,8 +44,12 @@ CColStore::Shutdown(void)
 int
 CColStore::AddColSlot(const char *name)
 {
+	if(ms_pColPool == nil || name == nil || strlen(name) >= sizeof(ColDef::name) ||
+	   ms_pColPool->GetNoOfFreeSpaces() == 0)
+		return -1;
 	ColDef *def = ms_pColPool->New();
-	assert(def);
+	if(def == nil)
+		return -1;
 	def->isLoaded = false;
 	def->unused = 0;
 	def->bounds.left = 1000000.0f;

@@ -3463,26 +3463,23 @@ struct Spline
 
 #define MS(t) (uint32)((t)*1000.0f)
 
+static uint32
+SplineLastMarker(float *spline, uint32 stride)
+{
+	return stride*((uint32)spline[0]-1) + 1;
+}
+
 void
 FindSplinePathPositionFloat(float *out, float *spline, uint32 time, uint32 &marker)
 {
 	// marker is at time
-	uint32 numFrames = spline[0];
+	uint32 lastMarker = SplineLastMarker(spline, 4);
 	uint32 timeDelta = MS(spline[marker] - spline[marker-4]);
-	uint32 endTime = MS(spline[4*(numFrames-1) + 1]);
+	uint32 endTime = MS(spline[lastMarker]);
 	if(time < endTime){
-		bool canAdvance = true;
-		if((marker-1)/4 > numFrames){
-			canAdvance = false;
-			marker = 4*(numFrames-1) + 1;
-		}
 		// skipping over small time deltas apparently?
-		while(timeDelta <= 75 && canAdvance){
+		while(timeDelta <= 75 && marker < lastMarker){
 			marker += 4;
-			if((marker-1)/4 > numFrames){
-				canAdvance = false;
-				marker = 4*(numFrames-1) + 1;
-			}
 			timeDelta = (spline[marker] - spline[marker-4]) * 1000.0f;
 		}
 	}
@@ -3499,29 +3496,15 @@ void
 FindSplinePathPositionVector(CVector *out, float *spline, uint32 time, uint32 &marker)
 {
 	// marker is at time
-	uint32 numFrames = spline[0];
+	uint32 lastMarker = SplineLastMarker(spline, 10);
 	uint32 timeDelta = MS(spline[marker] - spline[marker-10]);
-	uint32 endTime = MS(spline[10*(numFrames-1) + 1]);
+	uint32 endTime = MS(spline[lastMarker]);
 	if(time < endTime){
-		bool canAdvance = true;
-		if((marker-1)/10 > numFrames){
-			canAdvance = false;
-			marker = 10*(numFrames-1) + 1;
-		}
 		// skipping over small time deltas apparently?
-		while(timeDelta <= 75 && canAdvance){
+		while(timeDelta <= 75 && marker < lastMarker){
 			marker += 10;
-			if((marker-1)/10 > numFrames){
-				canAdvance = false;
-				marker = 10*(numFrames-1) + 1;
-			}
 			timeDelta = (spline[marker] - spline[marker-10]) * 1000.0f;
 		}
-	}
-
-	if((marker-1)/10 > numFrames){
-		printf("Arraymarker %i \n", marker);
-		printf("Path zero %i \n", numFrames);
 	}
 
 	float a = ((float)time - (float)MS(spline[marker-10])) / (float)MS(spline[marker] - spline[marker-10]);
@@ -3585,22 +3568,26 @@ CCam::Process_FlyBy(const CVector&, float, float, float)
 	if(uiTime < uiFinishTime){
 		TheCamera.m_fPositionAlongSpline = (float) uiTime / uiFinishTime;
 
-		while(uiTime >= (TheCamera.m_arrPathArray[2].m_arr_PathData[ArrayMarkerSource] - TheCamera.m_arrPathArray[2].m_arr_PathData[1])*1000.0f)
+		while(ArrayMarkerSource < SplineLastMarker(TheCamera.m_arrPathArray[2].m_arr_PathData, 10) &&
+		      uiTime >= (TheCamera.m_arrPathArray[2].m_arr_PathData[ArrayMarkerSource] - TheCamera.m_arrPathArray[2].m_arr_PathData[1])*1000.0f)
 			ArrayMarkerSource += 10;
 		FindSplinePathPositionVector(&Source, TheCamera.m_arrPathArray[2].m_arr_PathData, uiTime, ArrayMarkerSource);
 
-		while(uiTime >= (TheCamera.m_arrPathArray[3].m_arr_PathData[ArrayMarkerFront] - TheCamera.m_arrPathArray[3].m_arr_PathData[1])*1000.0f)
+		while(ArrayMarkerFront < SplineLastMarker(TheCamera.m_arrPathArray[3].m_arr_PathData, 10) &&
+		      uiTime >= (TheCamera.m_arrPathArray[3].m_arr_PathData[ArrayMarkerFront] - TheCamera.m_arrPathArray[3].m_arr_PathData[1])*1000.0f)
 			ArrayMarkerFront += 10;
 		FindSplinePathPositionVector(&Front, TheCamera.m_arrPathArray[3].m_arr_PathData, uiTime, ArrayMarkerFront);
 
-		while(uiTime >= (TheCamera.m_arrPathArray[1].m_arr_PathData[ArrayMarkerUp] - TheCamera.m_arrPathArray[1].m_arr_PathData[1])*1000.0f)
+		while(ArrayMarkerUp < SplineLastMarker(TheCamera.m_arrPathArray[1].m_arr_PathData, 4) &&
+		      uiTime >= (TheCamera.m_arrPathArray[1].m_arr_PathData[ArrayMarkerUp] - TheCamera.m_arrPathArray[1].m_arr_PathData[1])*1000.0f)
 			ArrayMarkerUp += 4;
 		FindSplinePathPositionFloat(&UpAngle, TheCamera.m_arrPathArray[1].m_arr_PathData, uiTime, ArrayMarkerUp);
 		UpAngle = DEGTORAD(UpAngle) + HALFPI;
 		Up.x = Cos(UpAngle);
 		Up.z = Sin(UpAngle);
 
-		while(uiTime >= (TheCamera.m_arrPathArray[0].m_arr_PathData[ArrayMarkerFOV] - TheCamera.m_arrPathArray[0].m_arr_PathData[1])*1000.0f)
+		while(ArrayMarkerFOV < SplineLastMarker(TheCamera.m_arrPathArray[0].m_arr_PathData, 4) &&
+		      uiTime >= (TheCamera.m_arrPathArray[0].m_arr_PathData[ArrayMarkerFOV] - TheCamera.m_arrPathArray[0].m_arr_PathData[1])*1000.0f)
 			ArrayMarkerFOV += 4;
 		FindSplinePathPositionFloat(&PsuedoFOV, TheCamera.m_arrPathArray[0].m_arr_PathData, uiTime, ArrayMarkerFOV);
 
@@ -3612,10 +3599,10 @@ CCam::Process_FlyBy(const CVector&, float, float, float)
 		Up.Normalise();
 	}else if(uiTime >= uiFinishTime){
 		// end
-		ArrayMarkerSource = (TheCamera.m_arrPathArray[2].m_arr_PathData[0] - 1)*10 + 1;
-		ArrayMarkerFront = (TheCamera.m_arrPathArray[3].m_arr_PathData[0] - 1)*10 + 1;
-		ArrayMarkerUp = (TheCamera.m_arrPathArray[1].m_arr_PathData[0] - 1)*4 + 1;
-		ArrayMarkerFOV = (TheCamera.m_arrPathArray[0].m_arr_PathData[0] - 1)*4 + 1;
+		ArrayMarkerSource = SplineLastMarker(TheCamera.m_arrPathArray[2].m_arr_PathData, 10);
+		ArrayMarkerFront = SplineLastMarker(TheCamera.m_arrPathArray[3].m_arr_PathData, 10);
+		ArrayMarkerUp = SplineLastMarker(TheCamera.m_arrPathArray[1].m_arr_PathData, 4);
+		ArrayMarkerFOV = SplineLastMarker(TheCamera.m_arrPathArray[0].m_arr_PathData, 4);
 
 		FindSplinePathPositionVector(&Source, TheCamera.m_arrPathArray[2].m_arr_PathData, uiTime, ArrayMarkerSource);
 		FindSplinePathPositionVector(&Front, TheCamera.m_arrPathArray[3].m_arr_PathData, uiTime, ArrayMarkerFront);

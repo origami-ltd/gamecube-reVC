@@ -65,14 +65,12 @@
 
 // gotta put this somewhere
 #ifdef LIBRW
-#define STREAMPOS(str) ((str)->tell())
 #define STREAMFILE(str) (((rw::StreamFile*)(str))->file)
 #define HIERNODEINFO(hier) ((hier)->nodeInfo)
 #define HIERNODEID(hier, i) ((hier)->nodeInfo[i].id)
 #define HANIMFRAME(anim, i) ((RwUInt8*)(anim)->keyframes + (i)*(anim)->interpInfo->animKeyFrameSize)
 #else
 #define RWHALFPIXEL	// always d3d
-#define STREAMPOS(str) ((str)->Type.memory.position)
 #define STREAMFILE(str) ((str)->Type.file.fpFile)
 #define HIERNODEINFO(hier) ((hier)->pNodeInfo)
 #define HIERNODEID(hier, i) ((hier)->pNodeInfo[i].nodeID)
@@ -109,12 +107,99 @@ typedef uintptr_t uintptr;
 typedef intptr_t intptr;
 typedef uint64_t uint64;
 typedef int64_t int64;
+
+inline uint32
+GetRwStreamPosition(RwStream *stream)
+{
+	if(stream == NULL)
+		return UINT32_MAX;
+#ifdef LIBRW
+	return stream->tell();
+#else
+	if(stream->type == rwSTREAMMEMORY)
+		return stream->Type.memory.position;
+	if(stream->type == rwSTREAMFILE || stream->type == rwSTREAMFILENAME){
+		RwFileFunctions *files = RwOsGetFileInterface();
+		if(files == NULL || files->rwftell == NULL || stream->Type.file.fpFile == NULL)
+			return UINT32_MAX;
+		long position = files->rwftell(stream->Type.file.fpFile);
+		return position >= 0 && (uint64)position < UINT32_MAX ? (uint32)position : UINT32_MAX;
+	}
+	return UINT32_MAX;
+#endif
+}
+
+inline bool
+GetRwStreamEnd(RwStream *stream, uint32 length, uint32 &end)
+{
+	uint32 position = GetRwStreamPosition(stream);
+	if(position == UINT32_MAX || length > UINT32_MAX - position)
+		return false;
+	end = position + length;
+	return true;
+}
+
+#define STREAMPOS(stream) GetRwStreamPosition(stream)
 // hardcode ucs-2
 typedef uint16_t wchar;
 
 typedef uint8 bool8;
 typedef uint16 bool16;
 typedef uint32 bool32;
+
+inline uint16
+ReadLE16(const void *data)
+{
+	const uint8 *bytes = (const uint8*)data;
+	return (uint16)bytes[0] | (uint16)bytes[1] << 8;
+}
+
+inline uint32
+ReadLE32(const void *data)
+{
+	const uint8 *bytes = (const uint8*)data;
+	return (uint32)bytes[0] | (uint32)bytes[1] << 8 |
+	       (uint32)bytes[2] << 16 | (uint32)bytes[3] << 24;
+}
+
+inline float
+ReadLEFloat32(const void *data)
+{
+	uint32 bits = ReadLE32(data);
+	float value;
+	memcpy(&value, &bits, sizeof(value));
+	return value;
+}
+
+inline void
+WriteLE32(void *data, uint32 value)
+{
+	uint8 *bytes = (uint8*)data;
+	bytes[0] = value;
+	bytes[1] = value >> 8;
+	bytes[2] = value >> 16;
+	bytes[3] = value >> 24;
+}
+
+inline bool
+ReadStreamLE32(RwStream *stream, uint32 &value)
+{
+	uint8 bytes[4];
+	if(RwStreamRead(stream, bytes, sizeof(bytes)) != sizeof(bytes))
+		return false;
+	value = ReadLE32(bytes);
+	return true;
+}
+
+inline bool
+ReadStreamLE32(RwStream *stream, int32 &value)
+{
+	uint32 unsignedValue;
+	if(!ReadStreamLE32(stream, unsignedValue))
+		return false;
+	value = (int32)unsignedValue;
+	return true;
+}
 
 #if defined(_MSC_VER) || defined (__MWERKS__)
 typedef ptrdiff_t ssize_t;

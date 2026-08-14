@@ -365,7 +365,12 @@ GenericLoad()
 	if (FrontEndMenuManager.m_nCurrSaveSlot == PAUSE_SAVE_SLOT && qs == 3)
 		WaitForMissionActivate = CTimer::GetTimeInMilliseconds() + 2000;
 #endif
-	ReadDataFromBlock("Loading Scripts \n", CTheScripts::LoadAllScripts);
+	debug("Loading Scripts \n");
+	ReadDataFromBufferPointer(buf, size);
+	if(!CTheScripts::LoadAllScripts(buf, size))
+		return false;
+	size = align4bytes(size);
+	buf += size;
 
 	// Load the rest
 	LoadSaveDataBlock();

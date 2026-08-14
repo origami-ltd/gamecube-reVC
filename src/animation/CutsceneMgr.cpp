@@ -2,9 +2,12 @@
 
 #include "General.h"
 #include "CutsceneMgr.h"
+
+#include <new>
 #include "Directory.h"
 #include "Camera.h"
 #include "Streaming.h"
+#include "CdStream.h"
 #include "FileMgr.h"
 #include "main.h"
 #include "AnimManager.h"
@@ -154,7 +157,7 @@ CalculateBoundingSphereRadiusCB(RpAtomic *atomic, void *data)
 	return atomic;
 }
 
-void
+bool
 CCutsceneMgr::Initialise(void)
 {
 	ms_numCutsceneObjs = 0;
@@ -165,11 +168,17 @@ CCutsceneMgr::Initialise(void)
 	ms_animLoaded = false;
 	ms_cutsceneProcessing = false;
 
-	ms_pCutsceneDir = new CDirectory(CUTSCENEDIRSIZE);
-	ms_pCutsceneDir->ReadDirFile("ANIM\\CUTS.DIR");
+	ms_pCutsceneDir = new(std::nothrow) CDirectory(CUTSCENEDIRSIZE);
+	if(ms_pCutsceneDir == nil || !ms_pCutsceneDir->IsValid() ||
+	   !ms_pCutsceneDir->ReadDirFile("ANIM\\CUTS.DIR")){
+		delete ms_pCutsceneDir;
+		ms_pCutsceneDir = nil;
+		return false;
+	}
 
 	numUncompressedAnims = 0;
 	uncompressedAnims[0][0] = '\0';
+	return true;
 }
 
 void
@@ -184,7 +193,14 @@ CCutsceneMgr::LoadCutsceneData(const char *szCutsceneName)
 	int file;
 	uint32 size;
 	uint32 offset;
+	uint32 byteSize;
 	CPlayerPed *pPlayerPed;
+
+	ms_pCutsceneDir->numEntries = 0;
+	if(!ms_pCutsceneDir->ReadDirFile("ANIM\\CUTS.DIR")){
+		ms_animLoaded = false;
+		return;
+	}
 
 	ms_cutsceneProcessing = true;
 	ms_wasCutsceneSkipped = false;
@@ -192,47 +208,55 @@ CCutsceneMgr::LoadCutsceneData(const char *szCutsceneName)
 	if (!bIsEverythingRemovedFromTheWorldForTheBiggestFuckoffCutsceneEver)
 		CStreaming::RemoveCurrentZonesModels();
 
-	ms_pCutsceneDir->numEntries = 0;
-	ms_pCutsceneDir->ReadDirFile("ANIM\\CUTS.DIR");
-
 	CStreaming::RemoveUnusedModelsInLoadedList();
 	CGame::DrasticTidyUpMemory(true);
 
 	strcpy(ms_cutsceneName, szCutsceneName);
 
-	RwStream *stream;
-	stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, "ANIM\\CUTS.IMG");
-	assert(stream);
-
 	// Load animations
+	ms_cutsceneAssociations.DestroyAssociations();
 	sprintf(gString, "%s.IFP", szCutsceneName);
-	if (ms_pCutsceneDir->FindItem(gString, offset, size)) {
-		CStreaming::MakeSpaceFor(size << 11);
-		CStreaming::ImGonnaUseStreamingMemory();
-		RwStreamSkip(stream,  offset << 11);
-		CAnimManager::LoadAnimFile(stream, true, uncompressedAnims);
-		ms_cutsceneAssociations.CreateAssociations(szCutsceneName);
-		CStreaming::IHaveUsedStreamingMemory();
-		ms_animLoaded = true;
+	RwStream *stream = nil;
+	if (ms_pCutsceneDir->FindItem(gString, offset, size) && size != 0 &&
+	    offset <= INT32_MAX/CDSTREAM_SECTOR_SIZE &&
+	    size <= INT32_MAX/CDSTREAM_SECTOR_SIZE &&
+	    offset <= INT32_MAX/CDSTREAM_SECTOR_SIZE - size) {
+		byteSize = size * CDSTREAM_SECTOR_SIZE;
+		uint32 byteOffset = offset * CDSTREAM_SECTOR_SIZE;
+		stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, "ANIM\\CUTS.IMG");
+		bool success = stream != nil;
+		if(success){
+			RwStreamSkip(stream, byteOffset);
+			success = STREAMPOS(stream) == byteOffset &&
+			          CAnimManager::LoadAnimFile(stream, true, uncompressedAnims, byteSize);
+		}
+		if(success)
+			ms_cutsceneAssociations.CreateAssociations(szCutsceneName);
+		if(stream)
+			RwStreamClose(stream, nil);
+		ms_animLoaded = success;
 	} else {
 		ms_animLoaded = false;
 	}
-	RwStreamClose(stream, nil);
 
 	// Load camera data
 	file = CFileMgr::OpenFile("ANIM\\CUTS.IMG", "rb");
 	sprintf(gString, "%s.DAT", szCutsceneName);
-	if (ms_pCutsceneDir->FindItem(gString, offset, size)) {
+	if (file != 0 && ms_pCutsceneDir->FindItem(gString, offset, size) && size != 0 &&
+	    offset <= INT32_MAX/CDSTREAM_SECTOR_SIZE &&
+	    size <= INT32_MAX/CDSTREAM_SECTOR_SIZE &&
+	    offset <= INT32_MAX/CDSTREAM_SECTOR_SIZE - size) {
+		byteSize = size * CDSTREAM_SECTOR_SIZE;
 		CStreaming::ImGonnaUseStreamingMemory();
-		CFileMgr::Seek(file, offset << 11, SEEK_SET);
-		TheCamera.LoadPathSplines(file);
+		bCamLoaded = CFileMgr::Seek(file, offset * CDSTREAM_SECTOR_SIZE, SEEK_SET) &&
+		             TheCamera.LoadPathSplines(file, byteSize);
 		CStreaming::IHaveUsedStreamingMemory();
-		bCamLoaded = true;
 	} else {
 		bCamLoaded = false;
 	}
 
-	CFileMgr::CloseFile(file);
+	if(file)
+		CFileMgr::CloseFile(file);
 
 	if (CGeneral::faststricmp(ms_cutsceneName, "finale")) {
 		DMAudio.ChangeMusicMode(MUSICMODE_CUTSCENE);
@@ -321,6 +345,8 @@ CCutsceneMgr::SetCutsceneAnim(const char *animName, CObject *pObject)
 	CAnimBlendAssociation *pNewAnim;
 	CAnimBlendClumpData *pAnimBlendClumpData;
 
+	if(!ms_animLoaded)
+		return;
 	assert(RwObjectGetType(pObject->m_rwObject) == rpCLUMP);
 	debug("Give cutscene anim %s\n", animName);
 	RpAnimBlendClumpRemoveAllAssociations((RpClump*)pObject->m_rwObject);
@@ -352,7 +378,11 @@ CCutsceneMgr::SetCutsceneAnim(const char *animName, CObject *pObject)
 void
 CCutsceneMgr::SetCutsceneAnimToLoop(const char* animName)
 {
-	ms_cutsceneAssociations.GetAnimation(animName)->flags |= ASSOC_REPEAT;
+	if(!ms_animLoaded)
+		return;
+	CAnimBlendAssociation *association = ms_cutsceneAssociations.GetAnimation(animName);
+	if(association)
+		association->flags |= ASSOC_REPEAT;
 }
 
 CCutsceneHead *
@@ -438,6 +468,7 @@ CCutsceneMgr::DeleteCutsceneData(void)
 		}
 	}
 
+	ms_cutsceneAssociations.DestroyAssociations();
 	if (ms_animLoaded)
 		CAnimManager::RemoveLastAnimFile();
 

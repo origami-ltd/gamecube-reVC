@@ -587,7 +587,7 @@ public:
 	void Process_Train_Camera_Control(void);
 
 	// Script
-	void LoadPathSplines(int file);
+	bool LoadPathSplines(int file, uint32 length);
 	void DeleteCutSceneCamDataMemory(void);
 	void FinishCutscene(void);
 	float GetPositionAlongSpline(void) { return m_fPositionAlongSpline; }

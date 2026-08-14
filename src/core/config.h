@@ -169,7 +169,7 @@ enum Config {
 #define GTA_VERSION	GTAVC_PC_11
 
 // Enable configuration for handheld console ports
-#if defined(__SWITCH__) || defined(PSP2)
+#if defined(__SWITCH__) || defined(PSP2) || defined(GTA_OGC)
 	#define GTA_HANDHELD
 #endif
 
@@ -287,7 +287,9 @@ enum Config {
 #define MORE_LANGUAGES		// Add more translations to the game
 #define COMPATIBLE_SAVES // this allows changing structs while keeping saves compatible, and keeps saves compatible between platforms
 #define FIX_INCOMPATIBLE_SAVES // try to fix incompatible saves, requires COMPATIBLE_SAVES
+#ifndef GTA_OGC
 #define LOAD_INI_SETTINGS // as the name suggests. fundamental for CUSTOM_FRONTEND_OPTIONS
+#endif
 
 #define NO_MOVIES	// add option to disable intro videos
 
@@ -322,14 +324,21 @@ enum Config {
 #define PS2_ALPHA_TEST		// emulate ps2 alpha test 
 #define IMPROVED_VIDEOMODE	// save and load videomode parameters instead of a magic number
 #define DISABLE_LOADING_SCREEN // disable the loading screen which vastly improves the loading time
+#ifdef GTA_OGC
+// Console loads come off SD/disc and are slow, so the player needs feedback.
+#undef DISABLE_LOADING_SCREEN
+#endif
 #define DISABLE_VSYNC_ON_TEXTURE_CONVERSION // make texture conversion work faster by disabling vsync
 #define ANISOTROPIC_FILTERING	// set all textures to max anisotropic filtering
 //#define USE_TEXTURE_POOL
 #ifdef LIBRW
 #define EXTENDED_COLOURFILTER		// more options for colour filter (replaces mblur)
+// GX has no shader pipeline, so these have no implementation there either.
+#if !defined(RW_NULL) && !defined(RW_GAMECUBE)
 #define EXTENDED_PIPELINES		// custom render pipelines (includes Neo)
 #define SCREEN_DROPLETS			// neo water droplets
 #define NEW_RENDERER		// leeds-like world rendering, needs librw
+#endif
 #endif
 
 #define FIX_SPRITES	// fix sprites aspect ratio(moon, coronas, particle etc)
@@ -460,7 +469,9 @@ static_assert(false, "SUPPORT_XBOX_SCRIPT and SUPPORT_MOBILE_SCRIPT are mutually
 #define PAUSE_RADIO_IN_FRONTEND // pause radio when game is paused
 #define ATTACH_RELEASING_SOUNDS_TO_ENTITIES // sounds would follow ped and vehicles coordinates if not being queued otherwise
 #define USE_TIME_SCALE_FOR_AUDIO // slow down/speed up sounds according to the speed of the game
+#ifndef GTA_OGC
 #define MULTITHREADED_AUDIO // for streams. requires C++11 or later
+#endif
 
 #ifdef AUDIO_OPUS
 #define AUDIO_OAL_USE_OPUS // enable support of opus files
@@ -475,7 +486,7 @@ static_assert(false, "SUPPORT_XBOX_SCRIPT and SUPPORT_MOBILE_SCRIPT are mutually
 #endif
 
 // Streaming
-#if !defined(_WIN32) && !defined(__SWITCH__)
+#if !defined(_WIN32) && !defined(__SWITCH__) && !defined(GTA_OGC)
 	//#define ONE_THREAD_PER_CHANNEL // Don't use if you're not on SSD/Flash - also not utilized too much right now(see commented LoadAllRequestedModels in Streaming.cpp)
 	#define FLUSHABLE_STREAMING // Make it possible to interrupt reading when processing file isn't needed anymore.
 #endif

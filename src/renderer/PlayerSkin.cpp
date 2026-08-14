@@ -21,54 +21,81 @@ float gOldFov;
 
 int CPlayerSkin::m_txdSlot;
 
-void
+bool
 FindPlayerDff(uint32 &offset, uint32 &size)
 {
 	int file;
+	int32 status;
 	CDirectory::DirectoryInfo info;
 
 	file = CFileMgr::OpenFile("models\\gta3.dir", "rb");
+	if(file <= 0)
+		return false;
 
 	do {
-		if (!CFileMgr::Read(file, (char*)&info, sizeof(CDirectory::DirectoryInfo)))
-			return;
+		status = CDirectory::ReadEntry(file, info);
+		if(status <= 0){
+			CFileMgr::CloseFile(file);
+			return false;
+		}
 	} while (strcasecmp("player.dff", info.name) != 0);
 
+	CFileMgr::CloseFile(file);
 	offset = info.offset;
 	size = info.size;
+	return true;
 }
 
-void
+bool
 LoadPlayerDff(void)
 {
-	RwStream *stream;
+	RwStream *stream = nil;
 	RwMemory mem;
 	uint32 offset, size;
-	uint8 *buffer;
+	uint8 *buffer = nil;
+	uint64 byteCount;
 	bool streamWasAdded = false;
+	bool success = false;
 
 	if (CdStreamGetNumImages() == 0) {
-		CdStreamAddImage("models\\gta3.img");
+		if(!CdStreamAddImage("models\\gta3.img"))
+			return false;
 		streamWasAdded = true;
 	}
 
-	FindPlayerDff(offset, size);
-	buffer = (uint8*)RwMallocAlign(size << 11, 2048);
-	CdStreamRead(0, buffer, offset, size);
-	CdStreamSync(0);
+	if(!FindPlayerDff(offset, size) || offset >= 0x1000000 || size == 0)
+		goto cleanup;
+#ifdef GTA_OGC
+	if(offset > CdStreamGetImageSectorCount(0) ||
+	   size > CdStreamGetImageSectorCount(0) - offset)
+		goto cleanup;
+#endif
+	byteCount = (uint64)size * CDSTREAM_SECTOR_SIZE;
+	if(byteCount > SIZE_MAX || byteCount > UINT32_MAX)
+		goto cleanup;
+	buffer = (uint8*)RwMallocAlign((size_t)byteCount, CDSTREAM_SECTOR_SIZE);
+	if(buffer == nil || CdStreamRead(0, buffer, offset, size) != STREAM_SUCCESS ||
+	   CdStreamSync(0) != STREAM_NONE)
+		goto cleanup;
 
 	mem.start = buffer;
-	mem.length = size << 11;
+	mem.length = (uint32)byteCount;
 	stream = RwStreamOpen(rwSTREAMMEMORY, rwSTREAMREAD, &mem);
+	if(stream == nil)
+		goto cleanup;
 
 	if (RwStreamFindChunk(stream, rwID_CLUMP, nil, nil))
 		gpPlayerClump = RpClumpStreamRead(stream);
+	success = gpPlayerClump != nil;
 
-	RwStreamClose(stream, &mem);
-	RwFreeAlign(buffer);
-
+cleanup:
+	if(stream)
+		RwStreamClose(stream, &mem);
+	if(buffer)
+		RwFreeAlign(buffer);
 	if (streamWasAdded)
 		CdStreamRemoveImages();
+	return success;
 }
 
 void
@@ -83,7 +110,7 @@ CPlayerSkin::Initialise(void)
 void
 CPlayerSkin::Shutdown(void)
 {
-	// empty on PS2
+	EndFrontendSkinEdit();
 	CTxdStore::RemoveTxdSlot(m_txdSlot);
 }
 
@@ -120,19 +147,23 @@ CPlayerSkin::GetSkinTexture(const char *texName)
 	return tex;
 }
 
-void
+bool
 CPlayerSkin::BeginFrontendSkinEdit(void)
 {
-	LoadPlayerDff();
+	if(gpPlayerClump != nil || !LoadPlayerDff())
+		return false;
 	RpClumpForAllAtomics(gpPlayerClump, CClumpModelInfo::SetAtomicRendererCB, (void*)CVisibilityPlugins::RenderPlayerCB);
 	CWorld::Players[0].LoadPlayerSkin();
 	gOldFov = CDraw::GetFOV();
 	CDraw::SetFOV(30.0f);
+	return true;
 }
 
 void
 CPlayerSkin::EndFrontendSkinEdit(void)
 {
+	if(gpPlayerClump == nil)
+		return;
 	RpClumpDestroy(gpPlayerClump);
 	gpPlayerClump = NULL;
 	CDraw::SetFOV(gOldFov);
@@ -141,6 +172,8 @@ CPlayerSkin::EndFrontendSkinEdit(void)
 void
 CPlayerSkin::RenderFrontendSkinEdit(void)
 {
+	if(gpPlayerClump == nil)
+		return;
 	static float rotation = 0.0f;
 	RwRGBAReal AmbientColor = { 0.65f, 0.65f, 0.65f, 1.0f };
 	const RwV3d pos = { 1.35f, 0.35f, 7.725f };

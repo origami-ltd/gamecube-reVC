@@ -17,6 +17,7 @@ public:
 	static size_t Read(int fd, char *buf, ssize_t len);
 	static size_t Write(int fd, const char *buf, ssize_t len);
 	static bool Seek(int fd, int offset, int whence);
+	static bool GetFileSize(int fd, size_t *size);
 	static bool ReadLine(int fd, char *buf, int len);
 	static int CloseFile(int fd);
 	static int GetErrorReadWrite(int fd);

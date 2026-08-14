@@ -1,6 +1,10 @@
 #include "common.h"
 #include "crossplatform.h"
 #include "FileMgr.h"
+#ifdef GTA_OGC
+#include <alloca.h>
+#include "gamecube/GameCubePath.h"
+#endif
 
 // Codes compatible with Windows and Linux
 #ifndef _WIN32
@@ -151,8 +155,13 @@ FILE* _fcaseopen(char const* filename, char const* mode)
 {
     FILE* result;
     char* real = casepath(filename);
+#ifdef GTA_OGC
+    if (!real)
+        return nil;
+#else
     if (!real)
         result = fopen(filename, mode);
+#endif
     else {
         result = fopen(real, mode);
         free(real);
@@ -187,6 +196,16 @@ int _caserename(const char *old_filename, const char *new_filename)
 // Returned string should freed manually (if exists)
 char* casepath(char const* path, bool checkPathFirst)
 {
+#ifdef GTA_OGC
+    (void)checkPathFirst;
+    if (IsGameCubeDvdPath(path) || (path != nil &&
+        (IsGameCubePathSeparator(path[0]) || strchr(path, ':') != nil)))
+        return NormalizeGameCubePath(path, nil);
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) == nil)
+        return nil;
+    return NormalizeGameCubePath(path, cwd);
+#else
     if (checkPathFirst && access(path, F_OK) != -1) {
         // File path is correct
         return nil;
@@ -311,6 +330,7 @@ char* casepath(char const* path, bool checkPathFirst)
         debug("\n\ncasepath: Corrected path length is longer then original+2:\n\tOriginal: %s (%zu chars)\n\tCorrected: %s (%zu chars)\n\n", path, l, out, rl);
     }
     return out;
+#endif
 }
 #endif
 

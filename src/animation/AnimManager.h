@@ -137,9 +137,10 @@ public:
 	static CAnimBlendAssociation *AddAnimation(RpClump *clump, AssocGroupId groupId, AnimationId animId);
 	static CAnimBlendAssociation *AddAnimationAndSync(RpClump *clump, CAnimBlendAssociation *syncanim, AssocGroupId groupId, AnimationId animId);
 	static CAnimBlendAssociation *BlendAnimation(RpClump *clump, AssocGroupId groupId, AnimationId animId, float delta);
-	static void LoadAnimFiles(void);
-	static void LoadAnimFile(const char *filename);
-	static void LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedAnims)[32] = nil);
+	static bool LoadAnimFiles(void);
+	static bool LoadAnimFile(const char *filename);
+	static bool LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedAnims)[32] = nil,
+	                         uint64 maxBytes = (uint64)-1);
 	static void CreateAnimAssocGroups(void);
 	static void RemoveLastAnimFile(void);
 	static CAnimBlendAssocGroup* GetAnimAssocGroups(void) { return ms_aAnimAssocGroups; }

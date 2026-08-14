@@ -198,6 +198,12 @@ myfseek(int fd, long offset, int whence)
 	return fseek(myfiles[fd].file, offset, whence);
 }
 
+static long
+myftell(int fd)
+{
+	return ftell(myfiles[fd].file);
+}
+
 static int
 myfeof(int fd)
 {
@@ -319,7 +325,27 @@ CFileMgr::Write(int fd, const char *buf, ssize_t len)
 bool
 CFileMgr::Seek(int fd, int offset, int whence)
 {
-	return !!myfseek(fd, offset, whence);
+	return myfseek(fd, offset, whence) == 0;
+}
+
+bool
+CFileMgr::GetFileSize(int fd, size_t *size)
+{
+	if(fd <= 0 || fd >= NUMFILES || myfiles[fd].file == nil || size == nil)
+		return false;
+	long position = myftell(fd);
+	if(position < 0)
+		return false;
+	if(myfseek(fd, 0, SEEK_END) != 0){
+		myfseek(fd, position, SEEK_SET);
+		return false;
+	}
+	long end = myftell(fd);
+	bool restored = myfseek(fd, position, SEEK_SET) == 0;
+	if(!restored || end < 0 || (uint64)end > SIZE_MAX)
+		return false;
+	*size = (size_t)end;
+	return true;
 }
 
 bool

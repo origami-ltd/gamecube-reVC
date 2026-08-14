@@ -41,7 +41,7 @@ public:
 	static void SetCutsceneOffset(const CVector& vec) { ms_cutsceneOffset = vec; }
 	static bool HasCutsceneFinished(void);
 
-	static void Initialise(void);
+	static bool Initialise(void);
 	static void Shutdown(void);
 	static void LoadCutsceneData(const char *szCutsceneName);
 	static void FinishCutscene(void);

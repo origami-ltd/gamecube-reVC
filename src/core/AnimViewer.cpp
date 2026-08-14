@@ -58,7 +58,7 @@ CAnimViewer::Render(void) {
 	}
 }
 
-void
+bool
 CAnimViewer::Initialise(void) {
 
 	// we need messages, messages needs hud, hud needs those
@@ -88,10 +88,14 @@ CAnimViewer::Initialise(void) {
 	CCarCtrl::Init();
 	CPedStats::Initialise();
 	CMessages::Init();
-	CdStreamAddImage("MODELS\\GTA3.IMG");
-	CFileLoader::LoadLevel("DATA\\DEFAULT.DAT");
-	CFileLoader::LoadLevel("DATA\\ANIMVIEWER.DAT");
-	CStreaming::Init();
+	if(!CdStreamAddImage("MODELS\\GTA3.IMG") ||
+	   !CFileLoader::LoadLevel("DATA\\DEFAULT.DAT") ||
+	   !CFileLoader::LoadLevel("DATA\\ANIMVIEWER.DAT") ||
+	   !CStreaming::Init()){
+		CStreaming::Shutdown();
+		CdStreamRemoveImages();
+		return false;
+	}
 	for(int i = 0; i < MODELINFOSIZE; i++)
 		if(CModelInfo::GetModelInfo(i))
 			CModelInfo::GetModelInfo(i)->ConvertAnimFileIndex();
@@ -103,7 +107,11 @@ CAnimViewer::Initialise(void) {
 #ifdef FIX_BUGS
 	CVehicleModelInfo::LoadEnvironmentMaps();
 #endif
-	CAnimManager::LoadAnimFiles();
+	if(!CAnimManager::LoadAnimFiles()){
+		CStreaming::Shutdown();
+		CdStreamRemoveImages();
+		return false;
+	}
 	CWorld::PlayerInFocus = 0;
 	CWeapon::InitialiseWeapons();
 	CPed::Initialise();
@@ -159,6 +167,7 @@ CAnimViewer::Initialise(void) {
 	CAnimManager::AddAnimBlockRef(bikevBlock);
 	CAnimManager::AddAnimBlockRef(bikehBlock);
 	CAnimManager::AddAnimBlockRef(bikedBlock);
+	return true;
 }
 
 int
@@ -259,7 +268,10 @@ CAnimViewer::Update(void)
 			// These calls were inside of LoadIFP function.
 			CAnimManager::Shutdown();
 			CAnimManager::Initialise();
-			CAnimManager::LoadAnimFiles();
+			if(!CAnimManager::LoadAnimFiles()){
+				RsGlobal.quit = TRUE;
+				return;
+			}
 
 			reloadIFP = false;
 		}

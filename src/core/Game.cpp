@@ -320,7 +320,8 @@ void CGame::ShutdownRenderWare(void)
 
 bool CGame::InitialiseOnceAfterRW(void)
 {
-	TheText.Load();
+	if(!TheText.Load())
+		return false;
 	CTimer::Initialise();
 	CTempColModels::Initialise();
 	mod_HandlingManager.Initialise();
@@ -440,7 +441,10 @@ bool CGame::Initialise(const char* datFile)
 
 	PUSH_MEMID(MEMID_ANIMATION);
 	CAnimManager::Initialise();
-	CCutsceneMgr::Initialise();
+	if(!CCutsceneMgr::Initialise()){
+		POP_MEMID();
+		return false;
+	}
 	POP_MEMID();
 
 	PUSH_MEMID(MEMID_CARS);
@@ -453,10 +457,14 @@ bool CGame::Initialise(const char* datFile)
 	CPickups::Init();
 	CTheCarGenerators::Init();
 
-	CdStreamAddImage("MODELS\\GTA3.IMG");
-
-	CFileLoader::LoadLevel("DATA\\DEFAULT.DAT");
-	CFileLoader::LoadLevel(datFile);
+	if(!CdStreamAddImage("MODELS\\GTA3.IMG") ||
+	   !CFileLoader::LoadLevel("DATA\\DEFAULT.DAT") ||
+	   !CFileLoader::LoadLevel(datFile)){
+		CStreaming::Shutdown();
+		CdStreamRemoveImages();
+		POP_MEMID();
+		return false;
+	}
 
 	LoadingScreen("Loading the Game", "Add Particles", nil);
 	CWorld::AddParticles();
@@ -473,7 +481,11 @@ bool CGame::Initialise(const char* datFile)
 	TestModelIndices();
 
 	LoadingScreen("Loading the Game", "Setup water", nil);
-	CWaterLevel::Initialise("DATA\\WATER.DAT");
+	if(!CWaterLevel::Initialise("DATA\\WATER.DAT")){
+		CStreaming::Shutdown();
+		CdStreamRemoveImages();
+		return false;
+	}
 	TheConsole.Init();
 	CDraw::SetFOV(120.0f);
 	CDraw::ms_fLODDistance = 500.0f;
@@ -488,11 +500,22 @@ bool CGame::Initialise(const char* datFile)
 
 	LoadingScreen("Loading the Game", "Load animations", GetRandomSplashScreen());
 	PUSH_MEMID(MEMID_ANIMATION);
-	CAnimManager::LoadAnimFiles();
+	if(!CAnimManager::LoadAnimFiles()){
+		CStreaming::Shutdown();
+		CdStreamRemoveImages();
+		POP_MEMID();
+		return false;
+	}
 	POP_MEMID();
+#ifdef GTA_OGC
+	BootLog("anims done");
+#endif
 
 	CStreaming::LoadInitialWeapons();
 	CStreaming::LoadAllRequestedModels(0);
+#ifdef GTA_OGC
+	BootLog("weapons done");
+#endif
 	CPed::Initialise();
 	CRouteNode::Initialise();
 	CEventList::Initialise();
@@ -527,7 +550,12 @@ bool CGame::Initialise(const char* datFile)
 
 	LoadingScreen("Loading the Game", "Load scripts", nil);
 	PUSH_MEMID(MEMID_SCRIPT);
-	CTheScripts::Init();
+	if(!CTheScripts::Init()){
+		CStreaming::Shutdown();
+		CdStreamRemoveImages();
+		POP_MEMID();
+		return false;
+	}
 	CGangs::Initialise();
 	POP_MEMID();
 
@@ -649,7 +677,7 @@ bool CGame::ShutDown(void)
 	return true;
 }
 
-void CGame::ReInitGameObjectVariables(void)
+bool CGame::ReInitGameObjectVariables(void)
 {
 	CGameLogic::InitAtStartOfGame();
 #ifdef PS2_MENU
@@ -693,7 +721,10 @@ void CGame::ReInitGameObjectVariables(void)
 	gPhoneInfo.Initialise();
 
 	PUSH_MEMID(MEMID_SCRIPT);
-	CTheScripts::Init();
+	if(!CTheScripts::Init()){
+		POP_MEMID();
+		return false;
+	}
 	CGangs::Initialise();
 	POP_MEMID();
 
@@ -729,6 +760,7 @@ void CGame::ReInitGameObjectVariables(void)
 	
 	for (int32 i = 0; i < MAX_PADS; i++)
 		CPad::GetPad(i)->Clear(true);
+	return true;
 }
 
 void CGame::ReloadIPLs(void)
@@ -765,7 +797,7 @@ void CGame::ShutDownForRestart(void)
 	CSpecialFX::Shutdown();
 }
 
-void CGame::InitialiseWhenRestarting(void)
+bool CGame::InitialiseWhenRestarting(void)
 {
 	CRect rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 	CRGBA color(255, 255, 255, 255);
@@ -799,7 +831,8 @@ void CGame::InitialiseWhenRestarting(void)
 		RestoreForStartLoad();
 	}
 	
-	ReInitGameObjectVariables();
+	if(!ReInitGameObjectVariables())
+		return false;
 	
 	if ( FrontEndMenuManager.m_bWantToLoad == true )
 	{
@@ -824,7 +857,8 @@ void CGame::InitialiseWhenRestarting(void)
 			CTimer::Stop();
 			CTimer::Initialise();
 			FrontEndMenuManager.m_bWantToLoad = false;
-			ReInitGameObjectVariables();
+			if(!ReInitGameObjectVariables())
+				return false;
 			currLevel = LEVEL_GENERIC;
 			CCollision::SortOutCollisionAfterLoad();
 		}
@@ -839,6 +873,7 @@ void CGame::InitialiseWhenRestarting(void)
 #ifdef USE_TEXTURE_POOL
 	_TexturePoolsUnknown(true);
 #endif
+	return true;
 }
 
 void CGame::Process(void) 

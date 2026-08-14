@@ -626,6 +626,9 @@ CMenuManager::Initialise(void)
 void
 CMenuManager::CentreMousePointer()
 {
+#ifdef GTA_OGC
+	return;
+#else
 	if (SCREEN_WIDTH * 0.5f != 0.0f && 0.0f != SCREEN_HEIGHT * 0.5f) {
 #if defined RW_D3D9 || defined RWLIBS
 		tagPOINT Point;
@@ -641,6 +644,7 @@ CMenuManager::CentreMousePointer()
 		PSGLOBAL(lastMousePos.x) = SCREEN_WIDTH / 2;
 		PSGLOBAL(lastMousePos.y) = SCREEN_HEIGHT / 2;
 	}
+#endif
 }
 
 void
@@ -2965,7 +2969,6 @@ CMenuManager::InitialiseChangedLanguageSettings()
 		if (gGameState > GS_INIT_ONCE)
 #endif
 		CTimer::Stop();
-		TheText.Unload();
 		TheText.Load();
 #ifdef FIX_BUGS
 		if (gGameState > GS_INIT_ONCE)
@@ -3192,7 +3195,6 @@ CMenuManager::LoadSettings()
 		m_bLanguageLoaded = false;
 	else {
 		m_bLanguageLoaded = true;
-		TheText.Unload();
 		TheText.Load();
 		m_bFrontEnd_ReloadObrTxtGxt = true;
 		InitialiseChangedLanguageSettings();
@@ -4895,10 +4897,11 @@ CMenuManager::ProcessUserInput(uint8 goDown, uint8 goUp, uint8 optionSelected, u
 				}
 				break;
 			case MENUACTION_PLAYERSETUP:
-				CPlayerSkin::BeginFrontendSkinEdit();
-				SwitchToNewScreen(MENUPAGE_SKIN_SELECT);
-				m_bSkinsEnumerated = false;
-				m_nCurrExLayer = HOVEROPTION_LIST;
+				if(CPlayerSkin::BeginFrontendSkinEdit()){
+					SwitchToNewScreen(MENUPAGE_SKIN_SELECT);
+					m_bSkinsEnumerated = false;
+					m_nCurrExLayer = HOVEROPTION_LIST;
+				}
 				break;
 			case MENUACTION_RESTOREDEF:
 				if (m_nCurrScreen == MENUPAGE_SOUND_SETTINGS) {
@@ -4948,7 +4951,9 @@ CMenuManager::ProcessUserInput(uint8 goDown, uint8 goUp, uint8 optionSelected, u
 					ControlsManager.MakeControllerActionsBlank();
 					ControlsManager.InitDefaultControlConfiguration();
 					ControlsManager.InitDefaultControlConfigMouse(MousePointerStateHelper.GetMouseSetUp());
-#if !defined RW_GL3
+#if defined(GTA_OGC)
+					ControlsManager.InitDefaultControlConfigJoyPad(12);
+#elif !defined RW_GL3
 					if (AllValidWinJoys.m_aJoys[JOYSTICK1].m_bInitialised) {
 						DIDEVCAPS devCaps;
 						devCaps.dwSize = sizeof(DIDEVCAPS);

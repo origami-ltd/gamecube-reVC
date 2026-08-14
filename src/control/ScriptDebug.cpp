@@ -1556,7 +1556,7 @@ int CRunningScript::CollectParameterForDebug(char* buf, bool& var)
 		var = true;
 		sprintf(tmpstr, " $%d", varIndex / 4);
 		strcat(buf, tmpstr);
-		return *((int32*)&CTheScripts::ScriptSpace[varIndex]);
+		return *CTheScripts::GetPointerToScriptVariable(varIndex);
 	case ARGUMENT_LOCALVAR:
 		varIndex = CTheScripts::Read2BytesFromScript(&m_nIp);
 		script_assert(varIndex >= 0 && varIndex < ARRAY_SIZE(m_anLocalVariables));
@@ -1723,8 +1723,9 @@ CTheScripts::SwitchToMission(int32 mission)
 		while (pScript->m_nStackPointer > 0)
 			--pScript->m_nStackPointer;
 
-		pScript->m_nIp = pScript->m_anStack[pScript->m_nStackPointer];
-		*(int32*)&CTheScripts::ScriptSpace[CTheScripts::OnAMissionFlag] = 0;
+		if(!pScript->SetIP(pScript->m_anStack[pScript->m_nStackPointer]))
+			continue;
+		*CTheScripts::GetPointerToScriptVariable(CTheScripts::OnAMissionFlag) = 0;
 		pScript->m_nWakeTime = 0;
 		pScript->m_bDeatharrestExecuted = true;
 
@@ -1745,18 +1746,11 @@ CTheScripts::SwitchToMission(int32 mission)
 #endif
 #endif
 	CTimer::Suspend();
-	int offset = CTheScripts::MultiScriptArray[mission];
-#ifdef USE_DEBUG_SCRIPT_LOADER
-	int handle = OpenScript();
-#else
-	CFileMgr::ChangeDir("\\");
-	int handle = CFileMgr::OpenFile("data\\main.scm", "rb");
-#endif
-	CFileMgr::Seek(handle, offset, 0);
-	CFileMgr::Read(handle, (char*)&CTheScripts::ScriptSpace[SIZE_MAIN_SCRIPT], SIZE_MISSION_SCRIPT);
-	CFileMgr::CloseFile(handle);
-	CRunningScript* pMissionScript = CTheScripts::StartNewScript(SIZE_MAIN_SCRIPT);
+	bool loaded = LoadMissionScript((uint32)mission);
+	CRunningScript* pMissionScript = loaded ? StartNewScript(SIZE_MAIN_SCRIPT) : nil;
 	CTimer::Resume();
+	if(pMissionScript == nil)
+		return;
 	pMissionScript->m_bIsMissionScript = true;
 	pMissionScript->m_bMissionFlag = true;
 	CTheScripts::bAlreadyRunningAMissionScript = true;

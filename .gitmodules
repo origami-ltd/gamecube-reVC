@@ -12,5 +12,5 @@
 	branch = master
 [submodule "vendor/librw"]
 	path = vendor/librw
-	url = https://github.com/mrxenginner/librw.git
-	branch = master
+	url = https://github.com/ebellumat/librw-gamecube.git
+	branch = gamecube

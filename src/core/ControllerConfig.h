@@ -109,7 +109,7 @@ class CControllerState;
 
 #define ACTIONNAME_LENGTH 40
 
-#ifdef RW_GL3
+#if defined(RW_GL3) || defined(GTA_OGC)
 struct JoyState {
     int8 id;
     bool isGamepad;
@@ -135,7 +135,7 @@ public:
 	};
 
 	bool                  m_bFirstCapture;
-#if defined RW_GL3
+#if defined(RW_GL3) || defined(GTA_OGC)
     JoyState              m_OldState;
     JoyState              m_NewState;
 #else

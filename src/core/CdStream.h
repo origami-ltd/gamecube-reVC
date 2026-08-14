@@ -58,6 +58,9 @@ bool CdStreamAddImage(char const *path);
 char *CdStreamGetImageName(int cd);
 void CdStreamRemoveImages(void);
 int32 CdStreamGetNumImages(void);
+#ifdef GTA_OGC
+uint32 CdStreamGetImageSectorCount(int image);
+#endif
 #endif
 
 #ifdef FLUSHABLE_STREAMING

@@ -1,5 +1,7 @@
 #include "common.h"
 
+#include <stdlib.h>
+
 #include "main.h"
 #include "Draw.h"
 #include "World.h"
@@ -32,6 +34,7 @@
 #include "Pools.h"
 #include "Debug.h"
 #include "GenericGameStorage.h"
+#include "CameraPath.h"
 #include "Camera.h"
 
 enum
@@ -3582,65 +3585,28 @@ CCamera::Process_Train_Camera_Control(void)
 #endif
 
 
-void
-CCamera::LoadPathSplines(int file)
+bool
+CCamera::LoadPathSplines(int file, uint32 length)
 {
-	bool reading = true;
-	char c, token[32] = { 0 };
-	int i, j, n;
-
-	n = 0;
+	float *pathData[MAX_NUM_OF_SPLINETYPES];
+	uint32 valueCounts[MAX_NUM_OF_SPLINETYPES];
+	int i;
 
 	DeleteCutSceneCamDataMemory();
-	for(i = 0; i < MAX_NUM_OF_SPLINETYPES; i++)
+	for(i = 0; i < MAX_NUM_OF_SPLINETYPES; i++){
 		m_arrPathArray[i].m_arr_PathData = new float[CCamPathSplines::MAXPATHLENGTH];
-
-//	Why is this gone?
-//	for(i = 0; i < MAX_NUM_OF_SPLINETYPES; i++)
-//		for(j = 0; j < CCamPathSplines::MAXPATHLENGTH; j++)
-//			m_arrPathArray[i].m_arr_PathData[j] = 0.0f;
+		pathData[i] = m_arrPathArray[i].m_arr_PathData;
+	}
 
 	m_bStartingSpline = false;
+	if(!DecodeCameraPathSplines(file, length, pathData, CCamPathSplines::MAXPATHLENGTH,
+	                           valueCounts))
+		goto fail;
+	return true;
 
-	i = 0;
-	j = 0;
-	while(reading){
-		CFileMgr::Read(file, &c, 1);
-		switch(c){
-		case '\0':
-			reading = false;
-			break;
-
-		case '+': case '-': case '.':
-		case '0': case '1': case '2': case '3': case '4':
-		case '5': case '6': case '7': case '8': case '9':
-		case 'e': case 'E':
-			token[n++] = c;
-			break;
-
-		case ',':
-#ifdef FIX_BUGS
-			if(i < MAX_NUM_OF_SPLINETYPES && j < CCamPathSplines::MAXPATHLENGTH)
-#endif
-			m_arrPathArray[i].m_arr_PathData[j] = atof(token);
-			j++;
-			memset(token, 0, 32);
-			n = 0;
-			break;
-
-		case ';':
-#ifdef FIX_BUGS
-			if(i < MAX_NUM_OF_SPLINETYPES && j < CCamPathSplines::MAXPATHLENGTH)
-#endif
-			m_arrPathArray[i].m_arr_PathData[j] = atof(token);
-			i++;
-			j = 0;
-			if (i == MAX_NUM_OF_SPLINETYPES)
-				reading = false;
-			memset(token, 0, 32);
-			n = 0;
-		}
-	}
+fail:
+	DeleteCutSceneCamDataMemory();
+	return false;
 }
 
 void

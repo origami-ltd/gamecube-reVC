@@ -392,18 +392,11 @@ int8 CRunningScript::ProcessCommands1000To1099(int32 command)
 #endif
 #endif
 		CTimer::Suspend();
-		int offset = CTheScripts::MultiScriptArray[ScriptParams[0]];
-#ifdef USE_DEBUG_SCRIPT_LOADER
-		int handle = CTheScripts::OpenScript();
-#else
-		CFileMgr::ChangeDir("\\");
-		int handle = CFileMgr::OpenFile("data\\main.scm", "rb");
-#endif
-		CFileMgr::Seek(handle, offset, 0);
-		CFileMgr::Read(handle, (char*)&CTheScripts::ScriptSpace[SIZE_MAIN_SCRIPT], SIZE_MISSION_SCRIPT);
-		CFileMgr::CloseFile(handle);
-		CRunningScript* pMissionScript = CTheScripts::StartNewScript(SIZE_MAIN_SCRIPT);
+		bool loaded = CTheScripts::LoadMissionScript((uint32)ScriptParams[0]);
+		CRunningScript* pMissionScript = loaded ? CTheScripts::StartNewScript(SIZE_MAIN_SCRIPT) : nil;
 		CTimer::Resume();
+		if(pMissionScript == nil)
+			return 0;
 		pMissionScript->m_bIsMissionScript = true;
 		pMissionScript->m_bMissionFlag = true;
 		CTheScripts::bAlreadyRunningAMissionScript = true;

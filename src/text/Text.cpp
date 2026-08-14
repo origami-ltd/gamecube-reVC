@@ -9,99 +9,370 @@
 #include "Text.h"
 #include "Timer.h"
 
+#include <limits.h>
+#include <new>
+
 wchar WideErrorString[25];
 
 CText TheText;
 
+enum
+{
+	GXT_KEY_ENTRY_SIZE = 12,
+	GXT_TABLE_ENTRY_SIZE = 12,
+	GXT_NAME_SIZE = 8
+};
+
+struct GxtSection
+{
+	const uint8 *keys;
+	size_t keySize;
+	const uint8 *text;
+	size_t textSize;
+};
+
+static bool
+HasTerminator(const char *text, size_t size)
+{
+	return memchr(text, '\0', size) != nil;
+}
+
+static bool
+ValidateGxtKeyData(const GxtSection &section)
+{
+	if(section.keySize % GXT_KEY_ENTRY_SIZE != 0 || section.textSize % sizeof(wchar) != 0)
+		return false;
+	size_t keyCount = section.keySize / GXT_KEY_ENTRY_SIZE;
+	if(keyCount > INT16_MAX || section.textSize / sizeof(wchar) > INT_MAX)
+		return false;
+
+	size_t lastTerminator = SIZE_MAX;
+	for(size_t offset = 0; offset < section.textSize; offset += sizeof(wchar))
+		if(ReadLE16(section.text + offset) == 0)
+			lastTerminator = offset;
+	if(keyCount != 0 && lastTerminator == SIZE_MAX)
+		return false;
+
+	const char *previousKey = nil;
+	for(size_t i = 0; i < keyCount; i++){
+		const uint8 *entry = section.keys + i * GXT_KEY_ENTRY_SIZE;
+		uint32 valueOffset = ReadLE32(entry);
+		const char *key = (const char*)entry + sizeof(uint32);
+		if(!HasTerminator(key, GXT_NAME_SIZE) || (valueOffset & 1) != 0 ||
+		   valueOffset > lastTerminator || valueOffset + sizeof(wchar) > section.textSize)
+			return false;
+		if(previousKey != nil && strcmp(previousKey, key) >= 0)
+			return false;
+		previousKey = key;
+	}
+	return true;
+}
+
+static bool
+ReadGxtSection(const uint8 *fileData, size_t start, size_t end,
+	const char *expectedName, GxtSection &section)
+{
+	if(start > end)
+		return false;
+	size_t cursor = start;
+	if(expectedName != nil){
+		if(end - cursor < GXT_NAME_SIZE ||
+		   memcmp(fileData + cursor, expectedName, GXT_NAME_SIZE) != 0)
+			return false;
+		cursor += GXT_NAME_SIZE;
+	}
+
+	memset(&section, 0, sizeof(section));
+	bool hasKeys = false;
+	bool hasText = false;
+	while(cursor < end){
+		size_t remaining = end - cursor;
+		if(remaining < 8){
+			if(remaining != 2 || (cursor & 3) != 2 || (end & 3) != 0)
+				return false;
+			while(cursor < end)
+				if(fileData[cursor++] != 0)
+					return false;
+			break;
+		}
+
+		const uint8 *header = fileData + cursor;
+		uint32 chunkSize = ReadLE32(header + 4);
+		cursor += 8;
+		if(chunkSize > end - cursor)
+			return false;
+		if(memcmp(header, "TKEY", 4) == 0){
+			if(hasKeys)
+				return false;
+			hasKeys = true;
+			section.keys = fileData + cursor;
+			section.keySize = chunkSize;
+		}else if(memcmp(header, "TDAT", 4) == 0){
+			if(hasText)
+				return false;
+			hasText = true;
+			section.text = fileData + cursor;
+			section.textSize = chunkSize;
+		}else{
+			return false;
+		}
+		cursor += chunkSize;
+	}
+	return hasKeys && hasText && ValidateGxtKeyData(section);
+}
+
+static bool
+ValidateGxtFile(const uint8 *fileData, size_t fileSize,
+	CMissionTextOffsets &missionOffsets, GxtSection &mainSection)
+{
+	if(fileData == nil || fileSize < 8 || memcmp(fileData, "TABL", 4) != 0)
+		return false;
+	uint32 tableSize = ReadLE32(fileData + 4);
+	if(tableSize % GXT_TABLE_ENTRY_SIZE != 0 || tableSize > fileSize - 8)
+		return false;
+	size_t entryCount = tableSize / GXT_TABLE_ENTRY_SIZE;
+	if(entryCount == 0 || entryCount - 1 > CMissionTextOffsets::MAX_MISSION_TEXTS)
+		return false;
+
+	CMissionTextOffsets stagedOffsets;
+	stagedOffsets.size = (uint16)entryCount;
+	for(size_t i = 0; i < entryCount; i++){
+		const uint8 *entry = fileData + 8 + i * GXT_TABLE_ENTRY_SIZE;
+		memcpy(stagedOffsets.data[i].szMissionName, entry, GXT_NAME_SIZE);
+		stagedOffsets.data[i].offset = ReadLE32(entry + GXT_NAME_SIZE);
+		if(!HasTerminator(stagedOffsets.data[i].szMissionName, GXT_NAME_SIZE))
+			return false;
+		if(i == 0){
+			if(stagedOffsets.data[i].offset != 8 + tableSize)
+				return false;
+		}else{
+			if((i > 1 && strcmp(stagedOffsets.data[i - 1].szMissionName,
+			                    stagedOffsets.data[i].szMissionName) >= 0) ||
+			   stagedOffsets.data[i].offset <= stagedOffsets.data[i - 1].offset)
+				return false;
+		}
+		if(stagedOffsets.data[i].offset >= fileSize)
+			return false;
+	}
+
+	for(size_t i = 0; i < entryCount; i++){
+		size_t start = stagedOffsets.data[i].offset;
+		size_t end = i + 1 < entryCount ? stagedOffsets.data[i + 1].offset : fileSize;
+		GxtSection section;
+		const char *name = i == 0 ? nil : stagedOffsets.data[i].szMissionName;
+		if(!ReadGxtSection(fileData, start, end, name, section))
+			return false;
+		if(i == 0)
+			mainSection = section;
+	}
+
+	missionOffsets = stagedOffsets;
+	return true;
+}
+
+static bool
+DecodeGxtSection(const GxtSection &section, CKeyArray &keys, CData &text)
+{
+	CKeyArray stagedKeys;
+	CData stagedText;
+	int keyCount = (int)(section.keySize / GXT_KEY_ENTRY_SIZE);
+	int charCount = (int)(section.textSize / sizeof(wchar));
+
+	if(keyCount != 0){
+		stagedKeys.entries = new(std::nothrow) CKeyEntry[keyCount];
+		if(stagedKeys.entries == nil)
+			return false;
+	}
+	stagedKeys.numEntries = keyCount;
+	for(int i = 0; i < keyCount; i++){
+		const uint8 *entry = section.keys + i * GXT_KEY_ENTRY_SIZE;
+#if defined(FIX_BUGS) || defined(FIX_BUGS_64)
+		stagedKeys.entries[i].valueOffset = ReadLE32(entry);
+#else
+		stagedKeys.entries[i].value = (wchar*)(uintptr)ReadLE32(entry);
+#endif
+		memcpy(stagedKeys.entries[i].key, entry + sizeof(uint32), GXT_NAME_SIZE);
+	}
+
+	if(charCount != 0){
+		stagedText.chars = new(std::nothrow) wchar[charCount];
+		if(stagedText.chars == nil)
+			return false;
+	}
+	stagedText.numChars = charCount;
+	for(int i = 0; i < charCount; i++)
+		stagedText.chars[i] = ReadLE16(section.text + i * sizeof(wchar));
+	stagedKeys.Update(stagedText.chars);
+
+	keys.Swap(stagedKeys);
+	text.Swap(stagedText);
+	return true;
+}
+
+bool
+DecodeGxtFile(const uint8 *fileData, size_t fileSize, CKeyArray &keys, CData &text,
+	CMissionTextOffsets &missionOffsets)
+{
+	CMissionTextOffsets stagedOffsets;
+	GxtSection mainSection;
+	if(!ValidateGxtFile(fileData, fileSize, stagedOffsets, mainSection))
+		return false;
+
+	CKeyArray stagedKeys;
+	CData stagedText;
+	if(!DecodeGxtSection(mainSection, stagedKeys, stagedText))
+		return false;
+	keys.Swap(stagedKeys);
+	text.Swap(stagedText);
+	missionOffsets = stagedOffsets;
+	return true;
+}
+
+static bool
+SameMissionOffsets(const CMissionTextOffsets &left, const CMissionTextOffsets &right)
+{
+	if(left.size > CMissionTextOffsets::MAX_MISSION_TEXTS + 1 || left.size != right.size)
+		return false;
+	for(uint16 i = 0; i < left.size; i++)
+		if(left.data[i].offset != right.data[i].offset ||
+		   memcmp(left.data[i].szMissionName, right.data[i].szMissionName, GXT_NAME_SIZE) != 0)
+			return false;
+	return true;
+}
+
+bool
+DecodeGxtMission(const uint8 *fileData, size_t fileSize,
+	const CMissionTextOffsets &expectedOffsets, const char missionName[8],
+	CKeyArray &keys, CData &text, char loadedName[8])
+{
+	CMissionTextOffsets offsets;
+	GxtSection mainSection;
+	if(missionName == nil || loadedName == nil ||
+	   !ValidateGxtFile(fileData, fileSize, offsets, mainSection) ||
+	   !SameMissionOffsets(offsets, expectedOffsets))
+		return false;
+
+	for(uint16 i = 1; i < offsets.size; i++){
+		if(memcmp(offsets.data[i].szMissionName, missionName, GXT_NAME_SIZE) != 0)
+			continue;
+		size_t end = i + 1 < offsets.size ? offsets.data[i + 1].offset : fileSize;
+		GxtSection section;
+		if(!ReadGxtSection(fileData, offsets.data[i].offset, end,
+		                   offsets.data[i].szMissionName, section))
+			return false;
+		CKeyArray stagedKeys;
+		CData stagedText;
+		if(!DecodeGxtSection(section, stagedKeys, stagedText))
+			return false;
+		keys.Swap(stagedKeys);
+		text.Swap(stagedText);
+		memcpy(loadedName, offsets.data[i].szMissionName, GXT_NAME_SIZE);
+		return true;
+	}
+	return false;
+}
+
+static bool
+GetTextFilename(char filename[32])
+{
+	const char *name = nil;
+	switch(FrontEndMenuManager.m_PrefsLanguage){
+	case CMenuManager::LANGUAGE_AMERICAN:
+#if defined(GTA_PS2) && defined(GTA_PAL)
+		name = "ENGLISH.GXT";
+#else
+		name = "AMERICAN.GXT";
+#endif
+		break;
+	case CMenuManager::LANGUAGE_FRENCH: name = "FRENCH.GXT"; break;
+	case CMenuManager::LANGUAGE_GERMAN: name = "GERMAN.GXT"; break;
+	case CMenuManager::LANGUAGE_ITALIAN: name = "ITALIAN.GXT"; break;
+	case CMenuManager::LANGUAGE_SPANISH: name = "SPANISH.GXT"; break;
+#ifdef MORE_LANGUAGES
+	case CMenuManager::LANGUAGE_POLISH: name = "POLISH.GXT"; break;
+	case CMenuManager::LANGUAGE_RUSSIAN: name = "RUSSIAN.GXT"; break;
+	case CMenuManager::LANGUAGE_JAPANESE: name = "JAPANESE.GXT"; break;
+	case CMenuManager::LANGUAGE_PORTUGUESE: name = "PORTUGUESE.GXT"; break;
+#endif
+	default: return false;
+	}
+	strcpy(filename, name);
+	return true;
+}
+
+static bool
+ReadTextFile(const char *filename, uint8 *&fileData, size_t &fileSize)
+{
+	fileData = nil;
+	fileSize = 0;
+	CFileMgr::SetDir("TEXT");
+	int file = CFileMgr::OpenFile(filename, "rb");
+	bool success = file > 0 && CFileMgr::GetFileSize(file, &fileSize) &&
+	               fileSize != 0 && fileSize <= INT_MAX;
+	if(success){
+		fileData = new(std::nothrow) uint8[fileSize];
+		success = fileData != nil && CFileMgr::Read(file, (char*)fileData, fileSize) == fileSize;
+	}
+	if(file > 0 && CFileMgr::CloseFile(file) != 0)
+		success = false;
+	CFileMgr::SetDir("");
+	if(!success){
+		delete[] fileData;
+		fileData = nil;
+		fileSize = 0;
+	}
+	return success;
+}
+
 CText::CText(void)
 {
 	encoding = 'e';
+	loadedLanguage = -1;
 	bHasMissionTextOffsets = false;
 	bIsMissionTextLoaded = false;
 	memset(szMissionTableName, 0, sizeof(szMissionTableName));
 	memset(WideErrorString, 0, sizeof(WideErrorString));
 }
 
-void
+bool
+CText::HandleLoadFailure(void)
+{
+	if(loadedLanguage >= 0)
+		FrontEndMenuManager.m_PrefsLanguage = loadedLanguage;
+	return false;
+}
+
+bool
 CText::Load(void)
 {
+	int32 requestedLanguage = FrontEndMenuManager.m_PrefsLanguage;
 	char filename[32];
-	size_t offset;
-	int file;
-	bool tkey_loaded = false, tdat_loaded = false;
-	ChunkHeader m_ChunkHeader;
+	if(!GetTextFilename(filename))
+		return HandleLoadFailure();
+	uint8 *fileData;
+	size_t fileSize;
+	if(!ReadTextFile(filename, fileData, fileSize))
+		return HandleLoadFailure();
 
+	CKeyArray stagedKeys;
+	CData stagedText;
+	CMissionTextOffsets stagedOffsets;
+	bool success = DecodeGxtFile(fileData, fileSize, stagedKeys, stagedText, stagedOffsets);
+	delete[] fileData;
+	if(!success)
+		return HandleLoadFailure();
+
+	CMessages::ClearAllMessagesDisplayedByGame();
+	keyArray.Swap(stagedKeys);
+	data.Swap(stagedText);
+	mission_keyArray.Unload();
+	mission_data.Unload();
+	MissionTextOffsets = stagedOffsets;
+	bHasMissionTextOffsets = true;
 	bIsMissionTextLoaded = false;
-	bHasMissionTextOffsets = false;
-
-	Unload();
-
-	CFileMgr::SetDir("TEXT");
-	switch(FrontEndMenuManager.m_PrefsLanguage){
-	case CMenuManager::LANGUAGE_AMERICAN:
-#ifdef GTA_PS2
-#ifdef GTA_PAL
-		sprintf(filename, "ENGLISH.GXT");
-#else
-		sprintf(filename, "AMERICAN.GXT");
-#endif
-#else
-		sprintf(filename, "AMERICAN.GXT");
-#endif
-		break;
-	case CMenuManager::LANGUAGE_FRENCH:
-		sprintf(filename, "FRENCH.GXT");
-		break;
-	case CMenuManager::LANGUAGE_GERMAN:
-		sprintf(filename, "GERMAN.GXT");
-		break;
-	case CMenuManager::LANGUAGE_ITALIAN:
-		sprintf(filename, "ITALIAN.GXT");
-		break;
-	case CMenuManager::LANGUAGE_SPANISH:
-		sprintf(filename, "SPANISH.GXT");
-		break;
-#ifdef MORE_LANGUAGES
-	case CMenuManager::LANGUAGE_POLISH:
-		sprintf(filename, "POLISH.GXT");
-		break;
-	case CMenuManager::LANGUAGE_RUSSIAN:
-		sprintf(filename, "RUSSIAN.GXT");
-		break;
-	case CMenuManager::LANGUAGE_JAPANESE:
-		sprintf(filename, "JAPANESE.GXT");
-		break;
-	case CMenuManager::LANGUAGE_PORTUGUESE:
-		sprintf(filename, "PORTUGUESE.GXT");
-		break;
-#endif
-	}
-
-	file = CFileMgr::OpenFile(filename, "rb");
-
-	offset = 0;
-	while (!tkey_loaded || !tdat_loaded) {
-		ReadChunkHeader(&m_ChunkHeader, file, &offset);
-		if (m_ChunkHeader.size != 0) {
-			if (strncmp(m_ChunkHeader.magic, "TABL", 4) == 0) {
-				MissionTextOffsets.Load(m_ChunkHeader.size, file, &offset, 0x58000);
-				bHasMissionTextOffsets = true;
-			} else if (strncmp(m_ChunkHeader.magic, "TKEY", 4) == 0) {
-				this->keyArray.Load(m_ChunkHeader.size, file, &offset);
-				tkey_loaded = true;
-			} else if (strncmp(m_ChunkHeader.magic, "TDAT", 4) == 0) {
-				this->data.Load(m_ChunkHeader.size, file, &offset);
-				tdat_loaded = true;
-			} else {
-				CFileMgr::Seek(file, m_ChunkHeader.size, SEEK_CUR);
-				offset += m_ChunkHeader.size;
-			}
-		}
-	}
-
-	keyArray.Update(data.chars);
-	CFileMgr::CloseFile(file);
-	CFileMgr::SetDir("");
+	loadedLanguage = requestedLanguage;
+	memset(szMissionTableName, 0, sizeof(szMissionTableName));
+	return true;
 }
 
 void
@@ -112,7 +383,10 @@ CText::Unload(void)
 	data.Unload();
 	mission_keyArray.Unload();
 	mission_data.Unload();
+	loadedLanguage = -1;
+	bHasMissionTextOffsets = false;
 	bIsMissionTextLoaded = false;
+	MissionTextOffsets.size = 0;
 	memset(szMissionTableName, 0, sizeof(szMissionTableName));
 }
 
@@ -211,134 +485,38 @@ CText::GetNameOfLoadedMissionText(char *outName)
 	strcpy(outName, szMissionTableName);
 }
 
-void
-CText::ReadChunkHeader(ChunkHeader *buf, int32 file, size_t *offset)
+bool
+CText::LoadMissionText(const char *MissionTableName)
 {
-#ifdef THIS_IS_STUPID
-	char *_buf = (char*)buf;
-	for (int i = 0; i < sizeof(ChunkHeader); i++) {
-		CFileMgr::Read(file, &_buf[i], 1);
-		(*offset)++;
-	}
-#else
-	// original code loops 8 times to read 1 byte with CFileMgr::Read, that's retarded
-	CFileMgr::Read(file, (char*)buf, sizeof(ChunkHeader));
-	*offset += sizeof(ChunkHeader);
-#endif
-}
-
-void
-CText::LoadMissionText(char *MissionTableName)
-{
+	if(!bHasMissionTextOffsets || MissionTableName == nil)
+		return false;
 	char filename[32];
-	CMessages::ClearAllMessagesDisplayedByGame();
+	if(!GetTextFilename(filename))
+		return false;
 
-	mission_keyArray.Unload();
-	mission_data.Unload();
-
-	bool search_result = false;
-	int missionTableId = 0;
-
-	for (missionTableId = 0; missionTableId < MissionTextOffsets.size; missionTableId++) {
-		if (strncmp(MissionTextOffsets.data[missionTableId].szMissionName, MissionTableName, strlen(MissionTextOffsets.data[missionTableId].szMissionName)) == 0) {
-			search_result = true;
-			break;
-		}
-	}
-
-	if (!search_result) {
-		printf("CText::LoadMissionText - couldn't find %s", MissionTableName);
-		return;
-	}
-
-	CFileMgr::SetDir("TEXT");
-	switch (FrontEndMenuManager.m_PrefsLanguage) {
-	case CMenuManager::LANGUAGE_AMERICAN:
-		sprintf(filename, "AMERICAN.GXT");
-		break;
-	case CMenuManager::LANGUAGE_FRENCH:
-		sprintf(filename, "FRENCH.GXT");
-		break;
-	case CMenuManager::LANGUAGE_GERMAN:
-		sprintf(filename, "GERMAN.GXT");
-		break;
-	case CMenuManager::LANGUAGE_ITALIAN:
-		sprintf(filename, "ITALIAN.GXT");
-		break;
-	case CMenuManager::LANGUAGE_SPANISH:
-		sprintf(filename, "SPANISH.GXT");
-		break;
-#ifdef MORE_LANGUAGES
-	case CMenuManager::LANGUAGE_POLISH:
-		sprintf(filename, "POLISH.GXT");
-		break;
-	case CMenuManager::LANGUAGE_RUSSIAN:
-		sprintf(filename, "RUSSIAN.GXT");
-		break;
-	case CMenuManager::LANGUAGE_JAPANESE:
-		sprintf(filename, "JAPANESE.GXT");
-		break;
-	case CMenuManager::LANGUAGE_PORTUGUESE:
-		sprintf(filename, "PORTUGUESE.GXT");
-		break;
-#endif
-	}
+	uint8 *fileData;
+	size_t fileSize;
 	CTimer::Suspend();
-	int file = CFileMgr::OpenFile(filename, "rb");
-	CFileMgr::Seek(file, MissionTextOffsets.data[missionTableId].offset, SEEK_SET);
-
-	char TableCheck[8];
-	CFileMgr::Read(file, TableCheck, 8);
-	if (strncmp(TableCheck, MissionTableName, 8) != 0)
-		printf("CText::LoadMissionText - expected to find %s in the text file", MissionTableName);
-
-	bool tkey_loaded = false, tdat_loaded = false;
-	ChunkHeader m_ChunkHeader;
-	while (!tkey_loaded || !tdat_loaded) {
-		size_t bytes_read = 0;
-		ReadChunkHeader(&m_ChunkHeader, file, &bytes_read);
-		if (m_ChunkHeader.size != 0) {
-			if (strncmp(m_ChunkHeader.magic, "TKEY", 4) == 0) {
-				size_t bytes_read = 0;
-				mission_keyArray.Load(m_ChunkHeader.size, file, &bytes_read);
-				tkey_loaded = true;
-			} else if (strncmp(m_ChunkHeader.magic, "TDAT", 4) == 0) {
-				size_t bytes_read = 0;
-				mission_data.Load(m_ChunkHeader.size, file, &bytes_read);
-				tdat_loaded = true;
-			} else
-				CFileMgr::Seek(file, m_ChunkHeader.size, SEEK_CUR);
-		}
-	}
-
-	mission_keyArray.Update(mission_data.chars);
-	CFileMgr::CloseFile(file);
+	bool success = ReadTextFile(filename, fileData, fileSize);
 	CTimer::Resume();
-	CFileMgr::SetDir("");
-	strcpy(szMissionTableName, MissionTableName);
+	if(!success)
+		return false;
+
+	CKeyArray stagedKeys;
+	CData stagedText;
+	char loadedName[8];
+	success = DecodeGxtMission(fileData, fileSize, MissionTextOffsets,
+	                           MissionTableName, stagedKeys, stagedText, loadedName);
+	delete[] fileData;
+	if(!success)
+		return false;
+
+	CMessages::ClearAllMessagesDisplayedByGame();
+	mission_keyArray.Swap(stagedKeys);
+	mission_data.Swap(stagedText);
+	memcpy(szMissionTableName, loadedName, sizeof(szMissionTableName));
 	bIsMissionTextLoaded = true;
-}
-
-
-void
-CKeyArray::Load(size_t length, int file, size_t* offset)
-{
-	char *rawbytes;
-
-	// You can make numEntries size_t if you want to exceed 32-bit boundaries, everything else should be ready.
-	numEntries = (int)(length / sizeof(CKeyEntry));
-	entries = new CKeyEntry[numEntries];
-	rawbytes = (char*)entries;
-
-#ifdef THIS_IS_STUPID
-	for (uint32 i = 0; i < length; i++) {
-		CFileMgr::Read(file, &rawbytes[i], 1);
-		(*offset)++;
-	}
-#else
-	CFileMgr::Read(file, rawbytes, length);
-	*offset += length;
-#endif
+	return true;
 }
 
 void
@@ -347,6 +525,17 @@ CKeyArray::Unload(void)
 	delete[] entries;
 	entries = nil;
 	numEntries = 0;
+}
+
+void
+CKeyArray::Swap(CKeyArray &other)
+{
+	CKeyEntry *savedEntries = entries;
+	int savedCount = numEntries;
+	entries = other.entries;
+	numEntries = other.numEntries;
+	other.entries = savedEntries;
+	other.numEntries = savedCount;
 }
 
 void
@@ -415,27 +604,6 @@ CKeyArray::Search(const char *key, uint8 *result)
 }
 
 void
-CData::Load(size_t length, int file, size_t * offset)
-{
-	char *rawbytes;
-
-	// You can make numChars size_t if you want to exceed 32-bit boundaries, everything else should be ready.
-	numChars = (int)(length / sizeof(wchar));
-	chars = new wchar[numChars];
-	rawbytes = (char*)chars;
-
-#ifdef THIS_IS_STUPID
-	for(uint32 i = 0; i < length; i++){
-		CFileMgr::Read(file, &rawbytes[i], 1);
-		(*offset)++;
-	}
-#else
-	CFileMgr::Read(file, rawbytes, length);
-	*offset += length;
-#endif
-}
-
-void
 CData::Unload(void)
 {
 	delete[] chars;
@@ -444,30 +612,14 @@ CData::Unload(void)
 }
 
 void
-CMissionTextOffsets::Load(size_t table_size, int file, size_t *offset, int)
+CData::Swap(CData &other)
 {
-#ifdef THIS_IS_STUPID
-	size_t num_of_entries = table_size / sizeof(CMissionTextOffsets::Entry);
-	for (size_t mi = 0; mi < num_of_entries; mi++) {
-		for (uint32 i = 0; i < sizeof(data[mi].szMissionName); i++) {
-			CFileMgr::Read(file, &data[i].szMissionName[i], 1);
-			(*offset)++;
-		}
-		char* _buf = (char*)&data[mi].offset;
-		for (uint32 i = 0; i < sizeof(data[mi].offset); i++) {
-			CFileMgr::Read(file, &_buf[i], 1);
-			(*offset)++;
-		}
-	}
-	size = (uint16)num_of_entries;
-#else
-	// not exact VC code but smaller and better :P
-
-	// You can make this size_t if you want to exceed 32-bit boundaries, everything else should be ready.
-	size = (uint16) (table_size / sizeof(CMissionTextOffsets::Entry));
-	CFileMgr::Read(file, (char*)data, sizeof(CMissionTextOffsets::Entry) * size);
-	*offset += sizeof(CMissionTextOffsets::Entry) * size;
-#endif
+	wchar *savedChars = chars;
+	int savedCount = numChars;
+	chars = other.chars;
+	numChars = other.numChars;
+	other.chars = savedChars;
+	other.numChars = savedCount;
 }
 
 char*

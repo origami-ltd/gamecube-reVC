@@ -301,11 +301,72 @@ void _rwD3D8TexDictionaryEnableRasterFormatConversion(bool enable) { }
 
 
 // hack for reading native textures
+class NativeTextureReadStream : public rw::Stream
+{
+public:
+	rw::Stream *stream;
+	RwUInt32 start;
+	RwUInt32 end;
+	bool valid;
+
+	NativeTextureReadStream(rw::Stream *input, RwInt32 size)
+	{
+		stream = input;
+		start = input ? input->tell() : UINT32_MAX;
+		valid = input != nil && size >= 0 && start != UINT32_MAX &&
+		        (uint64)start + (uint32)size <= UINT32_MAX;
+		end = valid ? start + (uint32)size : start;
+	}
+
+	uint32 write8(const void *, uint32) { return 0; }
+	uint32 read8(void *data, uint32 length)
+	{
+		uint32 position = tell();
+		if(!valid || position < start || position > end || length > end-position)
+			return 0;
+		return stream->read8(data, length);
+	}
+	void seek(int32 offset, int32 whence = 1)
+	{
+		if(!valid)
+			return;
+		int64 base = whence == 0 ? 0 : whence == 2 ? end : tell();
+		int64 target = base + offset;
+		if(target < start || target > end){
+			valid = false;
+			return;
+		}
+		stream->seek((int32)target, 0);
+		valid = stream->tell() == (uint32)target;
+	}
+	uint32 tell(void) { return valid ? stream->tell() : UINT32_MAX; }
+	bool eof(void) { return !valid || tell() >= end; }
+};
+
 RwBool rwNativeTextureHackRead(RwStream *stream, RwTexture **tex, RwInt32 size)
 {
-	*tex = Texture::streamReadNative(stream);
+	if(tex == nil)
+		return false;
+	*tex = nil;
+	NativeTextureReadStream bounded(stream, size);
+	if(!bounded.valid)
+		return false;
+	*tex = Texture::streamReadNative(&bounded);
+	if(*tex == nil || !Texture::s_plglist.streamRead(&bounded, *tex) ||
+	   bounded.tell() != bounded.end){
+		if(*tex)
+			(*tex)->destroy();
+		*tex = nil;
+		return false;
+	}
 #ifdef LIBRW
-	(*tex)->raster = rw::Raster::convertTexToCurrentPlatform((*tex)->raster);
+	rw::Raster *raster = rw::Raster::convertTexToCurrentPlatform((*tex)->raster);
+	if(raster == nil){
+		(*tex)->destroy();
+		*tex = nil;
+		return false;
+	}
+	(*tex)->raster = raster;
 #endif
 	return *tex != nil;
 }
@@ -565,13 +626,20 @@ RwBool RwEngineInit(RwMemoryFunctions *memFuncs, RwUInt32 initFlags, RwUInt32 re
 }
 // TODO: this is platform dependent
 RwBool RwEngineOpen(RwEngineOpenParams *initParams) {
+#ifdef RW_NULL
+	return Engine::open(nil);
+#else
 	static EngineOpenParams openParams;
 #ifdef RW_D3D9
 	openParams.window = (HWND)initParams->displayID;
+#elif defined RW_GAMECUBE
+	// no window handle on a console; GX gets its mode from the video encoder
+	(void)initParams;
 #else
 	openParams = *(EngineOpenParams*)initParams->displayID;
 #endif
 	return Engine::open(&openParams);
+#endif
 }
 RwBool RwEngineStart(void) {
 	rw::d3d::isP8supported = false;

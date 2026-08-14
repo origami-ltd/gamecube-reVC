@@ -38,6 +38,8 @@
 #include "Frontend.h"
 #include "VarConsole.h"
 
+#include <new>
+
 bool CStreaming::ms_disableStreaming;
 bool CStreaming::ms_bLoadingBigModel;
 int32 CStreaming::ms_numModelsRequested;
@@ -123,7 +125,7 @@ CStreamingInfo::RemoveFromList(void)
 	m_prev = nil;
 }
 
-void
+bool
 CStreaming::Init2(void)
 {
 	int i;
@@ -196,34 +198,89 @@ CStreaming::Init2(void)
 	for(i = 0; i < ARRAY_SIZE(ms_bIsPedFromPedGroupLoaded); i++)
 		ms_bIsPedFromPedGroupLoaded[i] = false;
 
-	ms_pExtraObjectsDir = new CDirectory(EXTRADIRSIZE);
+	ms_pExtraObjectsDir = new(std::nothrow) CDirectory(EXTRADIRSIZE);
+	if(ms_pExtraObjectsDir == nil || !ms_pExtraObjectsDir->IsValid()){
+		delete ms_pExtraObjectsDir;
+		ms_pExtraObjectsDir = nil;
+		return false;
+	}
 	ms_numPriorityRequests = 0;
 	ms_currentPedGrp = -1;
 	ms_lastCullZone = -1;		// unused because RemoveModelsNotVisibleFromCullzone is gone
 	ms_loadedGangs = 0;
 	ms_currentPedLoading = NUMMODELSPERPEDGROUP;	// unused, whatever it is
 
-	LoadCdDirectory();
+	if(!LoadCdDirectory()){
+		delete ms_pExtraObjectsDir;
+		ms_pExtraObjectsDir = nil;
+		return false;
+	}
+	if(ms_streamingBufferSize <= 0){
+		delete ms_pExtraObjectsDir;
+		ms_pExtraObjectsDir = nil;
+		return false;
+	}
+	size_t roundedStreamingBufferSize = (size_t)ms_streamingBufferSize;
+	if(roundedStreamingBufferSize & 1)
+		roundedStreamingBufferSize++;
+	size_t allocationMultiplier = 1;
+#ifdef ONE_THREAD_PER_CHANNEL
+	allocationMultiplier = 2;
+#endif
+	if(roundedStreamingBufferSize > SIZE_MAX/CDSTREAM_SECTOR_SIZE/allocationMultiplier){
+		delete ms_pExtraObjectsDir;
+		ms_pExtraObjectsDir = nil;
+		return false;
+	}
 
 	// allocate streaming buffers
-	if(ms_streamingBufferSize & 1) ms_streamingBufferSize++;
+	ms_streamingBufferSize = (int32)roundedStreamingBufferSize;
 #ifndef ONE_THREAD_PER_CHANNEL
-	ms_pStreamingBuffer[0] = (int8*)RwMallocAlign(ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE, CDSTREAM_SECTOR_SIZE);
+	ms_pStreamingBuffer[0] = (int8*)RwMallocAlign((size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE, CDSTREAM_SECTOR_SIZE);
+	if(ms_pStreamingBuffer[0] == nil){
+		delete ms_pExtraObjectsDir;
+		ms_pExtraObjectsDir = nil;
+		return false;
+	}
 	ms_streamingBufferSize /= 2;
-	ms_pStreamingBuffer[1] = ms_pStreamingBuffer[0] + ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
+	ms_pStreamingBuffer[1] = ms_pStreamingBuffer[0] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
 #else
-	ms_pStreamingBuffer[0] = (int8*)RwMallocAlign(ms_streamingBufferSize*2*CDSTREAM_SECTOR_SIZE, CDSTREAM_SECTOR_SIZE);
+	ms_pStreamingBuffer[0] = (int8*)RwMallocAlign((size_t)ms_streamingBufferSize*2*CDSTREAM_SECTOR_SIZE, CDSTREAM_SECTOR_SIZE);
+	if(ms_pStreamingBuffer[0] == nil){
+		delete ms_pExtraObjectsDir;
+		ms_pExtraObjectsDir = nil;
+		return false;
+	}
 	ms_streamingBufferSize /= 2;
-	ms_pStreamingBuffer[1] = ms_pStreamingBuffer[0] + ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
-	ms_pStreamingBuffer[2] = ms_pStreamingBuffer[1] + ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
-	ms_pStreamingBuffer[3] = ms_pStreamingBuffer[2] + ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
+	ms_pStreamingBuffer[1] = ms_pStreamingBuffer[0] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
+	ms_pStreamingBuffer[2] = ms_pStreamingBuffer[1] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
+	ms_pStreamingBuffer[3] = ms_pStreamingBuffer[2] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
 #endif
 	debug("Streaming buffer size is %d sectors", ms_streamingBufferSize);
 
 	// PC only, figure out how much memory we got
 #ifdef GTA_PC
 #define MB (1024*1024)
-#ifdef FIX_BUGS
+#if defined(GTA_OGC)
+	// The PC formula floors at 65MB — an impossible promise against a 24MB
+	// console; streaming would keep loading until allocation fails. Derive
+	// the budget from the real arena instead and keep few cached vehicles.
+	{
+		extern size_t _dwMemAvailPhys;
+		// GX rasters are 16-bit tiled (RGB5A3), so resident texture cost
+		// tracks the on-disc accounting closely enough for this to hold.
+		size_t reserve = 8*MB; // engine, pools, render targets
+		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
+		    _dwMemAvailPhys - reserve : 4*MB;
+		desiredNumVehiclesLoaded = 5;
+		{
+			char line[96];
+			snprintf(line, sizeof(line), "  arena %uK budget %uK",
+			    (uint32)(_dwMemAvailPhys/1024), (uint32)(ms_memoryAvailable/1024));
+			BootLog(line);
+		}
+	}
+#elif defined(FIX_BUGS)
 	// do what gta3 does
 	extern size_t _dwMemAvailPhys;
 	ms_memoryAvailable = (_dwMemAvailPhys - 10*MB)/2;
@@ -254,9 +311,10 @@ CStreaming::Init2(void)
 	VarConsole.Add("Streaming Vehicle Debug", &gbPrintVehiclesInMemory, true);
 	VarConsole.Add("Printf Streaming Buffer contents", &gbPrintStreamingBuffer, true);
 #endif
+	return true;
 }
 
-void
+bool
 CStreaming::Init(void)
 {
 #ifdef USE_TXD_CDIMAGE
@@ -265,20 +323,22 @@ CStreaming::Init(void)
 		if (txdHandle)
 			CFileMgr::CloseFile(txdHandle);
 		if (!CheckVideoCardCaps() && txdHandle) {
-			CdStreamAddImage("MODELS\\TXD.IMG");
-			CStreaming::Init2();
+			if(!CdStreamAddImage("MODELS\\TXD.IMG") || !CStreaming::Init2())
+				return false;
 		} else {
-			CStreaming::Init2();
+			if(!CStreaming::Init2())
+				return false;
 			if (CreateTxdImageForVideoCard()) {
 				CStreaming::Shutdown();
-				CdStreamAddImage("MODELS\\TXD.IMG");
-				CStreaming::Init2();
+				if(!CdStreamAddImage("MODELS\\TXD.IMG") || !CStreaming::Init2())
+					return false;
 			}
 		}
 	} else
-		CStreaming::Init2();
+		return CStreaming::Init2();
+	return true;
 #else
-	CStreaming::Init2();
+	return CStreaming::Init2();
 #endif
 }
 
@@ -298,13 +358,14 @@ CStreaming::ReInit(void)
 void
 CStreaming::Shutdown(void)
 {
-	RwFreeAlign(ms_pStreamingBuffer[0]);
+	if(ms_pStreamingBuffer[0])
+		RwFreeAlign(ms_pStreamingBuffer[0]);
+	for(int32 i = 0; i < ARRAY_SIZE(ms_pStreamingBuffer); i++)
+		ms_pStreamingBuffer[i] = nil;
 	ms_streamingBufferSize = 0;
 	if(ms_pExtraObjectsDir) {
 		delete ms_pExtraObjectsDir;
-#ifdef FIX_BUGS
 		ms_pExtraObjectsDir = nil;
-#endif
 	}
 }
 
@@ -372,7 +433,7 @@ CStreaming::Update(void)
 	}
 }
 
-void
+bool
 CStreaming::LoadCdDirectory(void)
 {
 	char dirname[132];
@@ -386,58 +447,109 @@ CStreaming::LoadCdDirectory(void)
 	ms_imageOffsets[4] = -1;
 	ms_imageOffsets[5] = -1;
 	ms_imageSize = GetGTA3ImgSize();
+	if(ms_imageSize == 0 || ms_imageSize % CDSTREAM_SECTOR_SIZE != 0)
+		return false;
 	// PS2 uses CFileMgr::GetCdFile on all IMG files to fill the array
 #endif
 
 	i = CdStreamGetNumImages();
+	if(i <= 0)
+		return false;
 	while(i-- >= 1){
-		strcpy(dirname, CdStreamGetImageName(i));
-		strncpy(strrchr(dirname, '.') + 1, "DIR", 3);
-		LoadCdDirectory(dirname, i);
+		char *imageName = CdStreamGetImageName(i);
+		if(imageName == nil || strlen(imageName) >= sizeof(dirname))
+			return false;
+		strcpy(dirname, imageName);
+		char *extension = strrchr(dirname, '.');
+		if(extension == nil || extension[1] == '\0' || strlen(extension + 1) != 3)
+			return false;
+		memcpy(extension + 1, "DIR", 3);
+		if(!LoadCdDirectory(dirname, i))
+			return false;
 	}
 
 	ms_lastImageRead = 0;
 	ms_imageSize /= CDSTREAM_SECTOR_SIZE;
+	return true;
 }
 
-void
+bool
 CStreaming::LoadCdDirectory(const char *dirname, int n)
 {
-	int fd, lastID, imgSelector;
+	int fd, lastID;
+	int32 status;
+	uint32 imgSelector;
 	int modelId;
 	CDirectory::DirectoryInfo direntry;
 	char *dot;
+#ifdef GTA_OGC
+	uint32 imageSectorCount;
+#endif
 
 	lastID = -1;
+	if(n < 0 || n >= MAX_CDIMAGES)
+		return false;
 	fd = CFileMgr::OpenFile(dirname, "rb");
-	assert(fd > 0);
+	if(fd <= 0)
+		return false;
+#ifdef GTA_OGC
+	imageSectorCount = CdStreamGetImageSectorCount(n);
+	if(imageSectorCount == 0){
+		CFileMgr::CloseFile(fd);
+		return false;
+	}
+#endif
 
-	imgSelector = n<<24;
+	imgSelector = (uint32)n<<24;
 	assert(sizeof(direntry) == 32);
-	while(CFileMgr::Read(fd, (char*)&direntry, sizeof(direntry))){
+	while((status = CDirectory::ReadEntry(fd, direntry)) > 0){
+		if(direntry.offset >= 0x1000000 || direntry.size == 0 ||
+		   direntry.size > UINT32_MAX/CDSTREAM_SECTOR_SIZE
+#ifdef GTA_OGC
+		   || direntry.offset > imageSectorCount || direntry.size > imageSectorCount - direntry.offset
+#endif
+		  ){
+			status = -1;
+			break;
+		}
+	}
+	if(status < 0 || !CFileMgr::Seek(fd, 0, SEEK_SET)){
+		CFileMgr::CloseFile(fd);
+		return false;
+	}
+	while((status = CDirectory::ReadEntry(fd, direntry)) > 0){
 		bool bAddToStreaming = false;
+		size_t nameLen = strlen(direntry.name);
 
 		if(direntry.size > (uint32)ms_streamingBufferSize)
 			ms_streamingBufferSize = direntry.size;
-		direntry.name[23] = '\0';
-		dot = strchr(direntry.name, '.');
-		if(dot == nil || dot-direntry.name > 20){
-			debug("%s is too long\n", direntry.name);
-			lastID = -1;
-			continue;
+		dot = strrchr(direntry.name, '.');
+		if(dot == nil || dot == direntry.name || dot - direntry.name > 19 ||
+		   dot + 4 != direntry.name + nameLen){
+			CFileMgr::CloseFile(fd);
+			return false;
 		}
 
 		*dot = '\0';
 
 		if(strncasecmp(dot+1, "DFF", 3) == 0){
 			if(CModelInfo::GetModelInfo(direntry.name, &modelId)){
+				if(modelId < 0 || modelId >= STREAM_OFFSET_TXD){
+					CFileMgr::CloseFile(fd);
+					return false;
+				}
 				bAddToStreaming = true;
 			}else{
 #ifdef FIX_BUGS
-				// remember which cdimage this came from
-				ms_pExtraObjectsDir->AddItem(direntry, n);
+				if(!ms_pExtraObjectsDir->AddItem(direntry, n)){
+					CFileMgr::CloseFile(fd);
+					return false;
+				}
 #else
-				ms_pExtraObjectsDir->AddItem(direntry);
+				if(!ms_pExtraObjectsDir->AddItem(direntry)){
+					CFileMgr::CloseFile(fd);
+					return false;
+				}
 #endif
 				lastID = -1;
 			}
@@ -445,16 +557,28 @@ CStreaming::LoadCdDirectory(const char *dirname, int n)
 			modelId = CTxdStore::FindTxdSlot(direntry.name);
 			if(modelId == -1)
 				modelId = CTxdStore::AddTxdSlot(direntry.name);
+			if(modelId < 0 || modelId >= STREAM_OFFSET_COL - STREAM_OFFSET_TXD){
+				CFileMgr::CloseFile(fd);
+				return false;
+			}
 			modelId += STREAM_OFFSET_TXD;
 			bAddToStreaming = true;
 		}else if(strncasecmp(dot+1, "COL", 3) == 0){
 			modelId = CColStore::FindColSlot(direntry.name);
 			if(modelId == -1)
 				modelId = CColStore::AddColSlot(direntry.name);
+			if(modelId < 0 || modelId >= STREAM_OFFSET_ANIM - STREAM_OFFSET_COL){
+				CFileMgr::CloseFile(fd);
+				return false;
+			}
 			modelId += STREAM_OFFSET_COL;
 			bAddToStreaming = true;
 		}else if(strncasecmp(dot+1, "IFP", 3) == 0){
 			modelId = CAnimManager::RegisterAnimBlock(direntry.name);
+			if(modelId < 0 || modelId >= NUMANIMBLOCKS){
+				CFileMgr::CloseFile(fd);
+				return false;
+			}
 			modelId += STREAM_OFFSET_ANIM;
 			bAddToStreaming = true;
 		}else{
@@ -462,6 +586,10 @@ CStreaming::LoadCdDirectory(const char *dirname, int n)
 			lastID = -1;
 		}
 
+		if(bAddToStreaming && (modelId < 0 || modelId >= NUMSTREAMINFO)){
+			CFileMgr::CloseFile(fd);
+			return false;
+		}
 		if(bAddToStreaming){
 			if(ms_aInfoForModel[modelId].GetCdSize()){
 				debug("%s.%s appears more than once in %s\n", direntry.name, dot+1, dirname);
@@ -477,6 +605,7 @@ CStreaming::LoadCdDirectory(const char *dirname, int n)
 	}
 
 	CFileMgr::CloseFile(fd);
+	return status == 0;
 }
 
 static char*
@@ -631,9 +760,17 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 			return false;
 		}
 		PUSH_MEMID(MEMID_STREAM_ANIMATION);
-		CAnimManager::LoadAnimFile(stream, true, nil);
-		CAnimManager::CreateAnimAssocGroups();
+		bool success = CAnimManager::LoadAnimFile(stream, true, nil);
+		if(success)
+			CAnimManager::CreateAnimAssocGroups();
 		POP_MEMID();
+		if(!success){
+			debug("Failed to load animation block %d\n", streamId - STREAM_OFFSET_ANIM);
+			RemoveModel(streamId);
+			ReRequestModel(streamId);
+			RwStreamClose(stream, &mem);
+			return false;
+		}
 	}
 
 	RwStreamClose(stream, &mem);

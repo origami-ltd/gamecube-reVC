@@ -859,7 +859,6 @@ CMenuManager::InitialiseChangedLanguageSettings(void)
 		bFrontEnd_ReloadObrTxtGxt = false;
 
 		CTimer::Stop();
-		TheText.Unload();
 		TheText.Load();
 		CTimer::Update();
 

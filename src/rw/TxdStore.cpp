@@ -38,8 +38,12 @@ CTxdStore::GameShutdown(void)
 int
 CTxdStore::AddTxdSlot(const char *name)
 {
+	if(ms_pTxdPool == nil || name == nil || strlen(name) >= sizeof(TxdDef::name) ||
+	   ms_pTxdPool->GetNoOfFreeSpaces() == 0)
+		return -1;
 	TxdDef *def = ms_pTxdPool->New();
-	assert(def);
+	if(def == nil)
+		return -1;
 	def->texDict = nil;
 	def->refCount = 0;
 	strcpy(def->name, name);
@@ -127,9 +131,10 @@ bool
 CTxdStore::LoadTxd(int slot, RwStream *stream)
 {
 	TxdDef *def = GetSlot(slot);
+	RwUInt32 size;
 
-	if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, nil, nil)){
-		def->texDict = RwTexDictionaryGtaStreamRead(stream);
+	if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil)){
+		def->texDict = RwTexDictionaryGtaStreamRead(stream, size);
 		return def->texDict != nil;
 	}
 	printf("Failed to load TXD\n");
@@ -158,8 +163,9 @@ bool
 CTxdStore::StartLoadTxd(int slot, RwStream *stream)
 {
 	TxdDef *def = GetSlot(slot);
-	if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, nil, nil)){
-		def->texDict = RwTexDictionaryGtaStreamRead1(stream);
+	RwUInt32 size;
+	if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil)){
+		def->texDict = RwTexDictionaryGtaStreamRead1(stream, size);
 		return def->texDict != nil;
 	}else{
 		printf("Failed to load TXD\n");

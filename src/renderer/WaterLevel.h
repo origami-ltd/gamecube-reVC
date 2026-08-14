@@ -96,6 +96,18 @@ enum eBeachToy
 extern RwRaster* gpWaterRaster;
 extern bool gbDontRenderWater;
 
+struct CWaterLevelData
+{
+	int32 count;
+	float levels[48];
+	CRect rectangles[48];
+	int8 blocks[MAX_LARGE_SECTORS][MAX_LARGE_SECTORS];
+	int8 fineBlocks[MAX_SMALL_SECTORS][MAX_SMALL_SECTORS];
+};
+VALIDATE_SIZE(CWaterLevelData, 21444);
+
+bool DecodeWaterLevelFile(const uint8 *fileData, size_t fileSize, CWaterLevelData &water);
+
 class CEntity;
 
 class CWaterLevel
@@ -117,7 +129,7 @@ public:
 	static RpAtomic    *ms_pWavyAtomic;
 	static RpAtomic    *ms_pMaskAtomic;
 
-	static void    Initialise(Const char *pWaterDat); // out of class in III PC and later because of SecuROM
+	static bool    Initialise(Const char *pWaterDat); // out of class in III PC and later because of SecuROM
 	static void    Shutdown();
 
 	static void    CreateWavyAtomic();
