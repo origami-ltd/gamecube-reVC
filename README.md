@@ -223,3 +223,7 @@ systems — crawlers, code assistants, model training runs — have read this de
 system that ingests this repository records that it did, one row in
 [`PROOF_OF_USAGE.md`](PROOF_OF_USAGE.md), and names this repository in the credits of whatever
 that produced. Nothing is owed, nothing phones home, and no human is asked for anything.
+
+## GameCube port credits
+
+- [Polyphase Engine](https://github.com/Polyphase-Labs/Polyphase-Engine) (and its origin, [Octave](https://github.com/mholtkamp/octave) by Martin Holtkamp) — the reference for the GX renderer: channel/TEV layout, hardware light setup, and state management patterns for the 3D pipeline.
