@@ -173,6 +173,11 @@ enum Config {
 	#define GTA_HANDHELD
 #endif
 
+// (There was a GTA_OGC_MAX_LOD switch here that forced the highest-detail
+// atomic per model. It was a no-op: every one of the 3511 map objects in VC's
+// IDEs declares numAtomics = 1, so there is no second atomic to skip. LOD in
+// VC is entity-level — separate LODxxx models — not atomic-level.)
+
 // TODO(MIAMI): someone ought to find and check out uses of these defines:
 //#define GTA3_STEAM_PATCH
 //#define GTAVC_JP_PATCH
@@ -206,7 +211,16 @@ enum Config {
 
 // This is enabled for all released games except mobile
 // any debug stuff that is only left in mobile, is not in MASTER
+#ifdef GTA_OGC
+// Console builds ship as MASTER. Without it every frame still runs the
+// debug path — CDebug::DisplayScreenStrings, DebugDisplayTextBuffer and
+// FlushObrsPrintfs all execute inside DoRWStuffEndOfFrame, which latched
+// profiling measured at 22ms of a 50ms frame with only 6ms of that being
+// the retrace wait.
+#define MASTER
+#else
 //#define MASTER
+#endif
 
 // once and for all:
 // pc: FINAL & MASTER

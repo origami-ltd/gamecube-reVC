@@ -48,6 +48,18 @@
 #include "NodeName.h"
 #include "DMAudio.h"
 #include "CutsceneMgr.h"
+#include "Streaming.h"
+#ifdef GTA_OGC
+#include <ogc/lwp_watchdog.h>
+#include <malloc.h>
+// 0 = strip the per-frame profiling (timers + long HUD string) so the
+// measurement stops paying for itself. The frame overshoots one retrace
+// by only ~4ms, which is the same order as this instrumentation.
+#define OGC_PROFILE 1
+#endif
+#ifdef GTA_OGC
+unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync, gxSnapFrame, gxSnapSky, gxSnapShow;
+#endif
 #include "Lights.h"
 #include "Credits.h"
 #include "ZoneCull.h"
@@ -366,9 +378,17 @@ RwGrabScreen(RwCamera *camera, RwChar *filename)
 void
 DoRWStuffEndOfFrame(void)
 {
+#ifndef GTA_OGC
 	CDebug::DisplayScreenStrings();	// custom
 	CDebug::DebugDisplayTextBuffer();
 	FlushObrsPrintfs();
+#else
+	// These three run unconditionally every frame — MASTER does not strip
+	// them because they sit outside its guards. Latched profiling put
+	// DoRWStuffEndOfFrame at ~32ms while showRaster inside it was 15ms and
+	// all 15 of those were the retrace wait, so the remainder is here.
+	// A console build has no screen-string debug output to flush.
+#endif
 	RwCameraEndUpdate(Scene.camera);
 	RsCameraShowRaster(Scene.camera);
 #ifndef MASTER
@@ -661,6 +681,9 @@ BootLog(const char *msg)
 {
 	// open/append/close per line: libfat only commits its sector cache on
 	// fclose, and a killed emulator discards anything still cached.
+	printf("BOOT %s\n", msg);
+	extern void GeckoLog(const char*);
+	GeckoLog(msg); // live host tail via Dolphin USB Gecko (TCP 55020)
 	FILE *progress = fopen("dvd:/boot_progress.log", "a");
 	if(progress){
 		fprintf(progress, "%s\n", msg);
@@ -1568,6 +1591,78 @@ Render2dStuffAfterFade(void)
 	if (CDraw::FadeValue != 0)
 #endif
 	CHud::DrawAfterFade();
+
+#ifdef GTA_OGC
+	// FPS counter, top-left: white on black, drawn above fades
+	{
+		char fpsA[64];
+		wchar fpsW[64];
+		extern unsigned gxMeshCount, gxVertCount, gxDlMeshCount;
+		extern unsigned gxSimUs, gxRenderUs, gxStreamUs, gxGpUs, gxVsyncUs, gxHudUs, gxTexBuilds, gxIdleUs, gxAudioUs, gxFxUs, gxListUs, gxPreUs, gxTileUs, gxPostUs, gxSkyUs, gxTailUs, gxLightsUs, gxFrameUs, gxFadeUs, gxAfterUs, gxEndUs, gxCopyUs;
+		// Presentation rate, not a smoothed average. FramesPerSecond is a
+		// 30-sample mean: it reads a flat 30 straight through a 266ms hitch,
+		// which is exactly why the stutter was invisible while the counter
+		// looked healthy. Derive the rate from the measured frame period
+		// (Idle entry to Idle entry, already latched in gxSnapFrame), and
+		// hold the worst period of the last 5s so a hitch cannot scroll past
+		// between glances. A 266ms frame now reads "3 f266.0 max266".
+		unsigned per = gxSnapFrame ? gxSnapFrame : 1;
+		static unsigned worstUs;
+		static uint32 worstAt;
+		uint32 nowMs = CTimer::GetTimeInMillisecondsPauseMode();
+		if(gxSnapFrame > worstUs || nowMs - worstAt > 5000){
+			worstUs = gxSnapFrame;
+			worstAt = nowMs;
+		}
+		#if OGC_PROFILE
+		unsigned work = gxSnapFrame > gxSnapVsync ?
+		    gxSnapFrame - gxSnapVsync : 0;
+		// oom = geometry allocations the streamer had to soft-fail, mem =
+		// what streaming believes it is holding. A non-zero oom means the
+		// world is failing to load rather than failing to draw — the two look
+		// identical on screen (missing chunks, no collision, white world).
+		extern unsigned rwGeoAllocFails;
+		// fr = total free heap in KB, blk = NUMBER of free chunks (mallinfo
+		// has no largest-block field; ordblks is the count). Read together
+		// they measure fragmentation, which is the thing that actually breaks
+		// allocation here: 4484K free split across ~9200 chunks averages 486
+		// bytes each, so a megabyte-sized request fails while the total looks
+		// healthy. str = ms inside CStreaming::Update, i.e. disc I/O stalling
+		// the frame.
+		extern unsigned rwGeoAllocFails, gxStreamUs;
+		struct mallinfo mi = mallinfo();
+		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u m%uK fr%uK blk%u str%u",
+		    1000000u/per, per/1000, (per%1000)/100, worstUs/1000,
+		    work/1000, rwGeoAllocFails,
+		    (unsigned)(CStreaming::ms_memoryUsed>>10),
+		    (unsigned)(mi.fordblks>>10), (unsigned)mi.ordblks,
+		    gxStreamUs/1000);
+#else
+		sprintf(fpsA, "%u max%u", 1000000u/per, worstUs/1000);
+#endif
+		gxTileUs = 0; gxTexBuilds = 0;
+		gxMeshCount = 0;
+		gxVertCount = 0;
+		gxDlMeshCount = 0;
+		AsciiToUnicode(fpsA, fpsW);
+		CFont::SetPropOn();
+		CFont::SetScale(SCREEN_SCALE_X(0.6f), SCREEN_SCALE_Y(0.8f));
+		CFont::SetCentreOff();
+		CFont::SetRightJustifyOff();
+		CFont::SetJustifyOff();
+		CFont::SetWrapx(SCREEN_SCALE_X(8.0f) + SCREEN_SCALE_X(200.0f));
+		CFont::SetFontStyle(FONT_STANDARD);
+		CFont::SetBackgroundOn();
+		CFont::SetBackGroundOnlyTextOn();
+		CFont::SetBackgroundColor(CRGBA(0, 0, 0, 255));
+		CFont::SetDropShadowPosition(0);
+		CFont::SetColor(CRGBA(255, 255, 255, 255));
+		CFont::PrintString(SCREEN_SCALE_X(8.0f), SCREEN_SCALE_Y(8.0f), fpsW);
+		CFont::SetBackgroundOff();
+		CFont::SetBackGroundOnlyTextOff();
+	}
+#endif
+
 	CFont::DrawFonts();
 	CCredits::Render();
 	POP_RENDERGROUP();
@@ -1576,7 +1671,75 @@ Render2dStuffAfterFade(void)
 void
 Idle(void *arg)
 {
+#ifdef GTA_OGC
+	extern unsigned gxIdleUs, gxFrameUs;
+	// True frame period: Idle entry to Idle entry. Comparing this against
+	// the sum of the instrumented blocks answers whether the frame is
+	// fully accounted or whether work hides between them.
+	{
+		static unsigned long long tPrevEntry;
+		unsigned long long now = gettime();
+		if(tPrevEntry)
+			gxFrameUs = (unsigned)ticks_to_microsecs(now - tPrevEntry);
+		tPrevEntry = now;
+	}
+	unsigned long long tIdle = gettime();
+	struct IdleTimer {
+		unsigned long long t;
+		unsigned *out;
+		~IdleTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
+	} idleTimer = { tIdle, &gxIdleUs };
+	// Latch: every counter is written at a different point in the frame,
+	// so the HUD was mixing values from different frames and the sums
+	// never reconciled. Snapshot them together at the end of Idle and
+	// display the snapshot — one complete frame, internally consistent.
+	extern unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync,
+	    gxSnapFrame, gxSnapSky;
+	extern unsigned gxSimUs, gxRenderUs, gxEndUs, gxVsyncUs, gxSkyUs;
+	extern unsigned gxShowUs, gxSnapShow;
+	struct Latch {
+		~Latch(){
+			gxSnapSim = gxSimUs; gxSnapRender = gxRenderUs;
+			gxSnapEnd = gxEndUs; gxSnapVsync = gxVsyncUs;
+			gxSnapFrame = gxFrameUs; gxSnapSky = gxSkyUs;
+			gxSnapShow = gxShowUs;
+		}
+	} latch;
+#endif
 	CTimer::Update();
+
+#ifdef GTA_OGC
+	// 5s heartbeat: game state data for stall diagnosis.
+	// Written to the SD log as well as the gecko — Dolphin's emulated gecko
+	// truncates anything past a couple of dozen characters, so every field
+	// after "HB t=" was being cut off and the transport was silently useless
+	// for exactly the state we needed.
+	{
+		static uint32 lastBeat;
+		uint32 now = CTimer::GetTimeInMillisecondsPauseMode();
+		if(now - lastBeat > 5000){
+			lastBeat = now;
+			extern void GeckoLog(const char*);
+			char hb[192];
+			snprintf(hb, sizeof(hb),
+			    "HB t=%u clk=%02d:%02d fade=%d splashTgt=%d fadeSt=%d cut=%d "
+			    "strMem=%uK strReq=%d menu=%d",
+			    (unsigned)now, CClock::GetHours(), CClock::GetMinutes(),
+			    CDraw::FadeValue, TheCamera.m_FadeTargetIsSplashScreen,
+			    TheCamera.GetScreenFadeStatus(),
+			    CCutsceneMgr::IsCutsceneProcessing(),
+			    (unsigned)(CStreaming::ms_memoryUsed>>10),
+			    CStreaming::ms_numModelsRequested,
+			    FrontEndMenuManager.m_bMenuActive);
+			GeckoLog(hb);
+			FILE *f = fopen("dvd:/hb.log", "a");
+			if(f){
+				fprintf(f, "%s\n", hb);
+				fclose(f);
+			}
+		}
+	}
+#endif
 
 	tbInit();
 
@@ -1587,12 +1750,41 @@ Idle(void *arg)
 	CPointLights::InitPerFrame();
 
 	tbStartTimer(0, "CGame::Process");
+#ifdef GTA_OGC
+	// Split the frame: simulation vs everything else. Three render-side
+	// optimisations moved the frame rate by nothing and the rate is flat
+	// across a 59% swing in vertex count, so measure where the time
+	// actually goes instead of guessing.
+	{
+		extern unsigned gxSimUs;
+		unsigned long long t0 = gettime();
+		CGame::Process();
+		gxSimUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+	}
+#else
 	CGame::Process();
+#endif
 	tbEndTimer("CGame::Process");
 	POP_MEMID();
 
 	tbStartTimer(0, "DMAudio.Service");
+#ifdef GTA_OGC
+	// everything from here to the end of Idle = the "post-sim" half
+	extern unsigned gxPostUs;
+	unsigned long long tPost = gettime();
+	struct PostTimer {
+		unsigned long long t; unsigned *out;
+		~PostTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
+	} postTimer = { tPost, &gxPostUs };
+	{
+		extern unsigned gxAudioUs;
+		unsigned long long t0 = gettime();
+		DMAudio.Service();
+		gxAudioUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+	}
+#else
 	DMAudio.Service();
+#endif
 	tbEndTimer("DMAudio.Service");
 
 	if(CGame::bDemoMode && CTimer::GetTimeInMilliseconds() > (3*60 + 30)*1000 && !CCutsceneMgr::IsCutsceneProcessing()){
@@ -1606,7 +1798,16 @@ Idle(void *arg)
 		return;
 	}
 	
+#ifdef GTA_OGC
+	{
+		extern unsigned gxLightsUs;
+		unsigned long long t0 = gettime();
+		SetLightsWithTimeOfDayColour(Scene.world);
+		gxLightsUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+	}
+#else
 	SetLightsWithTimeOfDayColour(Scene.world);
+#endif
 
 	if(arg == nil)
 		return;
@@ -1633,12 +1834,28 @@ Idle(void *arg)
 			CRenderer::ClearForFrame();
 		}
 #endif
+#ifdef GTA_OGC
+		{
+			extern unsigned gxListUs, gxPreUs;
+			unsigned long long t0 = gettime();
+			CRenderer::ConstructRenderList();
+			gxListUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+			tbEndTimer("CnstrRenderList");
+
+			tbStartTimer(0, "PreRender");
+			t0 = gettime();
+			CRenderer::PreRender();
+			gxPreUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+			tbEndTimer("PreRender");
+		}
+#else
 		CRenderer::ConstructRenderList();
 		tbEndTimer("CnstrRenderList");
 
 		tbStartTimer(0, "PreRender");
 		CRenderer::PreRender();
 		tbEndTimer("PreRender");
+#endif
 
 #ifdef FIX_BUGS
 		RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void *)FALSE); // TODO: temp? this fixes OpenGL render but there should be a better place for this
@@ -1647,6 +1864,14 @@ Idle(void *arg)
 		RwCameraSetFogDistance(Scene.camera, CTimeCycle::GetFogStart());
 #endif
 
+#ifdef GTA_OGC
+		extern unsigned gxSkyUs;
+		unsigned long long tSky = gettime();
+		struct SkyTimer {
+			unsigned long long t; unsigned *out;
+			~SkyTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
+		} skyTimer = { tSky, &gxSkyUs };
+#endif
 		if(CWeather::LightningFlash && !CCullZones::CamNoRain()){
 			if(!DoRWStuffStartOfFrame_Horizon(255, 255, 255, 255, 255, 255, 255))
 				goto popret;
@@ -1657,6 +1882,9 @@ Idle(void *arg)
 				goto popret;
 		}
 
+#ifdef GTA_OGC
+		gxSkyUs = (unsigned)ticks_to_microsecs(gettime() - tSky);
+#endif
 		DefinedState();
 
 #ifndef FIX_BUGS
@@ -1665,15 +1893,41 @@ Idle(void *arg)
 #endif
 
 		tbStartTimer(0, "RenderScene");
+#ifdef GTA_OGC
+		{
+			extern unsigned gxRenderUs;
+			unsigned long long t0 = gettime();
+			RenderScene();
+			gxRenderUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+		}
+#else
 		RenderScene();
+#endif
 		tbEndTimer("RenderScene");
+#ifdef GTA_OGC
+		extern unsigned gxTailUs;
+		unsigned long long tTail = gettime();
+		struct TailTimer {
+			unsigned long long t; unsigned *out;
+			~TailTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
+		} tailTimer = { tTail, &gxTailUs };
+#endif
 
 #ifdef EXTENDED_PIPELINES
 		CustomPipes::EnvMapRender();
 #endif
 
 		RenderDebugShit();
+#ifdef GTA_OGC
+		{
+			extern unsigned gxFxUs;
+			unsigned long long t0 = gettime();
+			RenderEffects();
+			gxFxUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+		}
+#else
 		RenderEffects();
+#endif
 
 		if((TheCamera.m_BlurType == MOTION_BLUR_NONE || TheCamera.m_BlurType == MOTION_BLUR_LIGHT_SCENE) &&
 		   TheCamera.m_ScreenReductionPercentage > 0.0f)
@@ -1690,7 +1944,16 @@ Idle(void *arg)
 		tbEndTimer("RenderMotionBlur");
 
 		tbStartTimer(0, "Render2dStuff");
+#ifdef GTA_OGC
+		{
+			extern unsigned gxHudUs;
+			unsigned long long t0 = gettime();
+			Render2dStuff();
+			gxHudUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+		}
+#else
 		Render2dStuff();
+#endif
 		tbEndTimer("Render2dStuff");
 	}else{
 		CDraw::CalculateAspectRatio();
@@ -1715,11 +1978,29 @@ Idle(void *arg)
 #endif
 
 	tbStartTimer(0, "DoFade");
+#ifdef GTA_OGC
+	{
+		extern unsigned gxFadeUs;
+		unsigned long long t0 = gettime();
+		DoFade();
+		gxFadeUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+	}
+#else
 	DoFade();
+#endif
 	tbEndTimer("DoFade");
 
 	tbStartTimer(0, "Render2dStuff-Fade");
+#ifdef GTA_OGC
+	{
+		extern unsigned gxAfterUs;
+		unsigned long long t0 = gettime();
+		Render2dStuffAfterFade();
+		gxAfterUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+	}
+#else
 	Render2dStuffAfterFade();
+#endif
 	tbEndTimer("Render2dStuff-Fade");
 	// CCredits::Render(); // They added it to function above and also forgot it here
 #ifdef XBOX_MESSAGE_SCREEN
@@ -1729,7 +2010,16 @@ Idle(void *arg)
 	if (gbShowTimebars)
 		tbDisplay();
 
+#ifdef GTA_OGC
+	{
+		extern unsigned gxEndUs;
+		unsigned long long t0 = gettime();
+		DoRWStuffEndOfFrame();
+		gxEndUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+	}
+#else
 	DoRWStuffEndOfFrame();
+#endif
 
 	POP_MEMID();	// MEMID_RENDER
 

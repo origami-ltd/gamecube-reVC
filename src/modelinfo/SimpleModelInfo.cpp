@@ -142,10 +142,26 @@ CSimpleModelInfo::GetAtomicFromDistance(float dist)
 	i = 0;
 	if(m_isDamaged)
 		i = m_firstDamaged;
+#ifdef GTA_OGC_MAX_LOD
+	// Temporary: always draw the highest-detail atomic that is actually
+	// loaded, whatever the distance. Distance selection is deliberately out of
+	// the picture for now so the world can be judged at full quality; the
+	// streaming + distance-LOD logic comes back after that baseline is good.
+	//
+	// Note this also skips the stock behaviour of returning m_atomics[i] even
+	// when that slot is nil, which is what used to make a model vanish up
+	// close (near atomic not resident) while its far LOD still drew.
+	(void)dist;
+	for(; i < m_numAtomics; i++)
+		if(m_atomics[i])
+			return m_atomics[i];
+	return nil;
+#else
 	for(; i < m_numAtomics; i++)
 		if(dist < m_lodDistances[i] * TheCamera.LODDistMultiplier)
 			return m_atomics[i];
 	return nil;
+#endif
 }
 
 RpAtomic*

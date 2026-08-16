@@ -1,5 +1,12 @@
 #define WITHD3D
 #include "common.h"
+#ifdef GTA_OGC
+#include <stdio.h>
+// 1 = trace the LOD decision for sampled entities to dvd:/lod.log
+#define OGC_LOD_PROBE 0
+#else
+#define OGC_LOD_PROBE 0
+#endif
 
 #include "main.h"
 #include "Lights.h"
@@ -66,7 +73,18 @@ CEntity *CRenderer::ms_aVisibleBuildingPtrs[NUMVISIBLEENTITIES];
 CVUVECTOR CRenderer::ms_vecCameraPosition;
 CVehicle *CRenderer::m_pFirstPersonVehicle;
 bool CRenderer::m_loadingPriority;
+#ifdef GTA_OGC
+// 0.925, not the PC default of 1.2 — and this is a *memory* decision, not a
+// frame-rate one. It feeds TheCamera.LODDistMultiplier (Camera.cpp:
+// LODDistMultiplier *= ms_lodDistScale), so it sets how much world is asked
+// for at once. Streaming here gets 7428K against reVC's 65MB floor on PC, so
+// the working set has to be small enough that the streamer never overcommits;
+// at 1.2 it requests more world than the budget can hold and the surplus fails
+// to load. Raising this only helps once the budget does.
 float CRenderer::ms_lodDistScale = 1.2f;
+#else
+float CRenderer::ms_lodDistScale = 1.2f;
+#endif
 
 // unused
 BlockedRange CRenderer::aBlockedRanges[16];
@@ -758,7 +776,75 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 	if(ent->IsObject() && ent->bRenderDamaged)
 		mi->m_isDamaged = true;
 
+#ifdef GTA_OGC
+	// LOD hysteresis. Objects that sit on their own draw-distance boundary
+	// were switching every frame while the player stood still, because the
+	// threshold moves even when the camera does not: TheCamera.LODDistMultiplier
+	// is 70/FOV scaled by ms_lodDistScale and is recomputed per frame, so any
+	// FOV drift slides the boundary across a stationary object.
+	//
+	// Measured, from the scene transition log: cl_tablesetlrg (the Marco's
+	// Bistro table set) sat at dist 8.4 with m_lodDistances[0] = 7 and
+	// mult 1.2 — a threshold of exactly 8.4. It logged 2973 visibility flips,
+	// twenty times the next worst object. Streetlamp2, lamppost3 and
+	// veg_palmbig14 were the same story further down the list.
+	//
+	// Once something is on screen, keep it on screen until it is a tenth
+	// further away than the distance that would have let it appear. That
+	// costs a little draw distance and buys a stable image.
+	// ponytail: one constant, no per-entity state — m_rwObject already tells
+	// us whether this entity was being drawn.
+	RpAtomic *a = mi->GetAtomicFromDistance(ent->m_rwObject ? dist*0.9f : dist);
+#else
 	RpAtomic *a = mi->GetAtomicFromDistance(dist);
+#endif
+#if OGC_LOD_PROBE
+	// Scene stability log. Sampling every Nth entity says nothing about
+	// flicker, because flicker is a *change* over time: it only shows up as
+	// the same object switching between drawn and not-drawn. So keep the last
+	// state per model and write a line only when it flips, together with the
+	// numbers that decide it. Whatever never appears here is what the
+	// rasteriser holds on screen steadily; whatever repeats is what blinks.
+	{
+		struct LodState { int16 id; int8 pick; int8 drawn; };
+		static LodState hist[512];
+		static int32 logLeft = 600;
+		int pick = -1;
+		for(int i = mi->m_isDamaged ? mi->m_firstDamaged : 0; i < mi->m_numAtomics; i++)
+			if(dist < mi->m_lodDistances[i] * TheCamera.LODDistMultiplier){ pick = i; break; }
+		int drawn = a != nil;
+		uint32 h = ((uint32)ent->m_modelIndex) & 511;
+		LodState *st = &hist[h];
+		bool changed = st->id != (int16)ent->m_modelIndex ||
+		    st->pick != (int8)pick || st->drawn != (int8)drawn;
+		bool sameModel = st->id == (int16)ent->m_modelIndex;
+		if(changed && logLeft > 0){
+			if(sameModel){   // a real flip for this model, not a new slot
+				logLeft--;
+				char line[240];
+				snprintf(line, sizeof(line),
+				    "FLIP %-16s id=%4d dist=%6.1f mult=%.3f n=%d "
+				    "ld=%.0f,%.0f,%.0f pick=%d->%d drawn=%d->%d "
+				    "a0=%d a1=%d a2=%d loaded=%d big=%d",
+				    mi->GetModelName(), (int)ent->m_modelIndex, dist,
+				    TheCamera.LODDistMultiplier, (int)mi->m_numAtomics,
+				    mi->m_lodDistances[0], mi->m_lodDistances[1],
+				    mi->m_lodDistances[2],
+				    (int)st->pick, pick, (int)st->drawn, drawn,
+				    mi->m_numAtomics > 0 && mi->m_atomics[0] != nil,
+				    mi->m_numAtomics > 1 && mi->m_atomics[1] != nil,
+				    mi->m_numAtomics > 2 && mi->m_atomics[2] != nil,
+				    CStreaming::ms_aInfoForModel[ent->m_modelIndex].m_loadState,
+				    (int)mi->m_isBigBuilding);
+				FILE *f = fopen("dvd:/flip.log", "a");
+				if(f){ fprintf(f, "%s\n", line); fclose(f); }
+			}
+			st->id = (int16)ent->m_modelIndex;
+			st->pick = (int8)pick;
+			st->drawn = (int8)drawn;
+		}
+	}
+#endif
 	if(a){
 		mi->m_isDamaged = false;
 		if(ent->m_rwObject == nil)

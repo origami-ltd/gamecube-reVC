@@ -12,6 +12,7 @@
 
 #include <gccore.h>
 #include <ogc/machine/processor.h>
+#include <ogc/usbgecko.h>
 #include <ogc/dvd.h>
 #include <iso9660.h>
 #include <fat.h>
@@ -26,6 +27,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <stdarg.h>
+#include <malloc.h>
 
 long _dwOperatingSystemVersion = OS_WINXP;
 size_t _dwMemAvailPhys;
@@ -71,6 +73,18 @@ void __VIClearFramebuffer(void *fb, u32 size, u32 color);
 void __console_init(void *fb, int xstart, int ystart, int xres, int yres, int stride);
 }
 
+// Live host-side log line over Dolphin's emulated USB Gecko (EXI slot B,
+// TCP localhost:55020). Dolphin surfaces no libogc console output any other
+// way. Cheap no-op when no gecko is attached.
+void
+GeckoLog(const char *msg)
+{
+	// bounded retries: never hangs without a gecko, and the alive-probe
+	// false-negatives on Dolphin's emulated gecko, so don't gate on it
+	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, msg, strlen(msg), 1000);
+	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, "\n", 1, 1000);
+}
+
 static void
 panicPrintf(const char *fmt, ...)
 {
@@ -81,6 +95,7 @@ panicPrintf(const char *fmt, ...)
 	va_end(va);
 
 	fputs(line, stdout);
+	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, line, strlen(line), 1000);
 
 	CrashCookie *ck = CRASH_COOKIE;
 	size_t n = strlen(line);
@@ -175,9 +190,21 @@ gcFatalPark(const char *tag, const char *msg)
 		sp = frame[0];
 	}
 
+	struct mallinfo mi = mallinfo();
+	char heap[64];
+	snprintf(heap, sizeof(heap), "heap used %uK free %uK",
+	    (unsigned)mi.uordblks/1024, (unsigned)mi.fordblks/1024);
+
+	// Stamp the build. crash.log lives on the SD card and is appended to
+	// across every boot, so without this the entries from a dozen different
+	// binaries are indistinguishable — and resolving an old stack against the
+	// current ELF produces confident nonsense (lodepng frames inside
+	// CCullZones::Update, in one real case). Match this string against the
+	// build before trusting any address in the stack below it.
 	FILE *f = fopen("dvd:/crash.log", "a");
 	if(f){
-		fprintf(f, "---- %s ----\n%sSTACK:%s\n", tag, msg, stack);
+		fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
+		    tag, __DATE__, __TIME__, msg, heap, stack);
 		fclose(f);
 	}
 
@@ -189,7 +216,12 @@ gcFatalPark(const char *tag, const char *msg)
 	VIDEO_SetFramebuffer(xfb);
 	__VIClearFramebuffer(xfb, 640*480*VI_DISPLAY_PIX_SZ, COLOR_MAROON);
 	__console_init(xfb, 48, 48, 640-96, 480-96, 2*640);
-	printf("reVC %s\n%sSTACK:%s\n", tag, msg, stack);
+	printf("reVC %s\n%s%s\nSTACK:%s\n", tag, msg, heap, stack);
+	{
+		char line[512];
+		snprintf(line, sizeof(line), "reVC %s\n%s%s\nSTACK:%s", tag, msg, heap, stack);
+		GeckoLog(line);
+	}
 	for(;;)
 		;
 }
@@ -471,6 +503,18 @@ IsForegroundApp(void)
 	return TRUE;
 }
 
+// Physical gate of a GameCube stick, in PAD_Stick units. Tune per pad if a
+// worn stick still cannot reach full deflection.
+#define GC_STICK_RANGE    72
+#define GC_SUBSTICK_RANGE 56
+
+static inline int32
+gcStickScale(int v, int range)
+{
+	int r = v * 128 / range;
+	return r > 127 ? 127 : r < -127 ? -127 : r;
+}
+
 void
 CapturePad(RwInt32 padID)
 {
@@ -483,10 +527,18 @@ CapturePad(RwInt32 padID)
 
 	PAD_ScanPads();
 	u16 buttons = PAD_ButtonsHeld(padID);
-	state.LeftStickX = PAD_StickX(padID);
-	state.LeftStickY = -PAD_StickY(padID);
-	state.RightStickX = PAD_SubStickX(padID);
-	state.RightStickY = -PAD_SubStickY(padID);
+	// The game scales its stick axes against +-128 (see CPad, which multiplies
+	// normalised input by 128), but a GameCube stick only reaches about +-72
+	// at the physical gate and the C-stick about +-56 — PAD_StickX is
+	// calibrated, not full-scale. Passing those straight through meant a fully
+	// deflected stick asked for barely half speed and the player never ran at
+	// maximum on analog alone. Scale to the range the game expects, clamp, and
+	// keep the calibration knob visible: real pads vary and a worn stick reads
+	// lower still.
+	state.LeftStickX  =  gcStickScale(PAD_StickX(padID),    GC_STICK_RANGE);
+	state.LeftStickY  = -gcStickScale(PAD_StickY(padID),    GC_STICK_RANGE);
+	state.RightStickX =  gcStickScale(PAD_SubStickX(padID), GC_SUBSTICK_RANGE);
+	state.RightStickY = -gcStickScale(PAD_SubStickY(padID), GC_SUBSTICK_RANGE);
 	state.LeftShoulder2 = PAD_TriggerL(padID);
 	state.RightShoulder2 = PAD_TriggerR(padID);
 	state.LeftShoulder1 = (buttons & PAD_TRIGGER_L) ? 255 : 0;

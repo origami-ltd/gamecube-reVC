@@ -2,6 +2,9 @@
 #include "platform.h"
 
 #include "Game.h"
+#ifdef GTA_OGC
+#include <ogc/lwp_watchdog.h>
+#endif
 #include "main.h"
 #include "RwHelper.h"
 #include "Accident.h"
@@ -900,7 +903,19 @@ void CGame::Process(void)
 	}
 #endif
 	uint32 startTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond();
+#ifdef GTA_OGC
+	// Streaming does synchronous SD reads inside the sim step; time it
+	// apart from the rest so we know whether the frame is game logic or
+	// blocking I/O before trying to fix either.
+	{
+		extern unsigned gxStreamUs;
+		unsigned long long t0 = gettime();
+		CStreaming::Update();
+		gxStreamUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+	}
+#else
 	CStreaming::Update();
+#endif
 	uint32 processTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond() - startTime;
 	CWindModifiers::Number = 0;
 	if (!CTimer::GetIsPaused())

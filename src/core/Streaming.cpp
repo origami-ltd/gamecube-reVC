@@ -37,6 +37,10 @@
 #include "Font.h"
 #include "Frontend.h"
 #include "VarConsole.h"
+#ifdef GTA_OGC
+#include <malloc.h>
+size_t gOgcHeapUsedAtInit;
+#endif
 
 #include <new>
 
@@ -269,11 +273,53 @@ CStreaming::Init2(void)
 		extern size_t _dwMemAvailPhys;
 		// GX rasters are 16-bit tiled (RGB5A3), so resident texture cost
 		// tracks the on-disc accounting closely enough for this to hold.
-		size_t reserve = 8*MB; // engine, pools, render targets
+		// ponytail: 6MB reserve — 8MB left the budget == resident world
+		// (7.1MB budget vs 6.8MB world at spawn), so every near vehicle/
+		// ped/tree model churned in and out each frame (visible flicker).
+		// Texture/geometry allocs soft-fail now, so an undersized reserve
+		// degrades to a skipped stream load, not exit(1).
+		// 8MB reserve. Trimming this to 5-6MB to buy draw distance put the
+		// arena on a knife edge: some boots OOM'd outright (exit 1), and
+		// the ones that survived failed texture allocations instead, so
+		// gxGetTexture returned nil and the world rendered flat white.
+		// Stability first — this is the value the port shipped with.
+		// 8MB — the value with the most verified-good runs. Raising it to
+		// 10MB only moved the free-bytes-at-crash from 2.2MB to 3.5MB
+		// without preventing the crash, which says the failing allocation
+		// is a large one (Geometry::create realloc) hitting fragmentation,
+		// not a shortage of total free memory. Reserve tuning cannot fix
+		// that; smaller resident textures or real accounting can.
+		// 4MB, down from 8MB. The 8MB was picked while a failed allocation
+		// killed the process, so it bought crash-avoidance at the cost of
+		// half the arena. Both reasons are gone: Geometry::create now fails
+		// softly, and gxGetTexture no longer rebuilds already-built textures
+		// from a fabricated staging buffer (that leak is what made resident
+		// cost look ~1.85x its accounted size).
+		//
+		// The budget is the LOD bug. VC map objects have exactly one atomic
+		// each (verified across all 3511 entries in the IDEs), so LOD is not
+		// per-atomic — it is separate LODxxx entities with 700-1200 draw
+		// distances against 70-140 for the detailed model. Look at
+		// SetupBigBuildingVisibility: the far LOD is only hidden when the
+		// detailed model is resident and fully faded in. Starve streaming and
+		// the detailed model never survives, so the world is drawn entirely
+		// from LODs and every reload shows up as flicker. Give streaming a
+		// real budget and both symptoms go with it.
+		// 6MB. Measured either side of this: at 8MB the streamer only reached
+		// 7238K and detailed buildings never stayed resident, so the world
+		// drew from LODs and flickered. At 4MB it reached ~11450K accounted,
+		// which measured as ~14MB really used out of a 15620K arena — about
+		// 1.5MB spare, not enough for a burst like skipping a cutscene, and
+		// the game froze there. 6MB puts the accounted cap near 9.5MB and
+		// leaves roughly 3.5MB of real headroom for transients.
+		size_t reserve = 6*MB; // engine late allocs, render targets
 		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
 		    _dwMemAvailPhys - reserve : 4*MB;
-		desiredNumVehiclesLoaded = 5;
+		desiredNumVehiclesLoaded = 12; // reconstructed console target
 		{
+			extern size_t gOgcHeapUsedAtInit;
+			struct mallinfo mi = mallinfo();
+			gOgcHeapUsedAtInit = mi.uordblks;
 			char line[96];
 			snprintf(line, sizeof(line), "  arena %uK budget %uK",
 			    (uint32)(_dwMemAvailPhys/1024), (uint32)(ms_memoryAvailable/1024));
@@ -634,6 +680,84 @@ RegisterAtomicMemPtrsCB(RpAtomic *atomic, void *data)
 }
 #endif
 
+#ifdef GTA_OGC
+// Resident cost is accounted at cd size, x1 — deliberately, do not "fix"
+// this by scaling it up.
+//
+// A periodic TrimStreamedModels() used to run at the top of
+// ConvertBufferToObject, evicting 64 least-used models every 16th call
+// regardless of memory pressure. RemoveLeastUsedModel protects models with
+// live refs, but a model that has just streamed in has *no* refs until its
+// entity instantiates it — so the trim's favourite targets were exactly the
+// models the streamer had only just finished loading, and its cadence was
+// driven by loading itself. The more the game streamed, the more it threw
+// away: trees and lamp posts never survived to render, interior models went
+// missing, and LOD siblings vanished and returned, which is what read as
+// LOD flicker (GetAtomicFromDistance hands the renderer a nil m_atomics[i]
+// for a model evicted out from under it). The trim is gone; MakeSpaceFor
+// already evicts correctly, bounded by the budget and only as much as the
+// incoming load needs.
+//
+// The cd size is NOT the resident cost. Measured: the streamer sat at
+// ms_memoryUsed = 7238K (cd bytes) while the real arena had dropped from
+// 15620K to 2198K free — about 1.85x more resident than it believed. On PC
+// this never matters, because reVC hands streaming a 65MB floor (see Init
+// below) and the budget is never the binding constraint. Here it is 7428K,
+// roughly 9x less, so an accounting error of 1.85x is the difference between
+// a working open world and one that silently fails to load.
+//
+// Overcommitting is what produced every downstream symptom: allocations start
+// failing, and since they now fail softly instead of exit(1)-ing, models and
+// their collision simply never appear — chunks that never load, falling
+// through the map, and a white world once the texture allocator is starved.
+// Scaling this makes MakeSpaceFor stop *before* malloc fails, which is the
+// only state where the streamer's own eviction can do its job.
+//
+// ponytail: one measured scalar. The honest version is USE_CUSTOM_ALLOCATOR
+// accounting real bytes; this buys correctness now without that surgery.
+// The 1.85x that used to be here was measured while gxGetTexture was being
+// re-run on already-built textures (rasterLock handed back a fabricated,
+// zeroed staging buffer and rasterUnlock marked the raster dirty), so every
+// texture was re-tiled and re-allocated over and over. That leak is fixed, so
+// the measurement that justified the scale no longer holds — and overstating
+// resident cost keeps ms_memoryUsed permanently above ms_memoryAvailable,
+// which makes MakeSpaceFor evict on every single load. That constant churn is
+// what shows on screen as trees, props and LODs flickering in and out.
+// Real resident cost per stream entry, in bytes actually taken from the heap,
+// measured across the load. Cd size is not resident cost: a TXD arrives as
+// DXT/pal8 on disc and lives as tiled GX texture memory, a DFF arrives as a
+// chunk stream and lives as RW objects. The expansion differs per asset type,
+// so no single scale factor is right — and getting it wrong is what has been
+// oscillating this port between two failure modes. Under-count and the
+// streamer overcommits until allocations fail silently (chunks that never
+// load, falling through the map, white world). Over-count and it sits above
+// its budget, evicting on every request, which shows up as the world drawn
+// from far LODs that flicker in and out even while standing still.
+static uint32 gResidentCost[NUMSTREAMINFO];
+
+// mallinfo's uordblks underflows on a 24MB console (it reports ~305MB), but
+// arena minus fordblks is sound: total heap obtained, less what is free.
+size_t
+OgcHeapResident(void)
+{
+	struct mallinfo mi = mallinfo();
+	size_t arena = (size_t)mi.arena;
+	size_t freeb = (size_t)mi.fordblks;
+	return arena > freeb ? arena - freeb : 0;
+}
+
+static uint32
+StreamedSize(int32 streamId)
+{
+	// Fallback for the request path, which has to guess before the load
+	// happens. Once loaded, gResidentCost holds the measured value.
+	return CStreaming::ms_aInfoForModel[streamId].GetCdSize() *
+	    CDSTREAM_SECTOR_SIZE;
+}
+#else
+#define StreamedSize(id) (CStreaming::ms_aInfoForModel[id].GetCdSize() * CDSTREAM_SECTOR_SIZE)
+#endif
+
 bool
 CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 {
@@ -643,6 +767,10 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 	uint32 startTime, endTime, timeDiff;
 	CBaseModelInfo *mi;
 	bool success;
+
+#ifdef GTA_OGC
+	size_t residentBefore = OgcHeapResident();
+#endif
 
 	startTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond();
 
@@ -803,8 +931,23 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 	// Mark objects as loaded
 	if(ms_aInfoForModel[streamId].m_loadState != STREAMSTATE_STARTED){
 		ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_LOADED;
-#ifndef USE_CUSTOM_ALLOCATOR
-		ms_memoryUsed += ms_aInfoForModel[streamId].GetCdSize() * CDSTREAM_SECTOR_SIZE;
+#ifdef GTA_OGC
+		{
+			size_t after = OgcHeapResident();
+			uint32 cost = after > residentBefore ?
+			    (uint32)(after - residentBefore) : 0;
+			// Never charge zero. A shared TXD that was already resident
+			// measures a ~0 delta, and an entry charged 0 refunds 0 when it
+			// is removed — so MakeSpaceFor evicts model after model without
+			// ms_memoryUsed ever falling, and clears the entire world before
+			// giving up. Opening the pause menu was enough to trigger it.
+			// Floor at the cd size so every eviction makes progress.
+			uint32 floorCost = StreamedSize(streamId);
+			gResidentCost[streamId] = cost > floorCost ? cost : floorCost;
+			ms_memoryUsed += gResidentCost[streamId];
+		}
+#elif !defined(USE_CUSTOM_ALLOCATOR)
+		ms_memoryUsed += StreamedSize(streamId);
 #endif
 	}
 
@@ -824,6 +967,10 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 	uint32 startTime, endTime, timeDiff;
 	CBaseModelInfo *mi;
 	bool success;
+
+#ifdef GTA_OGC
+	size_t residentBefore = OgcHeapResident();
+#endif
 
 	startTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond();
 
@@ -870,8 +1017,17 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 	RwStreamClose(stream, &mem);
 
 	ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_LOADED;
-#ifndef USE_CUSTOM_ALLOCATOR
-	ms_memoryUsed += ms_aInfoForModel[streamId].GetCdSize() * CDSTREAM_SECTOR_SIZE;
+#ifdef GTA_OGC
+	{
+		size_t after = OgcHeapResident();
+		uint32 cost = after > residentBefore ?
+		    (uint32)(after - residentBefore) : 0;
+		uint32 floorCost = StreamedSize(streamId);
+		gResidentCost[streamId] = cost > floorCost ? cost : floorCost;
+		ms_memoryUsed += gResidentCost[streamId];
+	}
+#elif !defined(USE_CUSTOM_ALLOCATOR)
+	ms_memoryUsed += StreamedSize(streamId);
 #endif
 
 	if(!success){
@@ -1235,7 +1391,15 @@ CStreaming::RemoveModel(int32 id)
 			assert(id < NUMSTREAMINFO);
 			CAnimManager::RemoveAnimBlock(id - STREAM_OFFSET_ANIM);
 		}
-		ms_memoryUsed -= ms_aInfoForModel[id].GetCdSize()*CDSTREAM_SECTOR_SIZE;
+#ifdef GTA_OGC
+		// Refund exactly what this entry was charged, not a re-derived
+		// estimate, or ms_memoryUsed drifts away from reality over time.
+		ms_memoryUsed -= ms_memoryUsed >= gResidentCost[id] ?
+		    gResidentCost[id] : ms_memoryUsed;
+		gResidentCost[id] = 0;
+#else
+		ms_memoryUsed -= StreamedSize(id);
+#endif
 	}
 
 	if(ms_aInfoForModel[id].m_next){
@@ -3225,11 +3389,37 @@ CStreaming::MakeSpaceFor(int32 size)
 	}
 #undef MB
 #endif
-	while(ms_memoryUsed >= ms_memoryAvailable - size)
+	int32 want = size;
+#ifdef GTA_OGC
+	// Free a slice of headroom beyond what this load needs, so the next few
+	// loads fit without evicting anything.
+	//
+	// Stock behaviour leaves exactly `size` free, which is fine on PC where
+	// the budget is 65MB and never binds. Here the working set sits right at
+	// the budget (measured 11470K resident against 11524K available), so
+	// every single request evicted a model, and the model evicted was
+	// promptly requested again. Standing perfectly still was enough to see
+	// it: the detailed building drops out, SetupBigBuildingVisibility falls
+	// back to the far LOD because the detail is no longer resident, the
+	// detail streams back, and it flips again. That is the "flickering
+	// between near and far LOD while stationary".
+	//
+	// ponytail: a fixed slice, not a ratio — the upgrade is real resident-byte
+	// accounting, at which point the budget itself becomes trustworthy.
+	want += 512*1024;
+#endif
+	while(ms_memoryUsed >= ms_memoryAvailable - want){
+		size_t before = ms_memoryUsed;
 		if(!RemoveLeastUsedModel(STREAMFLAGS_20)){
 			DeleteRwObjectsBehindCamera(ms_memoryAvailable - size);
 			return;
 		}
+		// Stop if an eviction freed nothing measurable. Without this the loop
+		// keeps evicting while the accounting stands still and strips the
+		// world bare instead of freeing what the load asked for.
+		if(ms_memoryUsed >= before)
+			return;
+	}
 }
 
 void
