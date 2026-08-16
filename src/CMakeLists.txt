@@ -54,6 +54,14 @@ else()
     if(${PROJECT}_AUDIO_GC)
         target_compile_definitions(${EXECUTABLE} PRIVATE AUDIO_GAMECUBE)
         target_link_libraries(${EXECUTABLE} PRIVATE aesnd)
+        # Tremor: fixed-point Vorbis. The Gekko has a fast FPU but the
+        # reference libvorbis leans on doubles, and integer decode is what
+        # consoles use. dkp-pacman -S ppc-libvorbisidec.
+        target_include_directories(${EXECUTABLE} PRIVATE
+            /opt/devkitpro/portlibs/ppc/include)
+        target_link_libraries(${EXECUTABLE} PRIVATE
+            /opt/devkitpro/portlibs/ppc/lib/libvorbisidec.a
+            /opt/devkitpro/portlibs/ppc/lib/libogg.a)
     endif()
 endif()
 

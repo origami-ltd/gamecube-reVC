@@ -39,6 +39,7 @@
 #include <ogc/aram.h>
 #include <ogc/cache.h>
 #include <malloc.h>
+#include <tremor/ivorbisfile.h>
 
 cSampleManager SampleManager;
 bool8 _bSampmanInitialised = FALSE;
@@ -478,6 +479,8 @@ struct GcStreamCache {
 
 struct GcStream {
 	GcStreamCache cache;
+	OggVorbis_File vf;
+	bool8    vfOpen;
 	AESNDPB *voice;
 	uint8   *buf[2];
 	int32    fill;          // which buffer the pump should refill next
@@ -562,6 +565,43 @@ gcStreamCacheRead(GcStream *st, uint8 *dst, uint32 want)
 	return give;
 }
 
+// Tremor reads through the ARAM cache rather than the file directly, so the
+// disc is touched in bulk refills instead of on every decode call. Tremor is
+// the fixed-point Vorbis decoder: the Gekko's FPU is fast, but the reference
+// libvorbis leans on doubles, and integer decode is what consoles use.
+static size_t
+gcVorbisRead(void *ptr, size_t size, size_t nmemb, void *datasource)
+{
+	GcStream *st = (GcStream*)datasource;
+	uint32 want = (uint32)(size*nmemb);
+	uint32 got = gcStreamCacheRead(st, (uint8*)ptr, want);
+	if(got == 0 && st->file)          // cache empty and dry: read direct
+		got = (uint32)fread(ptr, 1, want, st->file);
+	return got/size;
+}
+
+static int
+gcVorbisSeek(void *, ogg_int64_t, int)
+{
+	return -1;   // unseekable: the cache is a forward-only ring
+}
+
+static int
+gcVorbisClose(void *)
+{
+	return 0;
+}
+
+static long
+gcVorbisTell(void *datasource)
+{
+	return (long)((GcStream*)datasource)->posSamples;
+}
+
+static ov_callbacks gcVorbisCallbacks = {
+	gcVorbisRead, gcVorbisSeek, gcVorbisClose, gcVorbisTell
+};
+
 // Fill dst with up to STREAM_CHUNK_BYTES of 16-bit stereo PCM at DIGITALRATE.
 // Returns bytes produced; 0 means end of track.
 //
@@ -571,18 +611,24 @@ gcStreamCacheRead(GcStream *st, uint8 *dst, uint32 want)
 static uint32
 gcStreamDecode(GcStream *st, uint8 *dst)
 {
-	if(st->file == nil)
+	if(!st->vfOpen)
 		return 0;
-	size_t got = gcStreamCacheRead(st, dst, STREAM_CHUNK_BYTES);
-	if(got == 0 && st->looping){
-		fseek(st->file, (long)st->dataStart, SEEK_SET);
-		st->posSamples = 0;
-		got = fread(dst, 1, STREAM_CHUNK_BYTES, st->file);
+	// ov_read hands back 16-bit stereo, which is what the voice wants, but it
+	// returns one packet at a time — loop until the buffer is full or the
+	// track ends.
+	uint32 done = 0;
+	while(done < STREAM_CHUNK_BYTES){
+		int bitstream = 0;
+		long n = ov_read(&st->vf, (char*)dst + done,
+		                 (int)(STREAM_CHUNK_BYTES - done), &bitstream);
+		if(n <= 0)
+			break;
+		done += (uint32)n;
 	}
-	if(got < STREAM_CHUNK_BYTES)
-		memset(dst + got, 0, STREAM_CHUNK_BYTES - got);
-	st->posSamples += (uint32)got/4;
-	return (uint32)got;
+	if(done < STREAM_CHUNK_BYTES)
+		memset(dst + done, 0, STREAM_CHUNK_BYTES - done);
+	st->posSamples += done/4;
+	return done;
 }
 
 
@@ -619,7 +665,7 @@ cSampleManager::Service(void)
 bool8
 cSampleManager::IsMP3RadioChannelAvailable(void)
 {
-	return FALSE;   // radio streaming is not written yet
+	return TRUE;
 }
 
 void
@@ -723,7 +769,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	// the pump does not care what is inside as long as gcStreamDecode yields
 	// 16-bit stereo at DIGITALRATE.
 	char path[64];
-	snprintf(path, sizeof(path), "dvd:/audio/stream%02d.raw", (int)nFile);
+	snprintf(path, sizeof(path), "dvd:/audio/stream%02d.ogg", (int)nFile);
 	st->file = fopen(path, "rb");
 	if(st->file == nil)
 		return FALSE;
@@ -739,10 +785,15 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 		fclose(st->file); st->file = nil; return FALSE;
 	}
 
-	fseek(st->file, 0, SEEK_END);
-	st->lenSamples = (uint32)(ftell(st->file)/4);
-	st->dataStart = 0;
-	fseek(st->file, (long)(st->dataStart + (size_t)nPos*4), SEEK_SET);
+	// Prime the ARAM ring before opening: Tremor's first read needs headers.
+	st->cache.head = st->cache.tail = 0;
+	st->cache.fileOffset = 0;
+	if(ov_open_callbacks(st, &st->vf, nil, 0, gcVorbisCallbacks) < 0){
+		fclose(st->file); st->file = nil;
+		return FALSE;
+	}
+	st->vfOpen = TRUE;
+	st->lenSamples = (uint32)ov_pcm_total(&st->vf, -1);
 	st->posSamples = nPos;
 	st->fill = 0;
 	st->paused = FALSE;
@@ -766,6 +817,7 @@ cSampleManager::StopStreamedFile(uint8 nStream)
 	GcStream *st = &gStreams[nStream];
 	if(st->voice)
 		AESND_SetVoiceStop(st->voice, true);
+	if(st->vfOpen){ ov_clear(&st->vf); st->vfOpen = FALSE; }
 	if(st->file){ fclose(st->file); st->file = nil; }
 	st->playing = FALSE;
 	st->posSamples = 0;
