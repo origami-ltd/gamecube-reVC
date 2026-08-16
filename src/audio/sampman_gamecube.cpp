@@ -434,11 +434,103 @@ cSampleManager::SetMusicFadeVolume(uint8 nVolume)
 	gMusicFade = nVolume;
 }
 
+// ------------------------------------------------------------------ streams
+//
+// Radio, mission dialogue and cutscenes. Three of them (MAX_STREAMS), each an
+// AESND voice in streaming mode fed from a pair of MEM1 buffers: one playing
+// while the other is refilled from disc on the Service() call the game already
+// makes every frame.
+//
+// The pump is codec-agnostic on purpose. Whatever the disc holds — DSP-ADPCM
+// decoded on the CPU, or Vorbis — arrives here as 16-bit stereo PCM at
+// DIGITALRATE, which is 32000 and already what the engine's own mixer assumed.
+// Only gcStreamDecode changes with the format, so the buffering, the voice
+// handling and the position bookkeeping do not have to be written twice.
+//
+// Double buffering rather than a ring: AESND hands the whole buffer to the DSP
+// and calls back when it wants the next one, so two is exactly the number the
+// hardware asks for.
+enum {
+	STREAM_CHUNK_SAMPLES = 4096,                    // ~128ms at 32kHz
+	STREAM_CHUNK_BYTES   = STREAM_CHUNK_SAMPLES*2*2 // 16-bit stereo
+};
+
+struct GcStream {
+	AESNDPB *voice;
+	uint8   *buf[2];
+	int32    fill;          // which buffer the pump should refill next
+	volatile bool8 wantMore;
+	FILE    *file;
+	uint32   dataStart;     // byte offset of the first sample in the file
+	uint32   posSamples;    // for GetStreamedFilePosition
+	uint32   lenSamples;
+	bool8    playing;
+	bool8    paused;
+	bool8    looping;
+};
+static GcStream gStreams[MAX_STREAMS];
+
+static void
+gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
+{
+	(void)pb;
+	// The DSP finished the buffer it had. Flag it and let Service() do the
+	// disc read — a file read has no business running on the audio callback.
+	if(state == VOICE_STATE_STREAM)
+		((GcStream*)arg)->wantMore = TRUE;
+}
+
+// Fill dst with up to STREAM_CHUNK_BYTES of 16-bit stereo PCM at DIGITALRATE.
+// Returns bytes produced; 0 means end of track.
+//
+// Placeholder until the converter settles the disc format. It reads raw
+// interleaved PCM, which is what a decoded stream looks like, so the pump can
+// be exercised before the codec exists.
+static uint32
+gcStreamDecode(GcStream *st, uint8 *dst)
+{
+	if(st->file == nil)
+		return 0;
+	size_t got = fread(dst, 1, STREAM_CHUNK_BYTES, st->file);
+	if(got == 0 && st->looping){
+		fseek(st->file, (long)st->dataStart, SEEK_SET);
+		st->posSamples = 0;
+		got = fread(dst, 1, STREAM_CHUNK_BYTES, st->file);
+	}
+	if(got < STREAM_CHUNK_BYTES)
+		memset(dst + got, 0, STREAM_CHUNK_BYTES - got);
+	st->posSamples += (uint32)got/4;
+	return (uint32)got;
+}
+
+static void
+gcStreamPump(GcStream *st)
+{
+	if(!st->playing || st->paused || !st->wantMore || st->voice == nil)
+		return;
+	uint8 *dst = st->buf[st->fill];
+	if(dst == nil)
+		return;
+	uint32 got = gcStreamDecode(st, dst);
+	if(got == 0){
+		st->playing = FALSE;
+		AESND_SetVoiceStop(st->voice, true);
+		return;
+	}
+	DCFlushRange(dst, STREAM_CHUNK_BYTES);
+	AESND_SetVoiceBuffer(st->voice, dst, STREAM_CHUNK_BYTES);
+	st->fill ^= 1;
+	st->wantMore = FALSE;
+}
+
 void
 cSampleManager::Service(void)
 {
-	// AESND runs the mix on the DSP; nothing per-frame is needed yet. The
-	// radio streams will pump their buffers from here.
+	// AESND mixes on the DSP; what the CPU owes it each frame is the next
+	// block of stream data. Reading from disc here rather than in the voice
+	// callback keeps file I/O off the audio path.
+	for(int32 i = 0; i < MAX_STREAMS; i++)
+		gcStreamPump(&gStreams[i]);
 }
 
 bool8
@@ -522,7 +614,12 @@ cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 void
 cSampleManager::PauseStream(bool8 nPauseFlag, uint8 nStream)
 {
-	;
+	if(nStream >= MAX_STREAMS)
+		return;
+	GcStream *st = &gStreams[nStream];
+	st->paused = nPauseFlag;
+	if(st->voice)
+		AESND_SetVoiceStop(st->voice, nPauseFlag || !st->playing);
 }
 
 void
@@ -534,37 +631,91 @@ cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 bool8
 cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 {
-	return FALSE;
+	if(nStream >= MAX_STREAMS)
+		return FALSE;
+	GcStream *st = &gStreams[nStream];
+	StopStreamedFile(nStream);
+
+	// One file per track, named by index. The converter decides the extension;
+	// the pump does not care what is inside as long as gcStreamDecode yields
+	// 16-bit stereo at DIGITALRATE.
+	char path[64];
+	snprintf(path, sizeof(path), "dvd:/audio/stream%02d.raw", (int)nFile);
+	st->file = fopen(path, "rb");
+	if(st->file == nil)
+		return FALSE;
+
+	if(st->voice == nil){
+		st->voice = AESND_AllocateVoiceWithArg(gcStreamCallback, st);
+		if(st->voice == nil){ fclose(st->file); st->file = nil; return FALSE; }
+	}
+	for(int32 i = 0; i < 2; i++)
+		if(st->buf[i] == nil)
+			st->buf[i] = (uint8*)memalign(32, STREAM_CHUNK_BYTES);
+	if(st->buf[0] == nil || st->buf[1] == nil){
+		fclose(st->file); st->file = nil; return FALSE;
+	}
+
+	fseek(st->file, 0, SEEK_END);
+	st->lenSamples = (uint32)(ftell(st->file)/4);
+	st->dataStart = 0;
+	fseek(st->file, (long)(st->dataStart + (size_t)nPos*4), SEEK_SET);
+	st->posSamples = nPos;
+	st->fill = 0;
+	st->paused = FALSE;
+	st->playing = TRUE;
+	st->wantMore = TRUE;
+
+	AESND_SetVoiceFormat(st->voice, VOICE_STEREO16);
+	AESND_SetVoiceFrequency(st->voice, (f32)DIGITALRATE);
+	AESND_SetVoiceVolume(st->voice, 255, 255);
+	AESND_SetVoiceStream(st->voice, true);
+	gcStreamPump(st);
+	AESND_SetVoiceStop(st->voice, false);
+	return TRUE;
 }
 
 void
 cSampleManager::StopStreamedFile(uint8 nStream)
 {
-	;
+	if(nStream >= MAX_STREAMS)
+		return;
+	GcStream *st = &gStreams[nStream];
+	if(st->voice)
+		AESND_SetVoiceStop(st->voice, true);
+	if(st->file){ fclose(st->file); st->file = nil; }
+	st->playing = FALSE;
+	st->posSamples = 0;
 }
 
 int32
 cSampleManager::GetStreamedFilePosition(uint8 nStream)
 {
-	return -1;
+	// In milliseconds, which is what the music manager expects.
+	if(nStream >= MAX_STREAMS)
+		return 0;
+	return (int32)((uint64)gStreams[nStream].posSamples*1000/DIGITALRATE);
 }
 
 int32
 cSampleManager::GetStreamedFileLength(uint8 nStream)
 {
-	return -1;
+	if(nStream >= MAX_STREAMS)
+		return 0;
+	return (int32)((uint64)gStreams[nStream].lenSamples*1000/DIGITALRATE);
 }
 
 bool8
 cSampleManager::IsStreamPlaying(uint8 nStream)
 {
-	return FALSE;
+	return nStream < MAX_STREAMS && gStreams[nStream].playing ? TRUE : FALSE;
 }
 
 void
 cSampleManager::SetStreamedFileLoopFlag(bool8 nLoopFlag, uint8 nChannel)
 {
-	;
+	if(nChannel < MAX_STREAMS)
+		gStreams[nChannel].looping = nLoopFlag;
 }
 
 void

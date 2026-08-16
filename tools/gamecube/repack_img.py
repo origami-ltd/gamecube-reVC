@@ -15,8 +15,21 @@ conversion moved here, loading a TXD is a read into a correctly sized buffer.
 
 Modelled on dca3's imgtool (https://gitlab.com/skmp/dca3-game).
 
-Usage: repack_img.py <in.img> <in.dir> <out.img> <out.dir> <txdconv>
+Usage: repack_img.py [--exclude-list FILE] [--max-dim N]
+                     <in.img> <in.dir> <out.img> <out.dir> <txdconv>
+
+--exclude-list drops entries whose base name (without extension) appears in
+FILE, one per line. Intended for textures nothing references: 411 of the 1361
+TXDs in the archive appear in no .ide, and after removing the ones loaded by
+name from code, by cutscene, or from an .ipl, 234 remain — 6.7MB. Excluding
+rather than deleting keeps the decision reversible: build both archives, swap
+the file, compare.
+
+Static analysis cannot prove a texture is unused, because a name can be built
+at runtime by string concatenation. Treat the list as a hypothesis to test by
+looking for missing textures, not as a fact.
 """
+import argparse
 import os
 import struct
 import subprocess
@@ -42,10 +55,24 @@ def sectors(n):
 
 
 def main():
-    if len(sys.argv) != 6:
-        print(__doc__)
-        return 1
-    in_img, in_dir, out_img, out_dir, txdconv = sys.argv[1:6]
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--exclude-list', help='file of base names to drop')
+    ap.add_argument('--max-dim', type=int,
+                    help='cap the largest texture axis, passed to txdconv')
+    ap.add_argument('in_img'); ap.add_argument('in_dir')
+    ap.add_argument('out_img'); ap.add_argument('out_dir')
+    ap.add_argument('txdconv')
+    args = ap.parse_args()
+    in_img, in_dir = args.in_img, args.in_dir
+    out_img, out_dir, txdconv = args.out_img, args.out_dir, args.txdconv
+
+    excluded = set()
+    if args.exclude_list:
+        for line in open(args.exclude_list):
+            line = line.strip().lower()
+            if line and not line.startswith('#'):
+                excluded.add(os.path.splitext(line)[0])
 
     entries = read_dir(in_dir)
     src = open(in_img, 'rb')
@@ -57,7 +84,12 @@ def main():
     converted = failed = copied = 0
     bytes_before = bytes_after = 0
 
+    dropped = dropped_bytes = 0
     for name, off, size in entries:
+        if os.path.splitext(name)[0].lower() in excluded:
+            dropped += 1
+            dropped_bytes += size * SECTOR
+            continue
         src.seek(off * SECTOR)
         payload = src.read(size * SECTOR)
 
@@ -66,7 +98,11 @@ def main():
             b = os.path.join(tmp, 'out.txd')
             with open(a, 'wb') as f:
                 f.write(payload)
-            r = subprocess.run([txdconv, a, b],
+            cmd = [txdconv]
+            if args.max_dim:
+                cmd += ['--max-dim', str(args.max_dim)]
+            cmd += [a, b]
+            r = subprocess.run(cmd,
                                stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL)
             if r.returncode == 0 and os.path.exists(b) and os.path.getsize(b) > 0:
@@ -95,6 +131,8 @@ def main():
     open(out_dir, 'wb').write(bytes(newdir))
 
     print('entries      : %d' % len(entries))
+    print('dropped      : %d (%.1f MB) from the exclude list'
+          % (dropped, dropped_bytes / 1048576.0))
     print('txd converted: %d' % converted)
     print('txd failed   : %d (copied through unchanged)' % failed)
     print('other copied : %d' % copied)
