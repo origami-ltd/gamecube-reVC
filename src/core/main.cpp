@@ -1662,12 +1662,13 @@ Render2dStuffAfterFade(void)
 		// bytes each, so a megabyte-sized request fails while the total looks
 		// healthy. str = ms inside CStreaming::Update, i.e. disc I/O stalling
 		// the frame.
-		extern unsigned rwGeoAllocFails, rwTexAllocFails, gxStreamUs;
+		extern unsigned rwGeoAllocFails, rwTexAllocFails, gxStreamUs, gxTiledBytes;
 		struct mallinfo mi = mallinfo();
-		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u/%u m%uK fr%uK blk%u str%u",
+		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u/%u m%uK tex%uK fr%uK blk%u str%u",
 		    1000000u/per, per/1000, (per%1000)/100, worstUs/1000,
 		    work/1000, rwGeoAllocFails, rwTexAllocFails,
 		    (unsigned)(CStreaming::ms_memoryUsed>>10),
+		    gxTiledBytes>>10,
 		    (unsigned)(mi.fordblks>>10), (unsigned)mi.ordblks,
 		    gxStreamUs/1000);
 #else
