@@ -111,7 +111,14 @@ watchdogMain(void*)
 			// closed, so the report named the last phase ENTERED rather than
 			// where the thread actually was. They close now, and the name is
 			// worth the extra line.
-			snprintf(part, sizeof(part), "HANG@%s", gPhase ? gPhase : "-");
+			// GP status FIRST and short. Gecko drops what it cannot drain, so
+			// the second line has been lost every time — and it was the line
+			// carrying the one fact that decides the whole question: r1c1 is
+			// an idle GP with the CPU stuck elsewhere, r0c0 is a stalled GP.
+			snprintf(part, sizeof(part), "HANG r%uc%u s%u", rdIdle, cmdIdle,
+			    (unsigned)gGameState);
+			GeckoLog(part);
+			snprintf(part, sizeof(part), "at %s", gPhase ? gPhase : "-");
 			GeckoLog(part);
 			snprintf(part, sizeof(part), "H s%u m%d %s v%u r%uc%u",
 			    (unsigned)gGameState,

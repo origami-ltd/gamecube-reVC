@@ -3253,6 +3253,25 @@ CMenuManager::LoadSettings()
 void
 CMenuManager::SaveSettings()
 {
+#ifdef GTA_OGC
+	// Skipped while the freeze is being chased, and the evidence points here.
+	//
+	// Closing the pause menu is what stops the game, and closing is what writes
+	// gta_vc.set. The watchdog says the GP is idle (r1c1) and the thread is
+	// inside DoRWStuffEndOfFrame, while its own fopen never lands even
+	// unguarded — newlib serialises stdio globally, so the main thread being
+	// stuck inside a file call explains every observation at once.
+	//
+	// Writing is what makes this path different from everything else the game
+	// does: the archive is read-only, and this truncates and rewrites, which is
+	// the FAT allocation path rather than an append. boot.sh has always needed
+	// fsck_msdos on the card before every boot, which is what damage from that
+	// path looks like.
+	//
+	// Losing the settings file costs nothing next to not being able to close a
+	// menu. Put this back once the write path is understood.
+	return;
+#endif
 #ifndef LOAD_INI_SETTINGS
 	static char RubbishString[48] = "stuffmorestuffevenmorestuff                 etc";
 #ifdef BIND_VEHICLE_FIREWEAPON
