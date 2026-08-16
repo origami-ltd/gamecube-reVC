@@ -102,7 +102,11 @@ that is the last marker `Idle` sets. Any conclusion in an older log resting on
 
 ### Things not yet tried
 
-- Instrument inside `LoadAllTextures` itself, per `CTxdStore::LoadTxd` call.
+- **Done, unread:** `LoadAllTextures` is now instrumented step by step —
+  `menu-space1`, `menu-fronten1`, `menu-usedmem`, `menu-space2`,
+  `menu-fronten2`. The next freeze on opening should name one of them, and
+  which one decides the fix: a stall in `MakeSpaceFor` is the streamer evicting
+  under a 716KB reservation, a stall in `LoadTxd` is the file path.
 - Check whether `MakeSpaceFor(350 sectors)` before the load is enough, given
   `d3d8::readNativeTexture` keeps a D3D raster, a full RGBA8 Image and a
   staging buffer live per texture. The card's dictionaries are converted now,
