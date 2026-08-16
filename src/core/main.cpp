@@ -1604,7 +1604,11 @@ Render2dStuffAfterFade(void)
 	// and two buttons because L and A are both used constantly in normal play
 	// — a shorter hold or a single button would fire by accident mid-mission.
 	{
-		static bool32 hudShown;
+		// On by default: the readout is what every measurement in this port is
+		// made from, and hiding it by default made it look like the numbers had
+		// disappeared. L + A held for three seconds hides it when you want to
+		// actually look at the game.
+		static bool32 hudShown = TRUE;
 		static uint32 holdStart;
 		CPad *pad = CPad::GetPad(0);
 		bool32 combo = pad && pad->NewState.LeftShoulder1 && pad->NewState.Cross;
@@ -1658,11 +1662,11 @@ Render2dStuffAfterFade(void)
 		// bytes each, so a megabyte-sized request fails while the total looks
 		// healthy. str = ms inside CStreaming::Update, i.e. disc I/O stalling
 		// the frame.
-		extern unsigned rwGeoAllocFails, gxStreamUs;
+		extern unsigned rwGeoAllocFails, rwTexAllocFails, gxStreamUs;
 		struct mallinfo mi = mallinfo();
-		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u m%uK fr%uK blk%u str%u",
+		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u/%u m%uK fr%uK blk%u str%u",
 		    1000000u/per, per/1000, (per%1000)/100, worstUs/1000,
-		    work/1000, rwGeoAllocFails,
+		    work/1000, rwGeoAllocFails, rwTexAllocFails,
 		    (unsigned)(CStreaming::ms_memoryUsed>>10),
 		    (unsigned)(mi.fordblks>>10), (unsigned)mi.ordblks,
 		    gxStreamUs/1000);

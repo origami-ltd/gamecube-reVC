@@ -369,26 +369,23 @@ CStreaming::Init2(void)
 		// Measure any change in the intro cutscene, not in a stationary street:
 		// an earlier revision measured 4652-5812K free in an alley, concluded
 		// there was room to spare, cut this to 2MB and shipped a freeze.
-		// Expressed as a BUDGET, not as a reserve. The reserve framing caused
-		// real confusion — it is the leftover, not the knob — and the variable
-		// the game actually enforces (ms_memoryAvailable) is a budget. Set
-		// this; the headroom is whatever the arena has beyond it.
+		// A RESERVE again, and 2MB, because that is the shape and the value
+		// that renders correctly. An earlier revision restated this as a direct
+		// budget of 3MB, which sounds similar and is not remotely: a 2MB reserve
+		// leaves the streamer about 14MB, so "budget = 3MB" cut resident world to
+		// a fifth and broke the picture. Reserve is the leftover, budget is
+		// arena minus it; do not swap the two again.
 		//
-		// 3MB, chosen against the failure that is visible on screen rather than
-		// against free bytes. Raising the budget does NOT monotonically improve
-		// the picture: past the point where the working set fits, ms_memoryUsed
-		// sits at or above the cap, MakeSpaceFor evicts on every single request,
-		// and that churn is what flickers — models coming and going between
-		// frames. Measured earlier at a 10264K budget: strMem oscillated
-		// 9830-12570K, permanently at or over the cap, with strReq never draining
-		// below 43. A smaller budget the streamer can actually stay inside beats
-		// a larger one it thrashes against.
-		//
-		// Whatever this is set to, judge it in the intro cutscene and while
-		// moving, not standing still in a street: an earlier revision measured
-		// 4652-5812K free in an alley, concluded there was room to spare, and
-		// shipped a freeze.
-		ms_memoryAvailable = 3*MB;
+		// This value is unreasonably sensitive — every move in either direction
+		// has broken something (6MB: characters lost their textures and drew as
+		// black silhouettes; 3MB budget: world stopped rendering; 2MB reserve
+		// measured in an alley: froze in the cutscene). That fragility is itself
+		// the bug and is not understood yet. It most likely means an allocation
+		// failure path is being reached silently rather than that 2MB is magic.
+		// Do not tune this again without first finding out why it is a cliff.
+		size_t reserve = 2*MB; // engine late allocs, render targets
+		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
+		    _dwMemAvailPhys - reserve : 4*MB;
 		desiredNumVehiclesLoaded = 12; // reconstructed console target
 		{
 			extern size_t gOgcHeapUsedAtInit;
