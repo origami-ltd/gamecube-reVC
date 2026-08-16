@@ -1279,6 +1279,13 @@ CAnimManager::CreateAnimAssocGroups(void)
 		RpClump *clump = (RpClump*)mi->CreateInstance();
 #ifdef GTA_OGC
 		BootLog(clump ? "   inst ok" : "   inst NIL");
+		// CreateInstance can fail — the model may not be resident, or its load
+		// may have failed — and everything below dereferences the clump. Stock
+		// code assumes it always succeeds, which on a console with a real
+		// memory ceiling means a nil deref during boot rather than one missing
+		// animation group.
+		if(clump == nil)
+			continue;
 #endif
 		RpAnimBlendClumpInit(clump);
 		CAnimBlendAssocGroup *group = &ms_aAnimAssocGroups[i];

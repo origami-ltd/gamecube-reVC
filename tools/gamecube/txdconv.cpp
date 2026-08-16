@@ -237,7 +237,14 @@ main(int argc, char **argv)
 		if(convertTexture(Texture::fromDict(lnk), &convs[n]))
 			n++;
 	}
-	if(n == 0){ fprintf(stderr, "no textures converted\n"); return 1; }
+	// An empty dictionary is legal — Vice City ships several — and writing a
+	// valid empty GX one matters, because copying the D3D8 original through
+	// instead leaves a mixed-platform archive. On this build every
+	// engine->driver slot is overridden with the GX functions, so a D3D8
+	// raster that survives into the game would be handed to gx::rasterToImage
+	// and its DXT payload read as linear pixels.
+	if(n == 0)
+		fprintf(stderr, "%s: empty dictionary, writing an empty GX one\n", argv[1]);
 
 	uint32 total = 12 + 4;              // struct header + texture count
 	for(int i = 0; i < n; i++)
