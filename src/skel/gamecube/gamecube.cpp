@@ -111,8 +111,31 @@ watchdogMain(void*)
 			    gxLastPath ? gxLastPath : "-", gxWaitRetrace,
 			    rdIdle, cmdIdle);
 			GeckoLog(part);
+
+			// And to the SD, deliberately WITHOUT the filesystem guard.
+			//
+			// Guarding it is what made the first version silent: when the game
+			// is stuck the main thread is usually stuck holding libfat, so the
+			// watchdog queued behind it and the one report that matters never
+			// landed. At this point the run is already over — an unclean FAT
+			// volume costs nothing, boot.sh fsck's it before every boot anyway,
+			// and a report that arrives beats a volume that stays tidy.
+			//
+			// Gecko goes first, so if this call does block, the short line has
+			// already left the machine.
+			snprintf(line, sizeof(line),
+			    "HANG phase=%s tick=%u state=%u menu=%d vsync=%u gx=%s "
+			    "cam=%ux%u gp rd=%u cmd=%u over=%u under=%u brk=%u",
+			    gPhase ? gPhase : "-", (unsigned)gFrameTick,
+			    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
+			    gxWaitRetrace, gxLastPath ? gxLastPath : "-", gxCamW, gxCamH,
+			    rdIdle, cmdIdle, overhi, underlow, brkpt);
+			FILE *hf = fopen("dvd:/hang.log", "a");
+			if(hf){
+				fprintf(hf, "%s\n", line);
+				fclose(hf);
+			}
 		}
-		(void)line;
 	}
 	return nil;
 }
