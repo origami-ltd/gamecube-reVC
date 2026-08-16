@@ -806,6 +806,43 @@ RegisterAtomicMemPtrsCB(RpAtomic *atomic, void *data)
 // from far LODs that flicker in and out even while standing still.
 static uint32 gResidentCost[NUMSTREAMINFO];
 
+// Texture bytes the resident-cost measurement cannot see.
+//
+// gResidentCost is a heap delta taken across the load. rasterFromImage tiles
+// eagerly, so textures built there land inside that window and are already
+// charged — but gxGetTexture also runs from the draw path, for rasters that
+// were not built eagerly or whose tiled buffer was released, and those
+// allocations happen after the window has closed. Up to 512KB each, charged to
+// nobody. ms_memoryUsed then sits under the truth, the streamer believes it
+// has room it does not have, and the texture allocation eventually fails —
+// silently, which is why it shows up as black silhouettes rather than as an
+// out-of-memory.
+//
+// Charging only what falls OUTSIDE the window is exact by construction: no
+// double counting, and no guessing at a scale factor.
+bool gStreamMeasuring;
+
+extern "C" void
+CStreamingTexBytes(long delta)
+{
+	if(delta >= 0)
+		CStreaming::ms_memoryUsed += (size_t)delta;
+	else{
+		size_t d = (size_t)(-delta);
+		CStreaming::ms_memoryUsed -= d <= CStreaming::ms_memoryUsed ?
+		    d : CStreaming::ms_memoryUsed;
+	}
+}
+
+// True while a load's heap delta is being measured, so the hook above knows
+// the allocation is already accounted for.
+extern "C" int
+CStreamingMeasuring(void)
+{
+	return gStreamMeasuring ? 1 : 0;
+}
+
+
 // Reported per heartbeat interval, see MakeSpaceFor for what the pair means.
 uint32 gStrEvict, gStrLoad;
 
@@ -844,6 +881,7 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 #ifdef GTA_OGC
 	size_t residentBefore = OgcHeapResident();
+	gStreamMeasuring = true;
 	gStrLoad++;
 #endif
 
@@ -1008,7 +1046,8 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 		ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_LOADED;
 #ifdef GTA_OGC
 		{
-			size_t after = OgcHeapResident();
+			gStreamMeasuring = false;
+		size_t after = OgcHeapResident();
 			uint32 cost = after > residentBefore ?
 			    (uint32)(after - residentBefore) : 0;
 			// Never charge zero. A shared TXD that was already resident
@@ -1045,6 +1084,7 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 
 #ifdef GTA_OGC
 	size_t residentBefore = OgcHeapResident();
+	gStreamMeasuring = true;
 	gStrLoad++;
 #endif
 
@@ -1095,6 +1135,7 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 	ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_LOADED;
 #ifdef GTA_OGC
 	{
+		gStreamMeasuring = false;
 		size_t after = OgcHeapResident();
 		uint32 cost = after > residentBefore ?
 		    (uint32)(after - residentBefore) : 0;

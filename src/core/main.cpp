@@ -676,14 +676,21 @@ ResetLoadingScreenBar()
 }
 
 #ifdef GTA_OGC
+// Whether boot breadcrumbs are painted on the TV as well as sent to the Gecko
+// and the SD. Off by default: on screen it is a full-page wall of text over
+// the loading screen. Toggled by holding L + A for three seconds.
+bool gShowBootConsole = false;
+
 // Boot-stage breadcrumbs: the last line in this file names the load stage
 // that hung or crashed. Console loads are slow and opaque otherwise.
 void
 BootLog(const char *msg)
 {
-	// open/append/close per line: libfat only commits its sector cache on
-	// fclose, and a killed emulator discards anything still cached.
-	printf("BOOT %s\n", msg);
+	// The printf goes to the libogc console, which paints white-on-black text
+	// straight over the loading screen — and it is redundant, because the same
+	// line already goes to the Gecko and to the SD. Off unless asked for.
+	if(gShowBootConsole)
+		printf("BOOT %s\n", msg);
 	extern void GeckoLog(const char*);
 	GeckoLog(msg); // live host tail via Dolphin USB Gecko (TCP 55020)
 	DVD_FS_GUARD;
@@ -1604,11 +1611,9 @@ Render2dStuffAfterFade(void)
 	// and two buttons because L and A are both used constantly in normal play
 	// — a shorter hold or a single button would fire by accident mid-mission.
 	{
-		// On by default: the readout is what every measurement in this port is
-		// made from, and hiding it by default made it look like the numbers had
-		// disappeared. L + A held for three seconds hides it when you want to
-		// actually look at the game.
-		static bool32 hudShown = TRUE;
+		// The FPS readout is always drawn — every measurement in this port is
+		// made from it. What L + A toggles is the boot console, which is the
+		// thing that actually covers the screen.
 		static uint32 holdStart;
 		CPad *pad = CPad::GetPad(0);
 		bool32 combo = pad && pad->NewState.LeftShoulder1 && pad->NewState.Cross;
@@ -1618,14 +1623,12 @@ Render2dStuffAfterFade(void)
 		else if(holdStart == 0)
 			holdStart = nowMs;
 		else if(nowMs - holdStart >= 3000){
-			hudShown = !hudShown;
+			gShowBootConsole = !gShowBootConsole;
 			holdStart = 0;
 			// Swallow the hold so releasing and re-pressing is required,
 			// rather than toggling once every three seconds while held.
 			pad->NewState.LeftShoulder1 = 0;
 		}
-		if(!hudShown)
-			goto skipDebugHud;
 	}
 	{
 		char fpsA[64];
@@ -1695,7 +1698,6 @@ Render2dStuffAfterFade(void)
 		CFont::SetBackgroundOff();
 		CFont::SetBackGroundOnlyTextOff();
 	}
-skipDebugHud:;
 #endif
 
 	CFont::DrawFonts();
