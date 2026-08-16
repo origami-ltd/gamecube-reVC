@@ -7,6 +7,7 @@
 #include "crossplatform.h"
 
 #include "FileMgr.h"
+#include "CdStream.h"
 
 const char *_psGetUserFilesFolder();
 
@@ -62,9 +63,18 @@ void mychdir(char const *path)
 #endif
 
 /* Force file to open as binary but remember if it was text mode */
+// Every game file operation funnels through these five, and libfat is shared
+// with the streaming worker, which reads the archive on its own thread. Guard
+// here rather than at the callers: it is one place instead of fifty, and a
+// caller that forgets is exactly the bug this is for. Closing the pause menu
+// writes gta_vc.set through this path while the streamer is busy, which is
+// where the game stops.
 static int
 myfopen(const char *filename, const char *mode)
 {
+#ifdef GTA_OGC
+	DVD_FS_GUARD;
+#endif
 	int fd;
 	char realmode[10], *p;
 
@@ -92,6 +102,9 @@ found:
 static int
 myfclose(int fd)
 {
+#ifdef GTA_OGC
+	DVD_FS_GUARD;
+#endif
 	int ret;
 	assert(fd < NUMFILES);
 	if(myfiles[fd].file){
@@ -153,6 +166,9 @@ myfgets(char *buf, int len, int fd)
 static size_t
 myfread(void *buf, size_t elt, size_t n, int fd)
 {
+#ifdef GTA_OGC
+	DVD_FS_GUARD;
+#endif
 	if(myfiles[fd].isText){
 		unsigned char *p;
 		size_t i;
@@ -174,6 +190,9 @@ myfread(void *buf, size_t elt, size_t n, int fd)
 static size_t
 myfwrite(void *buf, size_t elt, size_t n, int fd)
 {
+#ifdef GTA_OGC
+	DVD_FS_GUARD;
+#endif
 	if(myfiles[fd].isText){
 		unsigned char *p;
 		size_t i;
@@ -195,6 +214,9 @@ myfwrite(void *buf, size_t elt, size_t n, int fd)
 static int
 myfseek(int fd, long offset, int whence)
 {
+#ifdef GTA_OGC
+	DVD_FS_GUARD;
+#endif
 	return fseek(myfiles[fd].file, offset, whence);
 }
 

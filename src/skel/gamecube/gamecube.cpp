@@ -82,13 +82,37 @@ watchdogMain(void*)
 		    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
 		    gxWaitRetrace, gxLastPath ? gxLastPath : "-",
 		    gxCamW, gxCamH);
-		GeckoLog("HANG");
-		DVD_FS_GUARD;
-		FILE *f = fopen("dvd:/hang.log", "a");
-		if(f){
-			fprintf(f, "%s\n", line);
-			fclose(f);
+		// Gecko only, deliberately. The first version wrote this to dvd:/ and
+		// got nothing: when the game is stuck the main thread is stuck holding
+		// libfat, so the watchdog's own fopen blocks behind it and the one
+		// report that matters never lands. A hang reporter cannot depend on
+		// the subsystem the hang might be in. Gecko is EXI and independent, so
+		// it still gets through — it just truncates past a couple of dozen
+		// characters, hence one field per line rather than one long line.
+		// ONE line, and a short one. Five separate GeckoLog calls lost all but
+		// the first: Dolphin's emulated Gecko truncates past a couple of dozen
+		// characters and drops what it cannot drain, so a multi-line report is
+		// a report that does not arrive. Everything is abbreviated to fit:
+		// H <phase-initial> s<state> m<menu> <gxpath> v<vsync> r<rdIdle>c<cmdIdle>
+		char part[48];
+		// Ask the GP directly, from a thread that is not blocked on it. The
+		// bounded wait in showRaster turned out to be too late to catch this:
+		// when the GP stalls, the FIFO fills, and the CPU parks in whichever
+		// GX call runs next — GX_CopyDisp, well before GX_DrawDone. So the
+		// draw-sync deadline never gets a chance to fire and no GPSTALL is
+		// written even though the GP is the thing that stopped.
+		// rd/cmd idle both 0 with the frame counter frozen IS a stalled GP.
+		{
+			u8 overhi = 0, underlow = 0, rdIdle = 0, cmdIdle = 0, brkpt = 0;
+			GX_GetGPStatus(&overhi, &underlow, &rdIdle, &cmdIdle, &brkpt);
+			snprintf(part, sizeof(part), "H%c s%u m%d %s v%u r%uc%u",
+			    gPhase ? gPhase[0] : '?', (unsigned)gGameState,
+			    (int)FrontEndMenuManager.m_bMenuActive,
+			    gxLastPath ? gxLastPath : "-", gxWaitRetrace,
+			    rdIdle, cmdIdle);
+			GeckoLog(part);
 		}
+		(void)line;
 	}
 	return nil;
 }

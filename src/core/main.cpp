@@ -1801,18 +1801,40 @@ Idle(void *arg)
 			// bug you cannot trigger on demand costs a boot per attempt.
 			// Fires once, after the world has settled, so it reproduces the
 			// real case (menu over a loaded game) rather than menu-over-nothing.
+			// It opens AND closes, because the two fail differently and only
+			// the pair separates them: with the SD contention reduced the game
+			// got past opening and started stopping on the way out instead,
+			// which is the interesting half now. Closing also writes
+			// gta_vc.set, so the exit is a filesystem event as much as a
+			// rendering one.
 			{
-				static bool32 autoMenuDone;
-				if(!autoMenuDone && now > 30000 &&
-				   !FrontEndMenuManager.m_bMenuActive){
+				// Open, close, open again. The freeze survives one whole
+				// cycle and only lands on the SECOND open, which is what says
+				// it is state the close does not release rather than a race —
+				// so a reproduction that stops after one cycle reproduces
+				// nothing.
+				static int autoMenuStep;
+				bool menuUp = FrontEndMenuManager.m_bMenuActive;
+				if(autoMenuStep == 0 && now > 30000 && !menuUp){
 					DVD_FS_GUARD;
 					FILE *am = fopen("dvd:/automenu.txt", "r");
 					if(am){
 						fclose(am);
-						autoMenuDone = true;
-						GeckoLog("AUTOMENU");
+						autoMenuStep = 1;
+						GeckoLog("AUTOMENU o1");
 						FrontEndMenuManager.RequestFrontEndStartUp();
 					}
+				}else if(autoMenuStep == 1 && menuUp){
+					autoMenuStep = 2;
+					GeckoLog("AUTOMENU c1");
+					FrontEndMenuManager.RequestFrontEndShutDown();
+				}else if(autoMenuStep == 2 && !menuUp){
+					autoMenuStep = 3;
+					GeckoLog("AUTOMENU o2");
+					FrontEndMenuManager.RequestFrontEndStartUp();
+				}else if(autoMenuStep == 3 && menuUp){
+					autoMenuStep = 4;
+					GeckoLog("AUTOMENU survived");
 				}
 			}
 			// Allocation size histogram, so the block size of any pool comes
