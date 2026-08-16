@@ -73,10 +73,17 @@ def main():
                     help="sox -C for the 128kbps radio (default 4)")
     ap.add_argument("--sfx-quality", type=int, default=1,
                     help="sox -C for the 64kbps mono files (default 1)")
+    ap.add_argument("--subdir", default="audio",
+                    help="output subdirectory; the game looks under audio/")
     args = ap.parse_args()
 
     need("ffmpeg")
     need("sox")
+    # The game builds its paths from StreamedNameTable ("AUDIO\\WILD.ADF"),
+    # so the output has to land in audio/ with the same base names. Keeping the
+    # names rather than numbering them is what lets the backend reuse that
+    # table instead of maintaining a second mapping that would drift.
+    args.dst = os.path.join(args.dst, args.subdir) if args.subdir else args.dst
     os.makedirs(args.dst, exist_ok=True)
 
     tmp = os.path.join(args.dst, ".adf.tmp.mp3")

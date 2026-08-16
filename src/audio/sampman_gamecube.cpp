@@ -40,6 +40,7 @@
 #include <ogc/cache.h>
 #include <malloc.h>
 #include <tremor/ivorbisfile.h>
+#include <ctype.h>
 
 cSampleManager SampleManager;
 bool8 _bSampmanInitialised = FALSE;
@@ -765,11 +766,23 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	GcStream *st = &gStreams[nStream];
 	StopStreamedFile(nStream);
 
-	// One file per track, named by index. The converter decides the extension;
-	// the pump does not care what is inside as long as gcStreamDecode yields
-	// 16-bit stereo at DIGITALRATE.
-	char path[64];
-	snprintf(path, sizeof(path), "dvd:/audio/stream%02d.ogg", (int)nFile);
+	// StreamedNameTable in sampman.h already maps every track to its file —
+	// "AUDIO\\WILD.ADF" and so on — so translate that rather than inventing a
+	// second numbering that would silently drift from the game's own enum.
+	// Backslash to slash, and whatever extension it carries becomes .ogg
+	// because convert_audio.py re-encodes both .adf and .mp3.
+	if((uint32)nFile >= ARRAY_SIZE(StreamedNameTable))
+		return FALSE;
+	char path[80];
+	strcpy(path, "dvd:/");
+	const char *src = StreamedNameTable[nFile];
+	char *d = path + 5;
+	for(; *src && d < path + sizeof(path) - 5; src++)
+		*d++ = *src == '\\' ? '/' : (char)tolower((unsigned char)*src);
+	*d = '\0';
+	char *dot = strrchr(path, '.');
+	if(dot)
+		strcpy(dot, ".ogg");
 	st->file = fopen(path, "rb");
 	if(st->file == nil)
 		return FALSE;
