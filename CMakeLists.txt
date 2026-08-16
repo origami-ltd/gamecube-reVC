@@ -43,7 +43,9 @@ if(NOT COMMAND reVC_platform_target)
 endif()
 
 if(NINTENDO_OGC)
-    set(${PROJECT}_AUDIOS "NULL")
+    # GC is the AESND + ARAM backend; NULL is still selectable to build without
+    # audio at all, which is what the port shipped with until now.
+    set(${PROJECT}_AUDIOS "GC" "NULL")
 elseif(WIN32)
     set(${PROJECT}_AUDIOS "OAL" "MSS")
 else()
@@ -51,7 +53,7 @@ else()
 endif()
 
 if(NINTENDO_OGC)
-    set(${PROJECT}_AUDIO "NULL" CACHE STRING "Audio" FORCE)
+    set(${PROJECT}_AUDIO "GC" CACHE STRING "Audio")
 else()
     set(${PROJECT}_AUDIO "OAL" CACHE STRING "Audio")
 endif()

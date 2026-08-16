@@ -1,5 +1,5 @@
 #include "common.h"
-#if !defined(AUDIO_OAL) &&  !defined(AUDIO_MSS)
+#if !defined(AUDIO_OAL) && !defined(AUDIO_MSS) && !defined(AUDIO_GAMECUBE)
 #include "sampman.h"
 #include "AudioManager.h"
 

@@ -25,6 +25,10 @@ typedef uint8 u8;
 
 enum { GXFMT_RGB5A3 = 0x5, GXFMT_CMPR = 0xE };
 
+// Largest texture axis kept, in texels. 512 is the original; halving to 256
+// quarters the bytes of every texture above it. Set with --max-dim.
+static int gMaxDim = 512;
+
 // ---- the same tiling the console backend uses, byte for byte ---------------
 static inline void
 sampleSrc(const u8 *src, int w, int h, int dx, int dy, int tw, int th,
@@ -153,6 +157,20 @@ convertTexture(Texture *tex, Conv *out)
 	int w = img->width, h = img->height;
 	if(w <= 0 || h <= 0){ img->destroy(); return false; }
 
+	// Halve until both axes are inside gMaxDim, keeping powers of two: GX
+	// wrapping and mipmapping want them, and 512 -> 480 would break that for a
+	// 12% saving while 512 -> 256 is a clean quarter of the bytes.
+	//
+	// Texture data is 191.6MB of the 329.8MB archive — 58% — so this is the
+	// only lever on disc size that is worth pulling, and on a 480-line display
+	// the detail being dropped is not detail anyone can see.
+	int shift = 0;
+	while((w >> shift) > gMaxDim || (h >> shift) > gMaxDim){
+		if((w >> shift) <= 4 || (h >> shift) <= 4)
+			break;   // never reduce below a single compression block
+		shift++;
+	}
+
 	u8 *rgba = (u8*)malloc((size_t)w*h*4);
 	bool gradientAlpha = false;
 	for(int y = 0; y < h; y++)
@@ -162,6 +180,27 @@ convertTexture(Texture *tex, Conv *out)
 		d[0]=s[0]; d[1]=s[1]; d[2]=s[2];
 		d[3] = img->bpp >= 4 ? s[3] : 255;
 		if(d[3] > 16 && d[3] < 240) gradientAlpha = true;
+	}
+
+	// Box filter, one halving at a time. Averaging 2x2 rather than dropping
+	// every other texel matters here: point sampling a diffuse texture down
+	// two levels aliases badly on the sort of tiled surfaces this game is
+	// mostly made of.
+	for(int s = 0; s < shift; s++){
+		int nw = w/2, nh = h/2;
+		if(nw < 1 || nh < 1) break;
+		u8 *dst = (u8*)malloc((size_t)nw*nh*4);
+		for(int y = 0; y < nh; y++)
+		for(int x = 0; x < nw; x++)
+		for(int c = 0; c < 4; c++){
+			const u8 *a = rgba + (((size_t)(2*y)  *w + 2*x  )*4);
+			const u8 *b = rgba + (((size_t)(2*y)  *w + 2*x+1)*4);
+			const u8 *e = rgba + (((size_t)(2*y+1)*w + 2*x  )*4);
+			const u8 *f = rgba + (((size_t)(2*y+1)*w + 2*x+1)*4);
+			dst[((size_t)y*nw + x)*4 + c] =
+			    (u8)((a[c] + b[c] + e[c] + f[c] + 2)/4);
+		}
+		free(rgba); rgba = dst; w = nw; h = nh;
 	}
 
 	// CMPR is 4bpp and fine for anything without a gradient alpha ramp;
@@ -224,14 +263,31 @@ writeNative(StreamFile *s, Conv *c)
 int
 main(int argc, char **argv)
 {
-	if(argc < 3){ fprintf(stderr, "usage: %s in.txd out.txd\n", argv[0]); return 1; }
+	// --max-dim N caps the largest texture axis, halving in powers of two.
+	// Texture data is 191.6MB of the 329.8MB archive, so this is the only
+	// lever on disc size worth pulling.
+	int argi = 1;
+	while(argi < argc && strncmp(argv[argi], "--", 2) == 0){
+		if(strcmp(argv[argi], "--max-dim") == 0 && argi+1 < argc){
+			gMaxDim = atoi(argv[argi+1]);
+			if(gMaxDim < 8) gMaxDim = 8;
+			argi += 2;
+		}else{
+			fprintf(stderr, "unknown option %s\n", argv[argi]);
+			return 1;
+		}
+	}
+	if(argc - argi < 2){
+		fprintf(stderr, "usage: %s [--max-dim N] in.txd out.txd\n", argv[0]);
+		return 1;
+	}
 
 	Engine::init();
 	Engine::open(nil);
 	Engine::start();
 
 	StreamFile in;
-	if(in.open(argv[1], "rb") == nil){ fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
+	if(in.open(argv[argi], "rb") == nil){ fprintf(stderr, "cannot open %s\n", argv[argi]); return 1; }
 	if(!findChunk(&in, ID_TEXDICTIONARY, nil, nil)){ fprintf(stderr, "not a TXD\n"); return 1; }
 	TexDictionary *txd = TexDictionary::streamRead(&in);
 	in.close();
@@ -259,7 +315,7 @@ main(int argc, char **argv)
 	total += 12;                        // empty extension
 
 	StreamFile out;
-	if(out.open(argv[2], "wb") == nil){ fprintf(stderr, "cannot write %s\n", argv[2]); return 1; }
+	if(out.open(argv[argi+1], "wb") == nil){ fprintf(stderr, "cannot write %s\n", argv[argi+1]); return 1; }
 	writeChunkHeader(&out, ID_TEXDICTIONARY, total);
 	writeChunkHeader(&out, ID_STRUCT, 4);
 	out.writeU16((uint16)n);
@@ -280,6 +336,6 @@ main(int argc, char **argv)
 
 	uint32 bytes = 0;
 	for(int i = 0; i < n; i++) bytes += convs[i].size;
-	printf("%s -> %s : %d textures, %u KB tiled\n", argv[1], argv[2], n, bytes>>10);
+	printf("%s -> %s : %d textures, %u KB tiled\n", argv[argi], argv[argi+1], n, bytes>>10);
 	return 0;
 }

@@ -51,6 +51,10 @@ else()
     # libogc rejects defining both __gamecube__ and __wii__, so this is its own
     # macro rather than a reuse of either.
     target_compile_definitions(${EXECUTABLE} PRIVATE GTA_OGC)
+    if(${PROJECT}_AUDIO_GC)
+        target_compile_definitions(${EXECUTABLE} PRIVATE AUDIO_GAMECUBE)
+        target_link_libraries(${EXECUTABLE} PRIVATE aesnd)
+    endif()
 endif()
 
 if(ANDROID)
