@@ -3052,6 +3052,11 @@ void
 CMenuManager::LoadAllTextures()
 {
 #ifdef GTA_OGC
+	// Step by step, because "menu-loadtex" only says the freeze is somewhere in
+	// a function that reserves streaming memory twice and loads two dictionaries
+	// through CFileMgr. Which of those four it is decides everything: a stall in
+	// MakeSpaceFor is the streamer evicting, a stall in LoadTxd is the file
+	// path, and they call for opposite fixes.
 	gPhase = "menu-loadtex";
 #endif
 	if (m_bSpritesLoaded)
@@ -3061,6 +3066,7 @@ CMenuManager::LoadAllTextures()
 	m_LeftMostRadioX = MENU_X_LEFT_ALIGNED(MENURADIO_ICON_FIRST_X - MENURADIO_ICON_SIZE);
 	CTimer::Stop();
 
+	gPhase = "menu-space1";
 	CStreaming::MakeSpaceFor(350 * CDSTREAM_SECTOR_SIZE); // twice of it in mobile
 	CStreaming::ImGonnaUseStreamingMemory();
 	CGame::TidyUpMemory(false, true);
@@ -3071,6 +3077,7 @@ CMenuManager::LoadAllTextures()
 		frontendTxdSlot1 = CTxdStore::AddTxdSlot("frontend1");
 
 	printf("LOAD frontend1\n");
+	gPhase = "menu-fronten1";
 	CTxdStore::LoadTxd(frontendTxdSlot1, "MODELS/FRONTEN1.TXD");
 	CTxdStore::AddRef(frontendTxdSlot1);
 	CTxdStore::SetCurrentTxd(frontendTxdSlot1);
@@ -3081,9 +3088,11 @@ CMenuManager::LoadAllTextures()
 	}
 
 	CTxdStore::PopCurrentTxd();
+	gPhase = "menu-usedmem";
 	CStreaming::IHaveUsedStreamingMemory();
 
 	if (!m_OnlySaveMenu) {
+		gPhase = "menu-space2";
 		CStreaming::MakeSpaceFor(692 * CDSTREAM_SECTOR_SIZE); // twice of it in mobile
 		CStreaming::ImGonnaUseStreamingMemory();
 		CTxdStore::PushCurrentTxd();
@@ -3094,6 +3103,7 @@ CMenuManager::LoadAllTextures()
 			frontendTxdSlot2 = CTxdStore::AddTxdSlot("frontend2");
 
 		printf("LOAD frontend2\n");
+		gPhase = "menu-fronten2";
 		CTxdStore::LoadTxd(frontendTxdSlot2, "MODELS/FRONTEN2.TXD");
 		CTxdStore::AddRef(frontendTxdSlot2);
 		CTxdStore::SetCurrentTxd(frontendTxdSlot2);
