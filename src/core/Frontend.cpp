@@ -473,11 +473,28 @@ CMenuManager::CMenuManager()
 	m_PrefsRadioStation = 0;
 	m_PrefsStereoMono = 1;
 	m_PrefsBrightness = 256;
+#ifdef GTA_OGC
+	// Every visual option on by default, and the draw distance at the top of
+	// the slider's own range (0.925..1.8). The port is meant to be judged with
+	// the effects on and turned down from Options, not shipped quietly
+	// conservative.
+	//
+	// Worth knowing while the pause menu still freezes: Options is the only
+	// place these can be turned back down, so if the draw distance makes the
+	// streamer unstable it is this line that has to move, not a setting.
+	m_PrefsLOD = 1.8f;
+	CRenderer::ms_lodDistScale = m_PrefsLOD;
+#else
 	m_PrefsLOD = CRenderer::ms_lodDistScale;
+#endif
 	m_KeyPressedCode = -1;
 	m_bFrontEnd_ReloadObrTxtGxt = false;
 	m_PrefsMP3BoostVolume = 0;
+#ifdef GTA_OGC
+	m_PrefsShowSubtitles = 1;
+#else
 	m_PrefsShowSubtitles = 0;
+#endif
 	m_PrefsShowLegends = 1;
 #ifdef ASPECT_RATIO_SCALE
 	m_PrefsUseWideScreen = AR_AUTO;
@@ -3097,7 +3114,12 @@ CMenuManager::LoadSettings()
 
 	int32 prevLang = m_PrefsLanguage;
 	MousePointerStateHelper.bInvertVertically = true;
+#ifdef GTA_OGC
+	// Trails on with the rest of the effects; Options turns them off.
+	CMBlur::BlurOn = true;
+#else
 	CMBlur::BlurOn = false;
+#endif
 
 	// 50 is silly
 	char headerText[50];
