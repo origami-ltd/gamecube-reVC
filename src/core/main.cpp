@@ -60,6 +60,7 @@
 #ifdef GTA_OGC
 namespace rw { extern unsigned rwAllocLive[16], rwAllocTotal[16], rwAllocLiveBytes[16]; }
 unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync, gxSnapFrame, gxSnapSky, gxSnapShow;
+unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream, gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
 #endif
 #include "Lights.h"
 #include "Credits.h"
@@ -1687,6 +1688,46 @@ Render2dStuffAfterFade(void)
 		gxMeshCount = 0;
 		gxVertCount = 0;
 		gxDlMeshCount = 0;
+		// Per-phase breakdown, in microseconds, fixed order so the columns
+		// stay in the same place frame to frame and a change is visible
+		// without reading the labels. "oth" is the residual: frame period
+		// minus everything instrumented. A large residual means the cost is
+		// somewhere nothing measures yet, which is the single most useful
+		// thing this line can tell you — every other column is a known
+		// suspect, that one is the unknown.
+		{
+			extern unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream,
+			    gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
+			unsigned acc = gxSnapSim + gxSnapRender + gxSnapSky + gxSnapFx +
+			    gxSnapHud + gxSnapLights + gxSnapTile + gxSnapStream +
+			    gxSnapCopy + gxSnapGp + gxSnapVsync;
+			unsigned other = gxSnapFrame > acc ? gxSnapFrame - acc : 0;
+			char phA[96];
+			wchar phW[96];
+			sprintf(phA,
+			    "sim%u rnd%u sky%u fx%u hud%u lit%u tile%u str%u cpy%u gp%u vs%u oth%u",
+			    gxSnapSim/100, gxSnapRender/100, gxSnapSky/100, gxSnapFx/100,
+			    gxSnapHud/100, gxSnapLights/100, gxSnapTile/100,
+			    gxSnapStream/100, gxSnapCopy/100, gxSnapGp/100,
+			    gxSnapVsync/100, other/100);
+			AsciiToUnicode(phA, phW);
+			CFont::SetPropOn();
+			CFont::SetScale(SCREEN_SCALE_X(0.4f), SCREEN_SCALE_Y(0.6f));
+			CFont::SetCentreOff();
+			CFont::SetRightJustifyOff();
+			CFont::SetJustifyOff();
+			CFont::SetWrapx(SCREEN_SCALE_X(8.0f) + SCREEN_SCALE_X(420.0f));
+			CFont::SetFontStyle(FONT_STANDARD);
+			CFont::SetBackgroundOn();
+			CFont::SetBackGroundOnlyTextOn();
+			CFont::SetBackgroundColor(CRGBA(0, 0, 0, 255));
+			CFont::SetDropShadowPosition(0);
+			CFont::SetColor(CRGBA(180, 220, 255, 255));
+			CFont::PrintString(SCREEN_SCALE_X(8.0f), SCREEN_SCALE_Y(56.0f), phW);
+			CFont::SetBackgroundOff();
+			CFont::SetBackGroundOnlyTextOff();
+		}
+
 		AsciiToUnicode(fpsA, fpsW);
 		CFont::SetPropOn();
 		CFont::SetScale(SCREEN_SCALE_X(0.6f), SCREEN_SCALE_Y(0.8f));
@@ -1751,12 +1792,26 @@ Idle(void *arg)
 	    gxSnapFrame, gxSnapSky;
 	extern unsigned gxSimUs, gxRenderUs, gxEndUs, gxVsyncUs, gxSkyUs;
 	extern unsigned gxShowUs, gxSnapShow;
+	// The rest of the phases were measured but never latched, so anything
+	// reading them mixed values from different frames — the exact problem the
+	// latch above exists to solve, applied to seven counters out of twenty-two.
+	// A profiler whose columns come from different frames cannot be summed
+	// against the frame period, which is the one check that says whether the
+	// frame is fully accounted for.
+	extern unsigned gxHudUs, gxFxUs, gxSkyUs, gxTileUs, gxStreamUs,
+	    gxCopyUs, gxGpUs, gxLightsUs, gxIdleUs;
+	extern unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream,
+	    gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
 	struct Latch {
 		~Latch(){
 			gxSnapSim = gxSimUs; gxSnapRender = gxRenderUs;
 			gxSnapEnd = gxEndUs; gxSnapVsync = gxVsyncUs;
 			gxSnapFrame = gxFrameUs; gxSnapSky = gxSkyUs;
 			gxSnapShow = gxShowUs;
+			gxSnapHud = gxHudUs; gxSnapFx = gxFxUs;
+			gxSnapTile = gxTileUs; gxSnapStream = gxStreamUs;
+			gxSnapCopy = gxCopyUs; gxSnapGp = gxGpUs;
+			gxSnapLights = gxLightsUs; gxSnapIdle = gxIdleUs;
 		}
 	} latch;
 #endif
