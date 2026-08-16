@@ -192,8 +192,14 @@ convertTexture(Texture *tex, Conv *out)
 static void
 writeNative(StreamFile *s, Conv *c)
 {
+	// TEXTURENATIVE holds the struct *and* a per-texture extension chunk.
+	// TexDictionary::streamRead calls Texture::s_plglist.streamRead right
+	// after the native read and then checks that the stream landed exactly on
+	// the declared end of this chunk. Omit the extension and every converted
+	// dictionary fails to load, the streamer re-requests it forever, and the
+	// console drains its heap on the retry loop while streaming sits frozen.
 	uint32 payload = GXNATIVE_HEADER + 4 + c->size;
-	writeChunkHeader(s, ID_TEXTURENATIVE, 12 + payload);
+	writeChunkHeader(s, ID_TEXTURENATIVE, 12 + payload + 12);
 	writeChunkHeader(s, ID_STRUCT, payload);
 	u8 header[GXNATIVE_HEADER];
 	memset(header, 0, sizeof(header));
@@ -212,6 +218,7 @@ writeNative(StreamFile *s, Conv *c)
 	s->write8(header, sizeof(header));
 	s->writeU32(c->size);
 	s->write8(c->tiled, c->size);
+	writeChunkHeader(s, ID_EXTENSION, 0);
 }
 
 int
@@ -248,7 +255,7 @@ main(int argc, char **argv)
 
 	uint32 total = 12 + 4;              // struct header + texture count
 	for(int i = 0; i < n; i++)
-		total += 12 + 12 + GXNATIVE_HEADER + 4 + convs[i].size;
+		total += 12 + 12 + GXNATIVE_HEADER + 4 + convs[i].size + 12;
 	total += 12;                        // empty extension
 
 	StreamFile out;
