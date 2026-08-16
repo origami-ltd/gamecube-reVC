@@ -682,6 +682,19 @@ ResetLoadingScreenBar()
 // the loading screen. Toggled by holding L + A for three seconds.
 bool gShowBootConsole = false;
 
+// Whether the periodic diagnostics are written to the SD.
+//
+// Suspected of causing the freeze rather than recording it. The watchdog's own
+// unguarded fopen came back empty while the game was stuck, and an unguarded
+// write cannot be blocked by the GP — so libfat itself was wedged. The last
+// heartbeat before the stop showed ev=0 ld=0: the streaming worker was idle, so
+// the only thing touching the filesystem was this. boot.sh has always had to
+// fsck_msdos the card before every boot, which was read as a symptom of the
+// freeze and may be its cause.
+//
+// Off by default. Gecko carries the same lines and is a separate transport.
+bool gLogToSd = false;
+
 // Boot-stage breadcrumbs: the last line in this file names the load stage
 // that hung or crashed. Console loads are slow and opaque otherwise.
 void
@@ -695,7 +708,7 @@ BootLog(const char *msg)
 	extern void GeckoLog(const char*);
 	GeckoLog(msg); // live host tail via Dolphin USB Gecko (TCP 55020)
 	DVD_FS_GUARD;
-	FILE *progress = fopen("dvd:/boot_progress.log", "a");
+	FILE *progress = gLogToSd ? fopen("dvd:/boot_progress.log", "a") : nil;
 	if(progress){
 		fprintf(progress, "%s\n", msg);
 		fclose(progress);
@@ -1942,7 +1955,7 @@ Idle(void *arg)
 				for(int b = 0; b < 16; b++)
 					n += snprintf(h1+n, sizeof(h1)-n, " %u", rw::rwAllocTotal[b]);
 				DVD_FS_GUARD;
-				FILE *fa = fopen("dvd:/alloc.log", "a");
+				FILE *fa = gLogToSd ? fopen("dvd:/alloc.log", "a") : nil;
 				if(fa){
 					fprintf(fa, "%s\n", h1);
 					n = snprintf(h1, sizeof(h1), "ALLOC live");
@@ -1958,7 +1971,7 @@ Idle(void *arg)
 				}
 			}
 			DVD_FS_GUARD;
-			FILE *f = fopen("dvd:/hb.log", "a");
+			FILE *f = gLogToSd ? fopen("dvd:/hb.log", "a") : nil;
 			if(f){
 				fprintf(f, "%s\n", hb);
 				fclose(f);
@@ -1969,6 +1982,7 @@ Idle(void *arg)
 
 	gPhase = "tbinit";
 	tbInit();
+	gPhase = "after-tbinit";
 
 	CSprite2d::InitPerFrame();
 	CFont::InitPerFrame();
@@ -1992,6 +2006,7 @@ Idle(void *arg)
 #else
 	gPhase = "process";
 	CGame::Process();
+	gPhase = "after-process";
 #endif
 	tbEndTimer("CGame::Process");
 	POP_MEMID();
@@ -2200,6 +2215,7 @@ Idle(void *arg)
 	tbStartTimer(0, "RenderMenus");
 	gPhase = "menus";
 	RenderMenus();
+	gPhase = "after-menus";
 	tbEndTimer("RenderMenus");
 
 #ifdef PS2_MENU
@@ -2232,12 +2248,14 @@ Idle(void *arg)
 #else
 	gPhase = "2dafterfade";
 	Render2dStuffAfterFade();
+	gPhase = "after-2dafterfade";
 #endif
 	tbEndTimer("Render2dStuff-Fade");
 	// CCredits::Render(); // They added it to function above and also forgot it here
 #ifdef XBOX_MESSAGE_SCREEN
 	gPhase = "overlays";
 	FrontEndMenuManager.DrawOverlays();
+	gPhase = "after-overlays";
 #endif
 
 	if (gbShowTimebars)
@@ -2254,6 +2272,7 @@ Idle(void *arg)
 #else
 	gPhase = "endofframe";
 	DoRWStuffEndOfFrame();
+	gPhase = "after-endofframe";
 #endif
 
 	POP_MEMID();	// MEMID_RENDER

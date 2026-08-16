@@ -42,6 +42,8 @@
 #include <tremor/ivorbisfile.h>
 #include <ctype.h>
 
+void GeckoLog(const char *msg);
+
 cSampleManager SampleManager;
 bool8 _bSampmanInitialised = FALSE;
 
@@ -118,8 +120,12 @@ cSampleManager::Initialise(void)
 			AESND_SetVoiceStop(gChannels[i].voice, true);
 	}
 
+	// Not fatal when the bank is absent. The card does not carry audio yet,
+	// and the null backend this replaces always reported success — failing
+	// init here would turn "no sound" into "no boot", which is a strictly
+	// worse way to be missing audio.
 	if(!InitialiseSampleBanks())
-		return FALSE;
+		GeckoLog("audio: no sfx bank, sound disabled");
 
 	_bSampmanInitialised = TRUE;
 	return TRUE;

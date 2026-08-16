@@ -105,8 +105,16 @@ watchdogMain(void*)
 		{
 			u8 overhi = 0, underlow = 0, rdIdle = 0, cmdIdle = 0, brkpt = 0;
 			GX_GetGPStatus(&overhi, &underlow, &rdIdle, &cmdIdle, &brkpt);
-			snprintf(part, sizeof(part), "H%c s%u m%d %s v%u r%uc%u",
-			    gPhase ? gPhase[0] : '?', (unsigned)gGameState,
+			// The phase name in full, on its own short line. Sending only its
+			// first letter made every hang read as "endofframe", because that
+			// was the last marker Idle set — the markers were opened and never
+			// closed, so the report named the last phase ENTERED rather than
+			// where the thread actually was. They close now, and the name is
+			// worth the extra line.
+			snprintf(part, sizeof(part), "HANG@%s", gPhase ? gPhase : "-");
+			GeckoLog(part);
+			snprintf(part, sizeof(part), "H s%u m%d %s v%u r%uc%u",
+			    (unsigned)gGameState,
 			    (int)FrontEndMenuManager.m_bMenuActive,
 			    gxLastPath ? gxLastPath : "-", gxWaitRetrace,
 			    rdIdle, cmdIdle);
