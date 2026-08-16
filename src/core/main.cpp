@@ -58,6 +58,7 @@
 #define OGC_PROFILE 1
 #endif
 #ifdef GTA_OGC
+namespace rw { extern unsigned rwAllocLive[16], rwAllocTotal[16], rwAllocLiveBytes[16]; }
 unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync, gxSnapFrame, gxSnapSky, gxSnapShow;
 #endif
 #include "Lights.h"
@@ -1732,6 +1733,30 @@ Idle(void *arg)
 			    CStreaming::ms_numModelsRequested,
 			    FrontEndMenuManager.m_bMenuActive);
 			GeckoLog(hb);
+			// Allocation size histogram, so the block size of any pool comes
+			// out of measured demand instead of intuition. tot = every
+			// allocation ever made in that bucket (the churn that fragments),
+			// live = how many of them are still outstanding.
+			{
+				char h1[256];
+				int n = snprintf(h1, sizeof(h1), "ALLOC tot");
+				for(int b = 0; b < 16; b++)
+					n += snprintf(h1+n, sizeof(h1)-n, " %u", rw::rwAllocTotal[b]);
+				FILE *fa = fopen("dvd:/alloc.log", "a");
+				if(fa){
+					fprintf(fa, "%s\n", h1);
+					n = snprintf(h1, sizeof(h1), "ALLOC live");
+					for(int b = 0; b < 16; b++)
+						n += snprintf(h1+n, sizeof(h1)-n, " %u", rw::rwAllocLive[b]);
+					fprintf(fa, "%s\n", h1);
+					n = snprintf(h1, sizeof(h1), "ALLOC kb");
+					for(int b = 0; b < 16; b++)
+						n += snprintf(h1+n, sizeof(h1)-n, " %u",
+						    rw::rwAllocLiveBytes[b]>>10);
+					fprintf(fa, "%s\n", h1);
+					fclose(fa);
+				}
+			}
 			FILE *f = fopen("dvd:/hb.log", "a");
 			if(f){
 				fprintf(f, "%s\n", hb);
