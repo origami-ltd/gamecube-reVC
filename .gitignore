@@ -361,3 +361,6 @@ codewarrior/Release/
 codewarrior/Debug/
 
 src/extras/GitSHA1.cpp
+# GameCube port: out-of-tree builds and toolchain payloads consolidated in-tree
+/build/
+/toolchain/

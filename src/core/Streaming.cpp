@@ -312,7 +312,47 @@ CStreaming::Init2(void)
 		// 1.5MB spare, not enough for a burst like skipping a cutscene, and
 		// the game froze there. 6MB puts the accounted cap near 9.5MB and
 		// leaves roughly 3.5MB of real headroom for transients.
-		size_t reserve = 6*MB; // engine late allocs, render targets
+		// 4MB, down from 6MB — and this is the trade the handoff says not to
+		// make, so here is why the precondition now holds. Cutting the reserve
+		// is only dangerous when it takes real headroom the exterior needs.
+		// gxPackGeometry now quantises every streamed geometry's positions and
+		// texcoords to int16 and frees the float arrays, and that reclaim was
+		// measured in the same alley, textures resident, at the same 6MB
+		// reserve: free bytes went 2890K -> 5157K. So 2.2MB of real headroom
+		// exists that did not exist when 6MB was chosen, and spending 2MB of it
+		// on budget leaves ~3.1MB free — the same order as the "roughly 3.5MB
+		// for transients" the 6MB value was picked to provide.
+		//
+		// What this buys: arena 16408K at a 6MB reserve gave budget 10264K,
+		// while measured strMem oscillated 9830-12570K. The streamer was
+		// permanently AT OR ABOVE its cap, so MakeSpaceFor evicted on every
+		// request and strReq never drained below 43. That constant churn is the
+		// LOD fallback: SetupBigBuildingVisibility keeps the far shell whenever
+		// the detailed model is not resident and faded in, and nothing stayed
+		// resident. 4MB puts the budget at 12312K, above that working set.
+		//
+		// 2MB, down from 4MB, and this one is backed by the number the earlier
+		// versions of this comment were guessing at. The stated reason not to
+		// trust free bytes was fragmentation — 5423K spread over 12085 chunks
+		// averages 460 bytes, so a big Geometry::create could fail with
+		// megabytes free. mallinfo has no largest-block field, so that stayed
+		// a fear rather than a measurement. The heartbeat now probes it
+		// directly (malloc, halving down from 2MB, freed immediately) and the
+		// answer at a 4MB reserve was **maxblk=2048K in every single sample** —
+		// the probe's own ceiling, never once lower. The arena is not
+		// fragmented in any way that matters; total free was the honest number
+		// after all.
+		//
+		// What forces the spend: with the budget at 12300K and the player
+		// standing still, the streamer logged ev=280 evictions against ld=325
+		// loads every five seconds. Nearly every load costs a model, and the
+		// evicted model is immediately re-requested. That is thrash, and it is
+		// what leaves ~17 on-screen entities per frame holding a far LOD shell
+		// instead of their detailed model.
+		//
+		// Watch maxblk and oom, not free, when judging whether this went too
+		// far: maxblk falling under ~1MB, or oom leaving 0, is the real signal.
+		size_t reserve = 2*MB; // engine late allocs, render targets
 		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
 		    _dwMemAvailPhys - reserve : 4*MB;
 		desiredNumVehiclesLoaded = 12; // reconstructed console target
@@ -735,6 +775,9 @@ RegisterAtomicMemPtrsCB(RpAtomic *atomic, void *data)
 // from far LODs that flicker in and out even while standing still.
 static uint32 gResidentCost[NUMSTREAMINFO];
 
+// Reported per heartbeat interval, see MakeSpaceFor for what the pair means.
+uint32 gStrEvict, gStrLoad;
+
 // mallinfo's uordblks underflows on a 24MB console (it reports ~305MB), but
 // arena minus fordblks is sound: total heap obtained, less what is free.
 size_t
@@ -770,6 +813,7 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 #ifdef GTA_OGC
 	size_t residentBefore = OgcHeapResident();
+	gStrLoad++;
 #endif
 
 	startTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond();
@@ -970,6 +1014,7 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 
 #ifdef GTA_OGC
 	size_t residentBefore = OgcHeapResident();
+	gStrLoad++;
 #endif
 
 	startTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond();
@@ -3410,6 +3455,15 @@ CStreaming::MakeSpaceFor(int32 size)
 #endif
 	while(ms_memoryUsed >= ms_memoryAvailable - want){
 		size_t before = ms_memoryUsed;
+#ifdef GTA_OGC
+		// Counted so "the streamer is thrashing" stops being a guess. Against
+		// the loads completed over the same interval this separates the two
+		// failure modes that look identical on screen: evictions ~= loads is
+		// churn (the budget is too small and every load costs a model), while
+		// evictions ~= 0 with loads still trickling means capacity is fine and
+		// the backlog is a rate limit somewhere else.
+		gStrEvict++;
+#endif
 		if(!RemoveLeastUsedModel(STREAMFLAGS_20)){
 			DeleteRwObjectsBehindCamera(ms_memoryAvailable - size);
 			return;

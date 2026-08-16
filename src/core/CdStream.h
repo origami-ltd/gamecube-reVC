@@ -71,4 +71,26 @@ extern bool flushStream[MAX_CDCHANNELS];
 }
 #endif
 
+
+#ifdef GTA_OGC
+// libfat is one shared resource: the streaming worker reads the archive
+// through it while the main thread writes dvd:/ logs through it. Serialise
+// every use behind one lock — see the note in CdStream_gamecube.cpp for what
+// not doing so cost.
+extern "C" {
+void CdStreamFsLock(void);
+void CdStreamFsUnlock(void);
+}
+struct CdStreamFsGuard {
+	CdStreamFsGuard(void) { CdStreamFsLock(); }
+	~CdStreamFsGuard(void) { CdStreamFsUnlock(); }
+};
+// Declare at the top of the scope that owns the fopen, so the lock spans
+// open through close rather than just the open. Named by line so two file
+// operations in one scope do not collide.
+#define DVD_FS_CAT2(a, b) a##b
+#define DVD_FS_CAT(a, b) DVD_FS_CAT2(a, b)
+#define DVD_FS_GUARD CdStreamFsGuard DVD_FS_CAT(_dvdFsGuard_, __LINE__)
+#endif
+
 #endif // __GTA_CDSTREAM_H__

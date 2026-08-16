@@ -35,6 +35,35 @@ static volatile bool ioQuit;
 static volatile int32 ioQueue[MAX_CDCHANNELS+1];
 static volatile int32 ioHead, ioTail;
 
+// libfat is shared by this worker and by every dvd:/ log the game writes from
+// the main thread, and nothing serialised the two. The evidence was in the
+// harness the whole time: boot.sh has to run fsck_msdos on the SD image before
+// every single boot to keep it mountable, which is what unserialised writes to
+// a FAT volume look like. The failure mode when it goes further than corruption
+// is a stop with no exception, no GP stall and near-zero CPU — the freeze the
+// pause menu triggers, because opening it bursts synchronous texture reads
+// through here while the 5-second heartbeat is writing hb.log from the main
+// thread. It also explains why the freeze got easier to hit with the retrace
+// wait off: the loop simply reaches the race more often.
+//
+// Recursive, so a log written from inside a path that already holds it cannot
+// deadlock against itself.
+static mutex_t fsLock = LWP_MUTEX_NULL;
+
+extern "C" void
+CdStreamFsLock(void)
+{
+	if(fsLock != LWP_MUTEX_NULL)
+		LWP_MutexLock(fsLock);
+}
+
+extern "C" void
+CdStreamFsUnlock(void)
+{
+	if(fsLock != LWP_MUTEX_NULL)
+		LWP_MutexUnlock(fsLock);
+}
+
 static FILE *imageFiles[MAX_CDIMAGES];
 static char imageNames[MAX_CDIMAGES][64];
 static uint64 imageBytes[MAX_CDIMAGES];
@@ -78,11 +107,15 @@ CdStreamDoRead(int32 channel)
 	uint64 byteOffset = (uint64)sector * CDSTREAM_SECTOR_SIZE;
 	uint64 byteCount64 = (uint64)size * CDSTREAM_SECTOR_SIZE;
 	if(byteOffset > imageBytes[image] || byteCount64 > imageBytes[image] - byteOffset ||
-	   (uint64)(off_t)byteOffset != byteOffset || byteCount64 > SIZE_MAX ||
-	   fseeko(file, (off_t)byteOffset, SEEK_SET) != 0)
+	   (uint64)(off_t)byteOffset != byteOffset || byteCount64 > SIZE_MAX)
 		return STREAM_ERROR;
 	size_t byteCount = (size_t)byteCount64;
-	if(fread(buffer, 1, byteCount, file) != byteCount)
+
+	CdStreamFsLock();
+	bool ok = fseeko(file, (off_t)byteOffset, SEEK_SET) == 0 &&
+	          fread(buffer, 1, byteCount, file) == byteCount;
+	CdStreamFsUnlock();
+	if(!ok)
 		return STREAM_ERROR;
 
 	lastPosition = offset + size;
@@ -119,6 +152,8 @@ CdStreamInitThread(void)
 	ioHead = ioTail = 0;
 	LWP_SemInit(&ioPending, 0, MAX_CDCHANNELS);
 	LWP_MutexInit(&ioLock, false);
+	if(fsLock == LWP_MUTEX_NULL)
+		LWP_MutexInit(&fsLock, true);   // recursive, see the note above
 	for(int32 i = 0; i < MAX_CDCHANNELS; i++)
 		requests[i].status = STREAM_NONE;
 	// Below the game thread so a queued read never preempts simulation, but

@@ -9,6 +9,7 @@
 #include "Frontend.h"
 #include "ControllerConfig.h"
 #include "FileMgr.h"
+#include "CdStream.h"
 
 #include <gccore.h>
 #include <ogc/machine/processor.h>
@@ -32,6 +33,65 @@
 long _dwOperatingSystemVersion = OS_WINXP;
 size_t _dwMemAvailPhys;
 RwUInt32 gGameState;
+
+// Freeze watchdog. Every hang in this port so far has presented identically —
+// frozen image, no exception, no crash.log, and near-zero CPU because the main
+// thread is blocked rather than spinning — which makes them indistinguishable
+// from each other and costs a boot per guess. A separate thread that only
+// watches a counter can still run when the main thread cannot, so it is the
+// one place that can say where the game stopped.
+void GeckoLog(const char *msg);   // defined below
+volatile uint32 gFrameTick;
+const char *gPhase = "boot";
+static lwp_t watchdogThread = LWP_THREAD_NULL;
+static volatile bool watchdogStop;
+
+static void*
+watchdogMain(void*)
+{
+	uint32 last = 0;
+	int stuck = 0;
+	bool reported = false;
+	while(!watchdogStop){
+		usleep(1000*1000);
+		if(gFrameTick != last){
+			last = gFrameTick;
+			stuck = 0;
+			reported = false;
+			continue;
+		}
+		// Only the states whose loop iteration IS a frame. GS_INIT_ONCE and
+		// GS_INIT_PLAYING_GAME each do a whole game load inside a single
+		// iteration, so a stalled counter there is the normal case, not a
+		// hang — the first version of this watchdog cried wolf at tick=3 in
+		// GS_INIT_PLAYING_GAME and reported nothing about the real freeze.
+		if(gGameState != GS_PLAYING_GAME && gGameState != GS_FRONTEND){
+			stuck = 0;
+			continue;
+		}
+		if(++stuck < 8 || reported)
+			continue;
+		reported = true;   // one report per hang, not one per second
+		extern unsigned gxWaitRetrace, gxCamW, gxCamH;
+		extern const char *gxLastPath;
+		char line[256];
+		snprintf(line, sizeof(line),
+		    "HANG phase=%s tick=%u state=%u menu=%d vsync=%u "
+		    "gxpath=%s cam=%ux%u",
+		    gPhase ? gPhase : "-", (unsigned)gFrameTick,
+		    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
+		    gxWaitRetrace, gxLastPath ? gxLastPath : "-",
+		    gxCamW, gxCamH);
+		GeckoLog("HANG");
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/hang.log", "a");
+		if(f){
+			fprintf(f, "%s\n", line);
+			fclose(f);
+		}
+	}
+	return nil;
+}
 
 static void *framebuffer;
 static GXRModeObj *videoMode;
@@ -315,6 +375,9 @@ psInitialize(void)
 	RsGlobal.height = 480;
 	RsGlobal.maximumWidth = 640;
 	RsGlobal.maximumHeight = 480;
+	// skeleton.cpp defaults this to 30, which would make the frame limiter
+	// cap at half the retrace rate the moment vsync is off.
+	RsGlobal.maxFPS = 60;
 	FrontEndMenuManager.m_PrefsUseWideScreen = false;
 	_dwMemAvailPhys = (size_t)SYS_GetArena1Size();
 	gGameState = GS_START_UP;
@@ -342,8 +405,16 @@ psCameraBeginUpdate(RwCamera *camera)
 void
 psCameraShowRaster(RwCamera *camera)
 {
+	// No VIDEO_WaitVSync() here. gx::showRaster already ends with one, and a
+	// second wait is a whole field of pure idle: measured, DoRWStuffEndOfFrame
+	// ran 28.5ms of which showRaster was 11.9ms, and the 16.6ms remainder is
+	// exactly one 59.94Hz field — RwCameraEndUpdate on this backend is a no-op,
+	// so there was nothing else it could be. That pushed ~21ms of real work over
+	// the 33.3ms budget and every frame fell to the third retrace: 1507 of 1534
+	// logged frames were 50.0ms, i.e. a locked 20fps rather than a stutter.
+	//
+	// This is the consumer the single-retrace change in showRaster missed.
 	RwCameraShowRaster(camera, nil, 0);
-	VIDEO_WaitVSync();
 }
 
 RwImage *
@@ -591,6 +662,7 @@ main(int, char *[])
 	// engine starts and a failure turns into an unrelated crash. Results go to
 	// the card as well as the console, since emulator logs are not reliable.
 	{
+		DVD_FS_GUARD;
 		FILE *log = fopen("dvd:/revc_boot.log", "w");
 		#define SELFTEST_LOG(...) do { \
 			printf(__VA_ARGS__); \
@@ -619,6 +691,7 @@ main(int, char *[])
 			closedir(d);
 		}
 
+		DVD_FS_GUARD;
 		FILE *f = fopen("dvd:/models/coll/peds.col", "rb");
 		SELFTEST_LOG("selftest: raw open -> %s\n", f ? "OK" : "FAIL");
 		if(f) fclose(f);
@@ -671,8 +744,28 @@ main(int, char *[])
 	CPad::GetPad(0)->Clear(true);
 	CPad::GetPad(1)->Clear(true);
 
+	// Lowest priority: it must never take time from the game, and it only has
+	// to run when the game has stopped running.
+	LWP_CreateThread(&watchdogThread, watchdogMain, nil, nil, 16*1024, 127);
+
 	while(SYS_MainLoop() && !RsGlobal.quit){
 		HandleExit();
+
+		gFrameTick++;
+		gPhase = "loop";
+
+		// The GC path always waited for the retrace inside gx::showRaster;
+		// m_PrefsVsync and m_PrefsFrameLimiter were read only by the
+		// glfw/win/sdl2 skels and never by this one.
+		//
+		// Deliberately NOT following those skels in also forcing the wait
+		// while a menu is up. Doing that makes the retrace wait switch on at
+		// the exact moment the menu opens, and the menu opening is when this
+		// port freezes — so the first build that wired it that way could not
+		// tell a menu bug from a vsync-transition bug. One variable at a time:
+		// the preference alone decides, and it does not change under us.
+		extern unsigned gxWaitRetrace;
+		gxWaitRetrace = FrontEndMenuManager.m_PrefsVsync;
 
 		switch(gGameState){
 		case GS_START_UP:
@@ -689,6 +782,7 @@ main(int, char *[])
 			}
 			// Debug: dvd:/autostart.txt skips the frontend so crashes in world
 			// load reproduce with no controller input.
+			DVD_FS_GUARD;
 			FILE *as = fopen("dvd:/autostart.txt", "r");
 			if(as){
 				fclose(as);
@@ -723,6 +817,21 @@ main(int, char *[])
 		case GS_PLAYING_GAME:
 			RsEventHandler(rsIDLE, (void *)TRUE);
 			break;
+		}
+
+		// Frame limiter. With the retrace wait off nothing else paces the
+		// loop, so without this it becomes a busy spin that starves the DVD
+		// and audio threads. Absolute deadlines rather than sleep(period), so
+		// a frame that runs long is absorbed instead of pushing every
+		// subsequent frame late.
+		if(FrontEndMenuManager.m_PrefsFrameLimiter && !gxWaitRetrace){
+			static u64 tNext;
+			int fps = RsGlobal.maxFPS > 0 ? RsGlobal.maxFPS : 60;
+			u64 period = millisecs_to_ticks(1000)/fps;
+			u64 now = gettime();
+			if(tNext > now)
+				usleep(ticks_to_microsecs(tNext - now));
+			tNext = (tNext > now ? tNext : now) + period;
 		}
 	}
 

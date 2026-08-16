@@ -819,7 +819,27 @@ RpClump *RpClumpClone(RpClump * clump) { return clump->clone(); }
 RwInt32 RpClumpGetNumAtomics(RpClump * clump) { return clump->countAtomics(); }
 //RwInt32 RpClumpGetNumLights(RpClump * clump);
 //RwInt32 RpClumpGetNumCameras(RpClump * clump);
-RpClump *RpClumpStreamRead(RwStream * stream) { return rw::Clump::streamRead(stream); }
+#ifdef RW_GAMECUBE
+namespace rw { namespace gx { void gxPackGeometry(rw::Geometry *geo); } }
+#endif
+RpClump *RpClumpStreamRead(RwStream * stream)
+{
+	rw::Clump *c = rw::Clump::streamRead(stream);
+#ifdef RW_GAMECUBE
+	// Quantise every streamed geometry to int16 positions and texcoords and
+	// release the float arrays. Here rather than lazily at first draw because
+	// this is the choke point every streamed clump passes through, and because
+	// paying it at load keeps it out of the frame that first shows the model.
+	//
+	// Geometry the game builds itself never reaches this function — CWaterLevel
+	// creates the wavy geometry with RpGeometryCreate and rewrites its vertices
+	// every frame, so it keeps its float arrays and is not at risk here.
+	if(c)
+		FORLIST(lnk, c->atomics)
+			rw::gx::gxPackGeometry(rw::Atomic::fromClump(lnk)->geometry);
+#endif
+	return c;
+}
 //RpClump *RpClumpStreamWrite(RpClump * clump, RwStream * stream);
 RwInt32 RpClumpRegisterPlugin(RwInt32 size, RwUInt32 pluginID, RwPluginObjectConstructor constructCB, RwPluginObjectDestructor destructCB, RwPluginObjectCopy copyCB)
 	{ return Clump::registerPlugin(size, pluginID, constructCB, destructCB, (CopyConstructor)copyCB); }

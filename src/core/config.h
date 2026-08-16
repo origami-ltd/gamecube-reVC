@@ -194,7 +194,16 @@ enum Config {
 #	ifndef GTA_HANDHELD
 #		define PC_PLAYER_CONTROLS	// mouse player/cam mode
 #	endif
-#	define GTA_REPLAY
+#	ifndef GTA_OGC
+// CReplay::Buffers is 781KB of static MEM1 — `nm --size-sort` on reVC.elf makes
+// it the largest object in the image, ahead of ThePaths (352KB) and ms_aSectors
+// (256KB). Reclaiming it grows the arena from 15564K to 16384K, which raises the
+// streaming budget by the same 820K at an UNCHANGED reserve. That distinction is
+// the whole point: cutting the reserve also raises the budget, but it does so by
+// taking the real headroom that texture and geometry allocations need, and
+// outdoors those then fail — which draws as untextured, half-missing world.
+#		define GTA_REPLAY
+#	endif
 #	define GTA_SCENE_EDIT
 #	define PC_MENU
 #	define PC_WATER
@@ -267,6 +276,19 @@ enum Config {
 // #define USE_CUSTOM_ALLOCATOR		// use CMemoryHeap for allocation. use with care, not finished yet
 //#define COMPRESSED_COL_VECTORS	// use compressed vectors for collision vertices
 //#define ANIM_COMPRESSION	// only keep most recently used anims uncompressed
+
+#ifdef GTA_OGC
+// Halves every collision vertex, 12 bytes to 6. This reclaims REAL resident
+// bytes; it does not buy budget out of the reserve, which is the trade that
+// breaks the exterior.
+//
+// Safe by measurement rather than by hope: IsValidCollisionVertex rejects any
+// vertex that will not fit int16 at 1/128 unit, that reject path was
+// instrumented to dvd:/col.log over a full boot, and the file was never
+// created — every collision vertex in Vice City fits. dca3 enables this
+// unconditionally.
+#define COMPRESSED_COL_VECTORS
+#endif
 
 #if defined GTA_PC && defined GTA_PS2_STUFF
 #	define USE_PS2_RAND

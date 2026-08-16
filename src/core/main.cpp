@@ -70,6 +70,7 @@ unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync, gxSnapFrame, gxSnapSky
 #include "Text.h"
 #include "RpAnimBlend.h"
 #include "Frontend.h"
+extern const char *gPhase;   // freeze watchdog breadcrumb, see gamecube.cpp
 #include "AnimViewer.h"
 #include "Script.h"
 #include "PathFind.h"
@@ -685,6 +686,7 @@ BootLog(const char *msg)
 	printf("BOOT %s\n", msg);
 	extern void GeckoLog(const char*);
 	GeckoLog(msg); // live host tail via Dolphin USB Gecko (TCP 55020)
+	DVD_FS_GUARD;
 	FILE *progress = fopen("dvd:/boot_progress.log", "a");
 	if(progress){
 		fprintf(progress, "%s\n", msg);
@@ -1669,6 +1671,17 @@ Render2dStuffAfterFade(void)
 	POP_RENDERGROUP();
 }
 
+#ifdef GTA_OGC
+// gxPackGeometry's tally, reported by the heartbeat: bytes reclaimed, how many
+// geometries took the packed path, and how many were refused because their
+// extents would have forced too coarse a quantum. A refusal is not a bug, but
+// a large refusal count means the floor is set wrong and the saving is being
+// left on the table.
+namespace rw { namespace gx {
+extern uint32 gxPackSaved, gxPackGeoms, gxPackRefusedPos, gxPackRefusedUV;
+} }
+#endif
+
 void
 Idle(void *arg)
 {
@@ -1721,18 +1734,87 @@ Idle(void *arg)
 		if(now - lastBeat > 5000){
 			lastBeat = now;
 			extern void GeckoLog(const char*);
-			char hb[192];
+			// vi&3: 0 interlaced, 2 progressive (480p). Latched in startGX,
+			// which runs before the SD or the Gecko listener exists.
+			extern unsigned gxViTVMode, gxHaveComponent, gxXfbHeight;
+			extern unsigned gxCamW, gxCamH, gxEfbHeight;
+			// Per-interval, not cumulative: a rising total says nothing, the
+			// rate is what tells you whether the world is still falling back
+			// to its far shells right now.
+			extern uint32 gLodMiss;
+			static uint32 lastLodMiss;
+			// free/blk together, because total free is not the safety metric:
+			// 5423K spread over 12085 chunks averages 460 bytes, so a
+			// megabyte-sized geometry request can fail while the total looks
+			// healthy. The HUD has shown both for a while, but only for the
+			// single frame someone happened to screenshot — the reserve is
+			// tuned against the whole run, so the whole run has to be logged.
+			struct mallinfo hbMi = mallinfo();
+			extern uint32 gStrEvict, gStrLoad;
+			static uint32 lastEvict, lastLoad;
+			// Largest block still obtainable, measured instead of feared.
+			// mallinfo gives total free and a chunk count but not the largest
+			// chunk, and the largest chunk is what decides whether a geometry
+			// load succeeds — which is the entire reason the reserve is not
+			// supposed to be tuned against total free. Probe it: halve down
+			// from 2MB until one succeeds, hand it straight back. Seven
+			// mallocs every five seconds buys the number the reserve is
+			// actually protecting.
+			unsigned maxblk = 0;
+			for(size_t t = 2u<<20; t >= (32u<<10); t >>= 1){
+				void *p = malloc(t);
+				if(p){ free(p); maxblk = (unsigned)(t>>10); break; }
+			}
+			char hb[256];
 			snprintf(hb, sizeof(hb),
 			    "HB t=%u clk=%02d:%02d fade=%d splashTgt=%d fadeSt=%d cut=%d "
-			    "strMem=%uK strReq=%d menu=%d",
+			    "strMem=%uK strReq=%d menu=%d vi=%u cbl=%u xfbH=%u "
+			    "pack=%uK geo=%u refP=%u refU=%u lodMiss=%u "
+			    "free=%uK blk=%u maxblk=%uK ev=%u ld=%u "
+			    "rs=%dx%d cam=%ux%u efb=%u",
 			    (unsigned)now, CClock::GetHours(), CClock::GetMinutes(),
 			    CDraw::FadeValue, TheCamera.m_FadeTargetIsSplashScreen,
 			    TheCamera.GetScreenFadeStatus(),
 			    CCutsceneMgr::IsCutsceneProcessing(),
 			    (unsigned)(CStreaming::ms_memoryUsed>>10),
 			    CStreaming::ms_numModelsRequested,
-			    FrontEndMenuManager.m_bMenuActive);
+			    FrontEndMenuManager.m_bMenuActive,
+			    gxViTVMode, gxHaveComponent, gxXfbHeight,
+			    (unsigned)(rw::gx::gxPackSaved>>10),
+			    (unsigned)rw::gx::gxPackGeoms,
+			    (unsigned)rw::gx::gxPackRefusedPos,
+			    (unsigned)rw::gx::gxPackRefusedUV,
+			    (unsigned)(gLodMiss - lastLodMiss),
+			    (unsigned)(hbMi.fordblks>>10), (unsigned)hbMi.ordblks,
+			    maxblk,
+			    (unsigned)(gStrEvict - lastEvict),
+			    (unsigned)(gStrLoad - lastLoad),
+			    (int)RsGlobal.width, (int)RsGlobal.height,
+			    gxCamW, gxCamH, gxEfbHeight);
+			lastLodMiss = gLodMiss;
+			lastEvict = gStrEvict; lastLoad = gStrLoad;
 			GeckoLog(hb);
+			// dvd:/automenu.txt opens the pause menu once, hands-free, the
+			// same way autostart.txt skips the frontend. The menu freeze is
+			// only reachable by pressing Start, which makes it untestable
+			// without a controller on the machine doing the debugging — and a
+			// bug you cannot trigger on demand costs a boot per attempt.
+			// Fires once, after the world has settled, so it reproduces the
+			// real case (menu over a loaded game) rather than menu-over-nothing.
+			{
+				static bool32 autoMenuDone;
+				if(!autoMenuDone && now > 30000 &&
+				   !FrontEndMenuManager.m_bMenuActive){
+					DVD_FS_GUARD;
+					FILE *am = fopen("dvd:/automenu.txt", "r");
+					if(am){
+						fclose(am);
+						autoMenuDone = true;
+						GeckoLog("AUTOMENU");
+						FrontEndMenuManager.RequestFrontEndStartUp();
+					}
+				}
+			}
 			// Allocation size histogram, so the block size of any pool comes
 			// out of measured demand instead of intuition. tot = every
 			// allocation ever made in that bucket (the churn that fragments),
@@ -1742,6 +1824,7 @@ Idle(void *arg)
 				int n = snprintf(h1, sizeof(h1), "ALLOC tot");
 				for(int b = 0; b < 16; b++)
 					n += snprintf(h1+n, sizeof(h1)-n, " %u", rw::rwAllocTotal[b]);
+				DVD_FS_GUARD;
 				FILE *fa = fopen("dvd:/alloc.log", "a");
 				if(fa){
 					fprintf(fa, "%s\n", h1);
@@ -1757,6 +1840,7 @@ Idle(void *arg)
 					fclose(fa);
 				}
 			}
+			DVD_FS_GUARD;
 			FILE *f = fopen("dvd:/hb.log", "a");
 			if(f){
 				fprintf(f, "%s\n", hb);
@@ -1766,6 +1850,7 @@ Idle(void *arg)
 	}
 #endif
 
+	gPhase = "tbinit";
 	tbInit();
 
 	CSprite2d::InitPerFrame();
@@ -1783,10 +1868,12 @@ Idle(void *arg)
 	{
 		extern unsigned gxSimUs;
 		unsigned long long t0 = gettime();
+	gPhase = "process";
 		CGame::Process();
 		gxSimUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 	}
 #else
+	gPhase = "process";
 	CGame::Process();
 #endif
 	tbEndTimer("CGame::Process");
@@ -1994,6 +2081,7 @@ Idle(void *arg)
 	}
 
 	tbStartTimer(0, "RenderMenus");
+	gPhase = "menus";
 	RenderMenus();
 	tbEndTimer("RenderMenus");
 
@@ -2020,15 +2108,18 @@ Idle(void *arg)
 	{
 		extern unsigned gxAfterUs;
 		unsigned long long t0 = gettime();
+	gPhase = "2dafterfade";
 		Render2dStuffAfterFade();
 		gxAfterUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 	}
 #else
+	gPhase = "2dafterfade";
 	Render2dStuffAfterFade();
 #endif
 	tbEndTimer("Render2dStuff-Fade");
 	// CCredits::Render(); // They added it to function above and also forgot it here
 #ifdef XBOX_MESSAGE_SCREEN
+	gPhase = "overlays";
 	FrontEndMenuManager.DrawOverlays();
 #endif
 
@@ -2039,10 +2130,12 @@ Idle(void *arg)
 	{
 		extern unsigned gxEndUs;
 		unsigned long long t0 = gettime();
+	gPhase = "endofframe";
 		DoRWStuffEndOfFrame();
 		gxEndUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 	}
 #else
+	gPhase = "endofframe";
 	DoRWStuffEndOfFrame();
 #endif
 

@@ -83,8 +83,20 @@ int main(int argc, char **argv)
 	// walk chunks: TEXDICTIONARY > STRUCT(count) > TEXTURENATIVE*
 	u8 *p = buf + 12;            // into the dictionary
 	uint32 structSize = *(uint32*)(p+4);
-	int count = *(uint16*)(p+12);
-	printf("textures in dictionary: %d\n", count);
+	// Read the count exactly as the game does, not as librw does. The game
+	// (TexRead.cpp, RwTexDictionaryGtaStreamRead) takes all four struct bytes as
+	// one int32 and refuses anything over INT16_MAX; librw takes the upper half
+	// as a deviceId and ignores it. Reading it the librw way here is what let a
+	// dictionary that the console rejected outright pass verification and reach
+	// a disc — so verify the way the consumer parses, not the way the writer
+	// meant it.
+	uint32 count = *(uint32*)(p+12);
+	if(structSize != 4 || count > 0x7FFF){
+		fprintf(stderr, "dictionary count %u (struct %u bytes) — the game "
+		    "rejects this before reading any texture\n", count, structSize);
+		return 1;
+	}
+	printf("textures in dictionary: %u\n", count);
 	p += 12 + structSize;
 
 	int n = 0;

@@ -263,7 +263,16 @@ main(int argc, char **argv)
 	writeChunkHeader(&out, ID_TEXDICTIONARY, total);
 	writeChunkHeader(&out, ID_STRUCT, 4);
 	out.writeU16((uint16)n);
-	out.writeU16(PLATFORM_GAMECUBE);
+	// The dictionary struct is uint16 count + uint16 deviceId only to librw.
+	// The game reads all four bytes as one int32 count (TexRead.cpp,
+	// RwTexDictionaryGtaStreamRead) and rejects anything over INT16_MAX, so a
+	// deviceId of PLATFORM_GAMECUBE made every converted dictionary read as
+	// 393216+n textures and fail before a single texture was touched — which is
+	// why dvd:/native.log stayed empty, ms_memoryUsed froze and the streamer
+	// re-requested the same 78 models forever. Every stock Vice City TXD writes
+	// 0 here; so do we. Per-texture dispatch uses the platform field in the
+	// native header, not this.
+	out.writeU16(0);
 	for(int i = 0; i < n; i++)
 		writeNative(&out, &convs[i]);
 	writeChunkHeader(&out, ID_EXTENSION, 0);

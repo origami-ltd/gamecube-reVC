@@ -33,6 +33,12 @@
 #include "custompipes.h"
 #include "Frontend.h"
 
+#ifdef GTA_OGC
+// Entities that wanted their detailed atomic and did not get it, accumulated;
+// the heartbeat reports the delta per interval. See SetupEntityVisibility.
+uint32 gLodMiss;
+#endif
+
 bool gbShowPedRoadGroups;
 bool gbShowCarRoadGroups;
 bool gbShowCollisionPolys;
@@ -798,6 +804,26 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 #else
 	RpAtomic *a = mi->GetAtomicFromDistance(dist);
 #endif
+#ifdef GTA_OGC
+	// LOD fallback, counted rather than logged. An entity standing inside the
+	// range of its most detailed atomic that still has no atomic to hand back
+	// is a model the streamer failed to keep resident, and
+	// SetupBigBuildingVisibility then holds the far shell in its place. That is
+	// precisely what "the world draws from LODs" means, so the heartbeat
+	// carries the number instead of it being a thing you judge by eye — which
+	// matters here because it is measurable without being able to drive.
+	// On screen is part of the definition, not a refinement of it. The
+	// frustum and occlusion tests below only run on the branch where an
+	// atomic exists, so counting before them counted every entity the sector
+	// scan touched — including everything behind the camera and everything an
+	// occluder hides. Those are not missing detail, nobody can see them.
+	// Ordered cheapest-first, and the two real tests only run for the entities
+	// that already have nothing to draw.
+	if(a == nil && mi->m_numAtomics > 0 &&
+	   dist < mi->m_lodDistances[0]*TheCamera.LODDistMultiplier &&
+	   ent->GetIsOnScreen() && !ent->IsEntityOccluded())
+		gLodMiss++;
+#endif
 #if OGC_LOD_PROBE
 	// Scene stability log. Sampling every Nth entity says nothing about
 	// flicker, because flicker is a *change* over time: it only shows up as
@@ -836,6 +862,7 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 				    mi->m_numAtomics > 2 && mi->m_atomics[2] != nil,
 				    CStreaming::ms_aInfoForModel[ent->m_modelIndex].m_loadState,
 				    (int)mi->m_isBigBuilding);
+				DVD_FS_GUARD;
 				FILE *f = fopen("dvd:/flip.log", "a");
 				if(f){ fprintf(f, "%s\n", line); fclose(f); }
 			}
