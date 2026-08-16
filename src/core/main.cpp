@@ -1736,7 +1736,7 @@ Render2dStuffAfterFade(void)
 			CFont::SetBackgroundColor(CRGBA(0, 0, 0, 255));
 			CFont::SetDropShadowPosition(0);
 			CFont::SetColor(CRGBA(180, 220, 255, 255));
-			CFont::PrintString(SCREEN_SCALE_X(8.0f), SCREEN_SCALE_Y(56.0f), phW);
+			CFont::PrintString(SCREEN_SCALE_X(8.0f), SCREEN_SCALE_Y(68.0f), phW);
 			CFont::SetBackgroundOff();
 			CFont::SetBackGroundOnlyTextOff();
 		}
