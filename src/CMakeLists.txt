@@ -41,6 +41,12 @@ if(NOT NINTENDO_OGC)
 else()
     target_link_libraries(${EXECUTABLE} PRIVATE fat iso9660)
     target_link_options(${EXECUTABLE} PRIVATE -Wl,--gc-sections)
+    # The game never throws and never uses typeid or dynamic_cast, but the
+    # build was paying for both anyway: __EH_FRAME_BEGIN__ measured 339KB, the
+    # second largest object in the whole image behind ThePaths, and the section
+    # headers add another 46KB. That is MEM1 spent on unwind tables for
+    # exceptions that cannot happen.
+    target_compile_options(${EXECUTABLE} PRIVATE -fno-exceptions -fno-rtti)
     # Marks the libogc/console path, shared verbatim by GameCube and Wii.
     # libogc rejects defining both __gamecube__ and __wii__, so this is its own
     # macro rather than a reuse of either.

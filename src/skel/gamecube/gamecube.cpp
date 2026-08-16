@@ -376,6 +376,16 @@ psInitConsole(void)
 
 	videoMode = VIDEO_GetPreferredMode(NULL);
 	framebuffer = MEM_K0_TO_K1(SYS_AllocateFramebuffer(videoMode));
+	// Offer it to the GX backend, which would otherwise allocate a third
+	// framebuffer and leave this one stranded. SYS_AllocateFramebuffer takes
+	// from the arena permanently, so a stranded buffer is 614KB of MEM1 gone
+	// for the whole run — real streaming budget.
+	{
+		extern void *gxAdoptXfb;
+		extern unsigned gxAdoptXfbSize;
+		gxAdoptXfb = framebuffer;
+		gxAdoptXfbSize = VIDEO_GetFrameBufferSize(videoMode);
+	}
 	console_init(framebuffer, 20, 20, videoMode->fbWidth, videoMode->xfbHeight,
 	    videoMode->fbWidth * VI_DISPLAY_PIX_SZ);
 

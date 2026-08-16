@@ -66,6 +66,23 @@ if(NOT ${PROJECT}_AUDIO IN_LIST ${PROJECT}_AUDIOS)
     message(FATAL_ERROR "Illegal ${PROJECT}_AUDIO=${${PROJECT}_AUDIO}")
 endif()
 
+if(NINTENDO_OGC)
+    # Before add_subdirectory, so librw inherits them too — applying these to
+    # the game target alone left .eh_frame at 340KB, because most of it comes
+    # from librw and the prebuilt libraries, not from the game's own objects.
+    #
+    # -fno-asynchronous-unwind-tables is the one that actually reclaims the
+    # space: on PowerPC, -fno-exceptions stops the compiler emitting handlers
+    # but still emits .eh_frame for stack unwinding, and __EH_FRAME_BEGIN__ was
+    # the second largest object in the whole image at 339KB. The game never
+    # throws and never uses typeid or dynamic_cast, so all of it is MEM1 spent
+    # on unwinding that cannot happen.
+    #
+    # Cost: a crash walks the stack with the frame-pointer chain instead of
+    # unwind tables, which gcPanic already does by hand (it follows frame[0]).
+    add_compile_options(-fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables)
+endif()
+
 option(${PROJECT}_VENDORED_LIBRW "Use vendored librw" ON)
 if(${PROJECT}_VENDORED_LIBRW)
     add_subdirectory(vendor/librw)

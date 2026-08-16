@@ -369,7 +369,7 @@ CStreaming::Init2(void)
 		// Measure any change in the intro cutscene, not in a stationary street:
 		// an earlier revision measured 4652-5812K free in an alley, concluded
 		// there was room to spare, cut this to 2MB and shipped a freeze.
-		size_t reserve = 6*MB - 256*1024; // engine late allocs, render targets
+		size_t reserve = 5*MB + 512*1024; // engine late allocs, render targets
 		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
 		    _dwMemAvailPhys - reserve : 4*MB;
 		desiredNumVehiclesLoaded = 12; // reconstructed console target
