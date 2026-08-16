@@ -1645,8 +1645,8 @@ Render2dStuffAfterFade(void)
 		}
 	}
 	{
-		char fpsA[64];
-		wchar fpsW[64];
+		char fpsA[192];
+		wchar fpsW[192];
 		extern unsigned gxMeshCount, gxVertCount, gxDlMeshCount;
 		extern unsigned gxSimUs, gxRenderUs, gxStreamUs, gxGpUs, gxVsyncUs, gxHudUs, gxTexBuilds, gxIdleUs, gxAudioUs, gxFxUs, gxListUs, gxPreUs, gxTileUs, gxPostUs, gxSkyUs, gxTailUs, gxLightsUs, gxFrameUs, gxFadeUs, gxAfterUs, gxEndUs, gxCopyUs;
 		// Presentation rate, not a smoothed average. FramesPerSecond is a
@@ -1701,13 +1701,10 @@ Render2dStuffAfterFade(void)
 		gxMeshCount = 0;
 		gxVertCount = 0;
 		gxDlMeshCount = 0;
-		// Per-phase breakdown, in microseconds, fixed order so the columns
-		// stay in the same place frame to frame and a change is visible
-		// without reading the labels. "oth" is the residual: frame period
-		// minus everything instrumented. A large residual means the cost is
-		// somewhere nothing measures yet, which is the single most useful
-		// thing this line can tell you — every other column is a known
-		// suspect, that one is the unknown.
+
+		// One block, one PrintString. Two overlapping text draws is not a
+		// readout, it is a mess — the phase line was landing on top of the
+		// last line of the counter. CFont wraps this for us.
 		{
 			extern unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream,
 			    gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
@@ -1715,32 +1712,13 @@ Render2dStuffAfterFade(void)
 			    gxSnapHud + gxSnapLights + gxSnapTile + gxSnapStream +
 			    gxSnapCopy + gxSnapGp + gxSnapVsync;
 			unsigned other = gxSnapFrame > acc ? gxSnapFrame - acc : 0;
-			char phA[96];
-			wchar phW[96];
-			sprintf(phA,
-			    "sim%u rnd%u sky%u fx%u hud%u lit%u tile%u str%u cpy%u gp%u vs%u oth%u",
+			int n = (int)strlen(fpsA);
+			snprintf(fpsA + n, sizeof(fpsA) - n,
+			    " | sim%u rnd%u sky%u fx%u hud%u lit%u str%u cpy%u gp%u vs%u oth%u",
 			    gxSnapSim/100, gxSnapRender/100, gxSnapSky/100, gxSnapFx/100,
-			    gxSnapHud/100, gxSnapLights/100, gxSnapTile/100,
-			    gxSnapStream/100, gxSnapCopy/100, gxSnapGp/100,
-			    gxSnapVsync/100, other/100);
-			AsciiToUnicode(phA, phW);
-			CFont::SetPropOn();
-			CFont::SetScale(SCREEN_SCALE_X(0.4f), SCREEN_SCALE_Y(0.6f));
-			CFont::SetCentreOff();
-			CFont::SetRightJustifyOff();
-			CFont::SetJustifyOff();
-			CFont::SetWrapx(SCREEN_SCALE_X(8.0f) + SCREEN_SCALE_X(420.0f));
-			CFont::SetFontStyle(FONT_STANDARD);
-			CFont::SetBackgroundOn();
-			CFont::SetBackGroundOnlyTextOn();
-			CFont::SetBackgroundColor(CRGBA(0, 0, 0, 255));
-			CFont::SetDropShadowPosition(0);
-			CFont::SetColor(CRGBA(180, 220, 255, 255));
-			CFont::PrintString(SCREEN_SCALE_X(8.0f), SCREEN_SCALE_Y(68.0f), phW);
-			CFont::SetBackgroundOff();
-			CFont::SetBackGroundOnlyTextOff();
+			    gxSnapHud/100, gxSnapLights/100, gxSnapStream/100,
+			    gxSnapCopy/100, gxSnapGp/100, gxSnapVsync/100, other/100);
 		}
-
 		AsciiToUnicode(fpsA, fpsW);
 		CFont::SetPropOn();
 		CFont::SetScale(SCREEN_SCALE_X(0.6f), SCREEN_SCALE_Y(0.8f));
