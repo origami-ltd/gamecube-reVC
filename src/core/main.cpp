@@ -1596,7 +1596,33 @@ Render2dStuffAfterFade(void)
 	CHud::DrawAfterFade();
 
 #ifdef GTA_OGC
-	// FPS counter, top-left: white on black, drawn above fades
+	// FPS counter, top-left: white on black, drawn above fades.
+	//
+	// Off by default and toggled by holding L + A for three seconds. It is a
+	// developer readout sitting on top of the game, and leaving it permanently
+	// on the screen makes the port unpleasant to actually play. Three seconds
+	// and two buttons because L and A are both used constantly in normal play
+	// — a shorter hold or a single button would fire by accident mid-mission.
+	{
+		static bool32 hudShown;
+		static uint32 holdStart;
+		CPad *pad = CPad::GetPad(0);
+		bool32 combo = pad && pad->NewState.LeftShoulder1 && pad->NewState.Cross;
+		uint32 nowMs = CTimer::GetTimeInMillisecondsPauseMode();
+		if(!combo)
+			holdStart = 0;
+		else if(holdStart == 0)
+			holdStart = nowMs;
+		else if(nowMs - holdStart >= 3000){
+			hudShown = !hudShown;
+			holdStart = 0;
+			// Swallow the hold so releasing and re-pressing is required,
+			// rather than toggling once every three seconds while held.
+			pad->NewState.LeftShoulder1 = 0;
+		}
+		if(!hudShown)
+			goto skipDebugHud;
+	}
 	{
 		char fpsA[64];
 		wchar fpsW[64];
@@ -1664,6 +1690,7 @@ Render2dStuffAfterFade(void)
 		CFont::SetBackgroundOff();
 		CFont::SetBackGroundOnlyTextOff();
 	}
+skipDebugHud:;
 #endif
 
 	CFont::DrawFonts();

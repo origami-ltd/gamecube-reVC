@@ -369,9 +369,26 @@ CStreaming::Init2(void)
 		// Measure any change in the intro cutscene, not in a stationary street:
 		// an earlier revision measured 4652-5812K free in an alley, concluded
 		// there was room to spare, cut this to 2MB and shipped a freeze.
-		size_t reserve = 5*MB + 512*1024; // engine late allocs, render targets
-		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
-		    _dwMemAvailPhys - reserve : 4*MB;
+		// Expressed as a BUDGET, not as a reserve. The reserve framing caused
+		// real confusion — it is the leftover, not the knob — and the variable
+		// the game actually enforces (ms_memoryAvailable) is a budget. Set
+		// this; the headroom is whatever the arena has beyond it.
+		//
+		// 3MB, chosen against the failure that is visible on screen rather than
+		// against free bytes. Raising the budget does NOT monotonically improve
+		// the picture: past the point where the working set fits, ms_memoryUsed
+		// sits at or above the cap, MakeSpaceFor evicts on every single request,
+		// and that churn is what flickers — models coming and going between
+		// frames. Measured earlier at a 10264K budget: strMem oscillated
+		// 9830-12570K, permanently at or over the cap, with strReq never draining
+		// below 43. A smaller budget the streamer can actually stay inside beats
+		// a larger one it thrashes against.
+		//
+		// Whatever this is set to, judge it in the intro cutscene and while
+		// moving, not standing still in a street: an earlier revision measured
+		// 4652-5812K free in an alley, concluded there was room to spare, and
+		// shipped a freeze.
+		ms_memoryAvailable = 3*MB;
 		desiredNumVehiclesLoaded = 12; // reconstructed console target
 		{
 			extern size_t gOgcHeapUsedAtInit;
