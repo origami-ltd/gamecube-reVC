@@ -484,6 +484,11 @@ CMenuManager::CMenuManager()
 #else
 	m_PrefsUseWideScreen = 0;
 #endif
+	// Off. An earlier revision forced this on for GTA_OGC claiming the retrace
+	// stall was what let the pause menu open — it was not. That conclusion came
+	// from comparing builds that differed in several things at once, which is
+	// not a measurement. Tested directly afterwards: the menu freezes with the
+	// stall on too.
 	m_PrefsVsync = 0;
 	m_PrefsVsyncDisp = 1;
 	m_PrefsFrameLimiter = 1;

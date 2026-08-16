@@ -350,9 +350,26 @@ CStreaming::Init2(void)
 		// what leaves ~17 on-screen entities per frame holding a far LOD shell
 		// instead of their detailed model.
 		//
-		// Watch maxblk and oom, not free, when judging whether this went too
-		// far: maxblk falling under ~1MB, or oom leaving 0, is the real signal.
-		size_t reserve = 2*MB; // engine late allocs, render targets
+		// 6MB minus 256K, set deliberately and against one measurement, so the
+		// measurement is written down rather than lost. Compared in the same
+		// intro cutscene: at a 2MB reserve free bytes were 616K, at 6MB they
+		// were 908K. Four megabytes of reserve bought under 300K of real
+		// headroom, and at 6MB the characters rendered as black silhouettes
+		// against a fully drawn background — their textures had stopped
+		// fitting. So in that scene the reserve is not what consumes memory,
+		// the cutscene's own working set is, and raising it is close to a no-op
+		// on safety while costing visible detail.
+		//
+		// It is set high anyway because the audio backend is about to need
+		// MEM1 that nothing currently accounts for: mixing buffers and sample
+		// pages coming back from ARAM. Better to reserve for it now than to
+		// discover it as another freeze.
+		//
+		// This is one number and it is the one to move when experimenting.
+		// Measure any change in the intro cutscene, not in a stationary street:
+		// an earlier revision measured 4652-5812K free in an alley, concluded
+		// there was room to spare, cut this to 2MB and shipped a freeze.
+		size_t reserve = 6*MB - 256*1024; // engine late allocs, render targets
 		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
 		    _dwMemAvailPhys - reserve : 4*MB;
 		desiredNumVehiclesLoaded = 12; // reconstructed console target
