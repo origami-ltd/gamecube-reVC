@@ -404,6 +404,20 @@ RwGrabScreen(RwCamera *camera, RwChar *filename)
 void
 DoRWStuffEndOfFrame(void)
 {
+#ifdef GTA_OGC
+	// The watchdog counts frames PRESENTED, not main-loop iterations.
+	//
+	// SwitchMenuOnAndOff renders two whole frames from inside itself, outside
+	// the loop, before opening the menu — and LoadAllTextures runs there too.
+	// Counting loop iterations meant the counter froze for all of that, so the
+	// watchdog called a slow menu load a hang. Some of the freezes chased in
+	// this project may have been exactly that.
+	//
+	// Incrementing here makes "no frame reached the screen for eight seconds"
+	// the thing being measured, which is what a freeze actually is.
+	extern volatile uint32 gFrameTick;
+	gFrameTick++;
+#endif
 #ifndef GTA_OGC
 	CDebug::DisplayScreenStrings();	// custom
 	CDebug::DebugDisplayTextBuffer();

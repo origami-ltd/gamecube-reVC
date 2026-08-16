@@ -823,7 +823,9 @@ main(int, char *[])
 	while(SYS_MainLoop() && !RsGlobal.quit){
 		HandleExit();
 
-		gFrameTick++;
+		// gFrameTick is bumped in DoRWStuffEndOfFrame now, not here: frames
+		// presented is the honest measure, and the menu renders two of them
+		// from outside this loop.
 		gPhase = "loop";
 
 		// The GC path always waited for the retrace inside gx::showRaster;
