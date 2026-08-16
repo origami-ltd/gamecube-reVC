@@ -1666,14 +1666,20 @@ Render2dStuffAfterFade(void)
 		// healthy. str = ms inside CStreaming::Update, i.e. disc I/O stalling
 		// the frame.
 		extern unsigned rwGeoAllocFails, rwTexAllocFails, gxStreamUs, gxTiledBytes;
+		// ARAM cache hit rate. A streaming game re-reads the same archive
+		// entries constantly, so this is the number that says whether the
+		// disc is still being hit for things ARAM already holds.
+		extern uint32 gAramHits, gAramMisses;
+		unsigned arTotal = gAramHits + gAramMisses;
+		unsigned arPct = arTotal ? (unsigned)((uint64)gAramHits*100/arTotal) : 0;
 		struct mallinfo mi = mallinfo();
-		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u/%u m%uK tex%uK fr%uK blk%u str%u",
+		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u/%u m%uK tex%uK fr%uK blk%u str%u ar%u%%",
 		    1000000u/per, per/1000, (per%1000)/100, worstUs/1000,
 		    work/1000, rwGeoAllocFails, rwTexAllocFails,
 		    (unsigned)(CStreaming::ms_memoryUsed>>10),
 		    gxTiledBytes>>10,
 		    (unsigned)(mi.fordblks>>10), (unsigned)mi.ordblks,
-		    gxStreamUs/1000);
+		    gxStreamUs/1000, arPct);
 #else
 		sprintf(fpsA, "%u max%u", 1000000u/per, worstUs/1000);
 #endif

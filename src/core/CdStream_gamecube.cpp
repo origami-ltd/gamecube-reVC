@@ -6,6 +6,142 @@
 #include <ogc/lwp.h>
 #include <ogc/semaphore.h>
 #include <ogc/mutex.h>
+#include <ogc/aram.h>
+#include <ogc/cache.h>
+
+// ---------------------------------------------------------------- ARAM cache
+//
+// The 16MB of ARAM is the only memory on this machine the port was not using
+// at all, and a streaming game is the exact workload it suits. It cannot hold
+// live objects — the CPU has no load/store path to it, only block DMA — but
+// that is no obstacle here, because what goes in is raw archive bytes that
+// were going to be re-read from the disc anyway.
+//
+// Sitting at the CdStream layer means nothing above needs to know it exists:
+// the key is the (offset, size) the streamer already asks for, the archive is
+// read-only so a hit can never be stale, and every layer above keeps working
+// unchanged.
+//
+// What it buys is not resident memory, it is the price of being wrong. Today
+// evicting a model means re-reading it from the disc: 2-3MB/s with seeks over
+// 100ms, which is why the streamer has to hold so much resident and why
+// evicting too eagerly shows up as popping. From ARAM the same reload is a DMA
+// at 60-70MB/s with no seek at all. A smaller resident set stops costing
+// image quality, which is the whole render problem — and on a Mini-DVD, where
+// seeks are the expensive thing, it matters more, not less.
+//
+// One slot per request. Requests are bounded by ms_streamingBufferSize (the
+// largest entry in the CD directory), so a fixed slot always fits one whole
+// request and there is no packing or fragmentation to manage.
+struct AramSlot {
+	uint32 offset;    // the streamer's key; 0xFFFFFFFF when empty
+	uint32 size;      // in sectors
+	uint32 aramAddr;
+	uint32 lastUsed;
+};
+static AramSlot *aramSlots;
+static int32     aramSlotCount;
+static uint32    aramSlotBytes;
+static uint32    aramClock;
+static bool      aramReady;
+uint32 gAramHits, gAramMisses;   // reported by the HUD
+
+// ARAM DMA wants both addresses and the length 32-byte aligned. Stream buffers
+// come from RwMallocAlign at sector alignment, so only the length needs
+// rounding, and rounding UP is safe: the slot was sized for it.
+static inline uint32
+aramAlign32(uint32 v)
+{
+	return (v + 31) & ~31u;
+}
+
+static void
+aramWaitDMA(void)
+{
+	while(AR_GetDMAStatus())
+		;
+}
+
+static void
+AramCacheInit(uint32 maxRequestSectors)
+{
+	if(aramReady || maxRequestSectors == 0)
+		return;
+	if(!AR_CheckInit())
+		AR_Init(nil, 0);
+
+	aramSlotBytes = aramAlign32(maxRequestSectors * CDSTREAM_SECTOR_SIZE);
+
+	// Leave room for audio: the sample banks are what ARAM exists for, and
+	// taking all of it here would just move the problem. Half the free space,
+	// capped, is a starting point that can be measured and moved.
+	uint32 avail = AR_GetSize() - AR_GetBaseAddress();
+	uint32 budget = avail/2;
+	int32 slots = budget/aramSlotBytes;
+	if(slots > 256) slots = 256;
+	if(slots <= 0)
+		return;
+
+	aramSlots = (AramSlot*)calloc(slots, sizeof(AramSlot));
+	if(aramSlots == nil)
+		return;
+	for(int32 i = 0; i < slots; i++){
+		uint32 addr = AR_Alloc(aramSlotBytes);
+		if(addr == 0){
+			slots = i;   // ARAM ran out; keep what we got
+			break;
+		}
+		aramSlots[i].offset = 0xFFFFFFFF;
+		aramSlots[i].aramAddr = addr;
+	}
+	aramSlotCount = slots;
+	aramReady = slots > 0;
+}
+
+// Returns true when the request was served entirely from ARAM.
+static bool
+AramCacheRead(void *buffer, uint32 offset, uint32 size)
+{
+	if(!aramReady)
+		return false;
+	for(int32 i = 0; i < aramSlotCount; i++){
+		AramSlot *s = &aramSlots[i];
+		if(s->offset != offset || s->size != size)
+			continue;
+		uint32 len = aramAlign32(size * CDSTREAM_SECTOR_SIZE);
+		DCInvalidateRange(buffer, len);
+		AR_StartDMA(AR_ARAMTOMRAM, (u32)buffer, s->aramAddr, len);
+		aramWaitDMA();
+		s->lastUsed = ++aramClock;
+		gAramHits++;
+		return true;
+	}
+	gAramMisses++;
+	return false;
+}
+
+// Populate after a real read. Least-recently-used slot wins; an empty slot
+// always wins over a used one because its clock is still zero.
+static void
+AramCacheStore(const void *buffer, uint32 offset, uint32 size)
+{
+	if(!aramReady || size == 0)
+		return;
+	uint32 len = aramAlign32(size * CDSTREAM_SECTOR_SIZE);
+	if(len > aramSlotBytes)
+		return;   // larger than a slot: not cacheable, and not worth resizing
+	int32 victim = 0;
+	for(int32 i = 1; i < aramSlotCount; i++)
+		if(aramSlots[i].lastUsed < aramSlots[victim].lastUsed)
+			victim = i;
+	AramSlot *s = &aramSlots[victim];
+	DCFlushRange((void*)buffer, len);
+	AR_StartDMA(AR_MRAMTOARAM, (u32)buffer, s->aramAddr, len);
+	aramWaitDMA();
+	s->offset = offset;
+	s->size = size;
+	s->lastUsed = ++aramClock;
+}
 
 // Asynchronous disc reads.
 //
@@ -111,12 +247,21 @@ CdStreamDoRead(int32 channel)
 		return STREAM_ERROR;
 	size_t byteCount = (size_t)byteCount64;
 
+	// ARAM first. A hit costs a DMA and no disc access at all, which is the
+	// whole point on a Mini-DVD: the seek is the expensive part, not the
+	// bytes.
+	if(AramCacheRead(buffer, offset, size)){
+		lastPosition = offset + size;
+		return STREAM_NONE;
+	}
+
 	CdStreamFsLock();
 	bool ok = fseeko(file, (off_t)byteOffset, SEEK_SET) == 0 &&
 	          fread(buffer, 1, byteCount, file) == byteCount;
 	CdStreamFsUnlock();
 	if(!ok)
 		return STREAM_ERROR;
+	AramCacheStore(buffer, offset, size);
 
 	lastPosition = offset + size;
 	return STREAM_NONE;
@@ -156,6 +301,11 @@ CdStreamInitThread(void)
 		LWP_MutexInit(&fsLock, true);   // recursive, see the note above
 	for(int32 i = 0; i < MAX_CDCHANNELS; i++)
 		requests[i].status = STREAM_NONE;
+	// Sized from the largest entry in the CD directory, so one slot always
+	// holds one whole request.
+	extern int32 CStreamingBufferSectors(void);
+	AramCacheInit((uint32)CStreamingBufferSectors());
+
 	// Below the game thread so a queued read never preempts simulation, but
 	// high enough to keep the disc busy while the frame runs.
 	LWP_CreateThread(&ioThread, CdStreamThread, nil, nil, 16*1024, 80);

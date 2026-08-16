@@ -822,6 +822,14 @@ static uint32 gResidentCost[NUMSTREAMINFO];
 // double counting, and no guessing at a scale factor.
 bool gStreamMeasuring;
 
+// The ARAM cache sizes its slots from this: the largest single request the
+// streamer can make, which is what ms_streamingBufferSize already is.
+int32
+CStreamingBufferSectors(void)
+{
+	return CStreaming::ms_streamingBufferSize;
+}
+
 extern "C" void
 CStreamingTexBytes(long delta)
 {
