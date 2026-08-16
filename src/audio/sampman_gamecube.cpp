@@ -455,7 +455,29 @@ enum {
 	STREAM_CHUNK_BYTES   = STREAM_CHUNK_SAMPLES*2*2 // 16-bit stereo
 };
 
+// Compressed stream data cached in ARAM, so the disc is touched in occasional
+// bulk reads instead of continuously.
+//
+// A Vorbis station is ~56MB, far past ARAM, but it does not need to fit — only
+// to stay ahead. At 128kbps, 4MB of ARAM is 250 seconds of lookahead, so the
+// disc is read once every four minutes per stream, sequentially, instead of
+// every few frames. On a Mini-DVD the seek is the expensive part, not the
+// bytes, which makes that the difference between an audible hitch and none.
+//
+// A ring, because the read pattern is strictly sequential: the decoder always
+// wants the next bytes, never a random offset.
+enum { STREAM_ARAM_BYTES = 4*1024*1024, STREAM_REFILL = 256*1024 };
+
+struct GcStreamCache {
+	uint32 aramAddr;
+	uint32 head;        // byte offset within the ring where the disc left off
+	uint32 tail;        // where the decoder has consumed to
+	uint32 fileOffset;  // disc position matching head
+	bool8  ready;
+};
+
 struct GcStream {
+	GcStreamCache cache;
 	AESNDPB *voice;
 	uint8   *buf[2];
 	int32    fill;          // which buffer the pump should refill next
@@ -480,6 +502,66 @@ gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 		((GcStream*)arg)->wantMore = TRUE;
 }
 
+// Pull the next span of compressed bytes, from ARAM when it has them.
+// Returns bytes delivered into dst.
+static uint32
+gcStreamCacheRead(GcStream *st, uint8 *dst, uint32 want)
+{
+	GcStreamCache *c = &st->cache;
+	if(!c->ready || st->file == nil)
+		return st->file ? (uint32)fread(dst, 1, want, st->file) : 0;
+
+	uint32 have = c->head >= c->tail ? c->head - c->tail
+	                                 : STREAM_ARAM_BYTES - c->tail + c->head;
+	if(have < want){
+		// Top the ring up in one large sequential read rather than many small
+		// ones — the whole point of the cache.
+		uint32 space = STREAM_ARAM_BYTES - have - 32;
+		uint32 chunk = space > STREAM_REFILL ? STREAM_REFILL : space;
+		chunk &= ~31u;
+		if(chunk){
+			static uint8 *stage;
+			if(stage == nil)
+				stage = (uint8*)memalign(32, STREAM_REFILL);
+			if(stage){
+				size_t got = fread(stage, 1, chunk, st->file);
+				if(got){
+					uint32 n = ((uint32)got + 31) & ~31u;
+					DCFlushRange(stage, n);
+					// The ring may wrap; ARAM DMA cannot, so split it.
+					uint32 first = STREAM_ARAM_BYTES - c->head;
+					if(first > n) first = n;
+					AR_StartDMA(AR_MRAMTOARAM, (u32)stage, c->aramAddr + c->head, first);
+					while(AR_GetDMAStatus()) ;
+					if(n > first){
+						AR_StartDMA(AR_MRAMTOARAM, (u32)(stage+first), c->aramAddr, n-first);
+						while(AR_GetDMAStatus()) ;
+					}
+					c->head = (c->head + n) % STREAM_ARAM_BYTES;
+					have += n;
+				}
+			}
+		}
+	}
+	if(have == 0)
+		return 0;
+	uint32 give = want < have ? want : have;
+	give &= ~31u;
+	if(give == 0)
+		return 0;
+	uint32 first = STREAM_ARAM_BYTES - c->tail;
+	if(first > give) first = give;
+	DCInvalidateRange(dst, give);
+	AR_StartDMA(AR_ARAMTOMRAM, (u32)dst, c->aramAddr + c->tail, first);
+	while(AR_GetDMAStatus()) ;
+	if(give > first){
+		AR_StartDMA(AR_ARAMTOMRAM, (u32)(dst+first), c->aramAddr, give-first);
+		while(AR_GetDMAStatus()) ;
+	}
+	c->tail = (c->tail + give) % STREAM_ARAM_BYTES;
+	return give;
+}
+
 // Fill dst with up to STREAM_CHUNK_BYTES of 16-bit stereo PCM at DIGITALRATE.
 // Returns bytes produced; 0 means end of track.
 //
@@ -491,7 +573,7 @@ gcStreamDecode(GcStream *st, uint8 *dst)
 {
 	if(st->file == nil)
 		return 0;
-	size_t got = fread(dst, 1, STREAM_CHUNK_BYTES, st->file);
+	size_t got = gcStreamCacheRead(st, dst, STREAM_CHUNK_BYTES);
 	if(got == 0 && st->looping){
 		fseek(st->file, (long)st->dataStart, SEEK_SET);
 		st->posSamples = 0;
@@ -502,6 +584,7 @@ gcStreamDecode(GcStream *st, uint8 *dst)
 	st->posSamples += (uint32)got/4;
 	return (uint32)got;
 }
+
 
 static void
 gcStreamPump(GcStream *st)
