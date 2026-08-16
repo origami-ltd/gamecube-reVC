@@ -61,6 +61,8 @@
 namespace rw { extern unsigned rwAllocLive[16], rwAllocTotal[16], rwAllocLiveBytes[16]; }
 unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync, gxSnapFrame, gxSnapSky, gxSnapShow;
 unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream, gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
+// The sky split three ways, see DoRWStuffStartOfFrame_Horizon.
+unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
 #endif
 #include "Lights.h"
 #include "Credits.h"
@@ -249,16 +251,37 @@ DoRWStuffStartOfFrame_Horizon(int16 TopRed, int16 TopGreen, int16 TopBlue, int16
 	if(Scene.camera == nil)
 		return false;
 
+#ifdef GTA_OGC
+	// sky measured 8.1ms — the largest single item in a 16ms frame, larger than
+	// the whole world render, with the GP idle. Split it rather than guess
+	// which of the three parts owns it: the camera resize (which rebuilds
+	// rasters when the size changes), the clear, or the sky gradient itself.
+	extern unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
+	unsigned long long tPart = gettime();
+#endif
 	CDraw::CalculateAspectRatio();
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
+#ifdef GTA_OGC
+	gxCamSizeUs = (unsigned)ticks_to_microsecs(gettime() - tPart);
+	tPart = gettime();
+#endif
 	RwCameraClear(Scene.camera, &gColourTop, CLEARMODE);
+#ifdef GTA_OGC
+	gxClearUs = (unsigned)ticks_to_microsecs(gettime() - tPart);
+#endif
 
 	if(!RsCameraBeginUpdate(Scene.camera))
 		return false;
 
 	TheCamera.m_viewMatrix.Update();
+#ifdef GTA_OGC
+	tPart = gettime();
+#endif
 	CClouds::RenderBackground(TopRed, TopGreen, TopBlue, BottomRed, BottomGreen, BottomBlue, Alpha);
+#ifdef GTA_OGC
+	gxCloudUs = (unsigned)ticks_to_microsecs(gettime() - tPart);
+#endif
 
 	return true;
 }
@@ -1708,14 +1731,16 @@ Render2dStuffAfterFade(void)
 		{
 			extern unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream,
 			    gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
+			extern unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
 			unsigned acc = gxSnapSim + gxSnapRender + gxSnapSky + gxSnapFx +
 			    gxSnapHud + gxSnapLights + gxSnapTile + gxSnapStream +
 			    gxSnapCopy + gxSnapGp + gxSnapVsync;
 			unsigned other = gxSnapFrame > acc ? gxSnapFrame - acc : 0;
 			int n = (int)strlen(fpsA);
 			snprintf(fpsA + n, sizeof(fpsA) - n,
-			    " | sim%u rnd%u sky%u fx%u hud%u lit%u str%u cpy%u gp%u vs%u oth%u",
-			    gxSnapSim/100, gxSnapRender/100, gxSnapSky/100, gxSnapFx/100,
+			    " | sim%u rnd%u sky%u(sz%u cl%u cd%u) fx%u hud%u lit%u str%u cpy%u gp%u vs%u oth%u",
+			    gxSnapSim/100, gxSnapRender/100, gxSnapSky/100,
+			    gxCamSizeUs/100, gxClearUs/100, gxCloudUs/100, gxSnapFx/100,
 			    gxSnapHud/100, gxSnapLights/100, gxSnapStream/100,
 			    gxSnapCopy/100, gxSnapGp/100, gxSnapVsync/100, other/100);
 		}

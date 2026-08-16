@@ -6,6 +6,10 @@
 #include "crossplatform.h"
 #include "platform.h"
 #include "Frontend.h"
+
+// Freeze watchdog breadcrumb (gamecube.cpp). The frame-phase markers narrowed
+// the hang to DoRWStuffEndOfFrame; these narrow it inside the menu itself.
+extern const char *gPhase;
 #include "Font.h"
 #include "Pad.h"
 #include "Text.h"
@@ -2301,6 +2305,9 @@ CMenuManager::DrawControllerSetupScreen()
 void
 CMenuManager::DrawFrontEnd()
 {
+#ifdef GTA_OGC
+	gPhase = "menu-draw";
+#endif
 	CFont::SetAlphaFade(255.0f);
 	CSprite2d::InitPerFrame();
 	CFont::InitPerFrame();
@@ -3044,6 +3051,9 @@ CMenuManager::InitialiseChangedLanguageSettings()
 void
 CMenuManager::LoadAllTextures()
 {
+#ifdef GTA_OGC
+	gPhase = "menu-loadtex";
+#endif
 	if (m_bSpritesLoaded)
 		return;
 
@@ -3253,25 +3263,6 @@ CMenuManager::LoadSettings()
 void
 CMenuManager::SaveSettings()
 {
-#ifdef GTA_OGC
-	// Skipped while the freeze is being chased, and the evidence points here.
-	//
-	// Closing the pause menu is what stops the game, and closing is what writes
-	// gta_vc.set. The watchdog says the GP is idle (r1c1) and the thread is
-	// inside DoRWStuffEndOfFrame, while its own fopen never lands even
-	// unguarded — newlib serialises stdio globally, so the main thread being
-	// stuck inside a file call explains every observation at once.
-	//
-	// Writing is what makes this path different from everything else the game
-	// does: the archive is read-only, and this truncates and rewrites, which is
-	// the FAT allocation path rather than an append. boot.sh has always needed
-	// fsck_msdos on the card before every boot, which is what damage from that
-	// path looks like.
-	//
-	// Losing the settings file costs nothing next to not being able to close a
-	// menu. Put this back once the write path is understood.
-	return;
-#endif
 #ifndef LOAD_INI_SETTINGS
 	static char RubbishString[48] = "stuffmorestuffevenmorestuff                 etc";
 #ifdef BIND_VEHICLE_FIREWEAPON
@@ -3545,6 +3536,9 @@ CMenuManager::PrintStats()
 void
 CMenuManager::Process(void)
 {
+#ifdef GTA_OGC
+	gPhase = "menu-process";
+#endif
 #ifdef XBOX_MESSAGE_SCREEN
 	ProcessDialogTimer();
 #endif
@@ -5633,6 +5627,9 @@ CMenuManager::ProcessFileActions()
 void
 CMenuManager::SwitchMenuOnAndOff()
 {
+#ifdef GTA_OGC
+	gPhase = "menu-switch";
+#endif
 	if (!TheCamera.m_WideScreenOn) {
 
 		// Reminder: You need REGISTER_START_BUTTON defined to make it work.
@@ -5767,6 +5764,9 @@ CMenuManager::SwitchMenuOnAndOff()
 void
 CMenuManager::UnloadTextures()
 {
+#ifdef GTA_OGC
+	gPhase = "menu-unloadtex";
+#endif
 	if (m_nCurrScreen == MENUPAGE_SOUND_SETTINGS)
 		DMAudio.StopFrontEndTrack();
 

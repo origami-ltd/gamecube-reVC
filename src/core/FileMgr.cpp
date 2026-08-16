@@ -23,6 +23,18 @@ struct myFILE
 {
 	bool isText;
 	FILE *file;
+#ifdef GTA_OGC
+	// Write buffering. SaveSettings alone issues about forty tiny writes in a
+	// row, and on a FAT volume each one is a read-modify-write of a sector
+	// through libfat — the settings file is 200-odd bytes arriving as forty
+	// separate sector transactions. Buffer the whole file and commit it in one
+	// call on close.
+	//
+	// Buffering here rather than in SaveSettings fixes every writer at once,
+	// including saves, and leaves the call sites alone.
+	char *wbuf;
+	size_t wlen, wcap;
+#endif
 };
 
 #define NUMFILES 20
@@ -96,6 +108,19 @@ found:
 	myfiles[fd].file = fcaseopen(filename, realmode);
 	if(myfiles[fd].file == nil)
 		return 0;
+#ifdef GTA_OGC
+	// Buffer writers, not readers. A file opened for writing collects its
+	// whole contents in memory and commits once on close; reads are untouched
+	// because they are already one bulk transfer through CdStream.
+	myfiles[fd].wbuf = nil;
+	myfiles[fd].wlen = myfiles[fd].wcap = 0;
+	if(strchr(realmode, 'w') || strchr(realmode, 'a') || strchr(realmode, '+')){
+		myfiles[fd].wcap = 4096;
+		myfiles[fd].wbuf = (char*)malloc(myfiles[fd].wcap);
+		if(myfiles[fd].wbuf == nil)
+			myfiles[fd].wcap = 0;   // fall back to unbuffered
+	}
+#endif
 	return fd;
 }
 
@@ -108,6 +133,16 @@ myfclose(int fd)
 	int ret;
 	assert(fd < NUMFILES);
 	if(myfiles[fd].file){
+#ifdef GTA_OGC
+		// One transaction for the whole file.
+		if(myfiles[fd].wbuf){
+			if(myfiles[fd].wlen)
+				fwrite(myfiles[fd].wbuf, 1, myfiles[fd].wlen, myfiles[fd].file);
+			free(myfiles[fd].wbuf);
+			myfiles[fd].wbuf = nil;
+			myfiles[fd].wlen = myfiles[fd].wcap = 0;
+		}
+#endif
 		ret = fclose(myfiles[fd].file);
 		myfiles[fd].file = nil;
 		return ret;
@@ -169,6 +204,24 @@ myfread(void *buf, size_t elt, size_t n, int fd)
 #ifdef GTA_OGC
 	DVD_FS_GUARD;
 #endif
+#ifdef GTA_OGC
+	if(myfiles[fd].wbuf){
+		size_t bytes = elt*n;
+		if(myfiles[fd].wlen + bytes > myfiles[fd].wcap){
+			size_t cap = myfiles[fd].wcap ? myfiles[fd].wcap*2 : 4096;
+			while(cap < myfiles[fd].wlen + bytes)
+				cap *= 2;
+			char *nb = (char*)realloc(myfiles[fd].wbuf, cap);
+			if(nb == nil)
+				return 0;      // caller sees a short write, as it would anyway
+			myfiles[fd].wbuf = nb;
+			myfiles[fd].wcap = cap;
+		}
+		memcpy(myfiles[fd].wbuf + myfiles[fd].wlen, buf, bytes);
+		myfiles[fd].wlen += bytes;
+		return n;
+	}
+#endif
 	if(myfiles[fd].isText){
 		unsigned char *p;
 		size_t i;
@@ -214,6 +267,18 @@ myfwrite(void *buf, size_t elt, size_t n, int fd)
 static int
 myfseek(int fd, long offset, int whence)
 {
+#ifdef GTA_OGC
+	// A seek on a buffered writer would need the buffer to model file
+	// position; flush and fall back instead. Nothing on the write paths seeks,
+	// so this is a safety valve rather than a case that happens.
+	if(myfiles[fd].wbuf){
+		if(myfiles[fd].wlen)
+			fwrite(myfiles[fd].wbuf, 1, myfiles[fd].wlen, myfiles[fd].file);
+		free(myfiles[fd].wbuf);
+		myfiles[fd].wbuf = nil;
+		myfiles[fd].wlen = myfiles[fd].wcap = 0;
+	}
+#endif
 #ifdef GTA_OGC
 	DVD_FS_GUARD;
 #endif
