@@ -1,6 +1,28 @@
 # reVC GameCube — next session
 
-Everything is still uncommitted, in `~/Documents/GitHub/reVC-gamecube` (+ `vendor/librw`).
+## The frame
+
+The reference for this port is **dca3** — <https://gitlab.com/skmp/dca3-game>,
+GTA III and Vice City on a Dreamcast, by Stefanos Kornilios Mitsis Poiitidis
+and The Gang, on re3 + KallistiOS. Cloned at `~/Documents/GitHub/dca3-game`.
+
+They fit that game into **16MB of main RAM**. This port has **24MB**, plus 16MB
+of A-RAM they do not have, plus a faster CPU and a real texture cache. If a
+Dreamcast can hold Liberty City, a GameCube can hold Vice City — the ceiling
+here is not the hardware, and every time this port hit a wall the cause turned
+out to be something the port was doing, not something the console lacked.
+
+So: **treat dca3 as the working proof and follow its architecture.** Its central
+decision is that assets are converted at build time and the running game does no
+conversion at all (`src/tools/texconv.cpp`, per-file Makefile rules producing a
+repacked IMG). Notably `USE_CUSTOM_ALLOCATOR` is disabled in dca3 too — they did
+not answer memory with a smarter heap, they removed the runtime work that
+fragments one. Their `vendor/librw/src/dc/alloc.cpp` is a compacting pool
+allocator (`alloc_run_defrag()` moves blocks and reports each move via callback;
+`alloc_count_continuous()` gives largest-contiguous-free, which `mallinfo`
+cannot). Their librw fork is **MIT**, so adapting from it is fine with
+attribution; the dca3 game repo has no top-level licence, so game-side code
+there is not reusable. Credited in `CREDITS-GAMECUBE.md`.
 
 ## Build & run
 
@@ -11,112 +33,127 @@ fsck_msdos -y ~/Library/Application\ Support/Dolphin/Load/WiiSD.raw
 /Applications/Dolphin.app/Contents/MacOS/Dolphin -e /Users/ebellumat/Documents/GitHub/reVC-wii/src/reVC.dol
 ```
 
-Gameplay lands ~5.5 min after boot — do not screenshot before that, the intro
-cutscene is a dark dock scene and looks like a broken renderer.
-`SIGTERM does not kill Dolphin`; a survivor keeps port 55020 bound and the next
-instance logs "Failed to bind listener socket", silently losing the gecko capture.
-Boot helper that handles all of this: `<scratchpad>/boot.sh`, window id via
-`<scratchpad>/winid.swift` (`.optionAll` — Dolphin can live on another Space).
+- Gameplay is ~5.5 min after boot; the intro cutscene before it is dark and
+  looks like a broken renderer. Do not judge a build before gameplay.
+- `SIGTERM does not kill Dolphin`. A survivor holds TCP 55020 and the next
+  instance logs "Failed to bind listener socket", silently losing the capture.
+- **The SD image mounts without root**, which the old notes said was impossible:
+  `hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse <WiiSD.raw>`
+  → `/Volumes/REVC`. This is how converted assets get installed and how logs are
+  read. `mount_msdos` is the thing that needs root; `hdiutil` does not.
+- Helpers in the session scratchpad: `boot.sh` (kill/fsck/boot/capture gecko),
+  `winid.swift` (Dolphin window id — `.optionAll`, it can sit on another Space).
+- Gecko truncates anything past ~25 characters. Structured data goes to the SD.
 
-## Fixed and verified this session
+## Fixed and confirmed on screen
 
-1. **OOM `exit 1` — fixed.** `Geometry::create` allocated two large contiguous
-   blocks with `rwNew`/`mustmalloc`, which calls `exit(1)`. Both are now
-   soft-fail (`rwMalloc` + nil check) in `vendor/librw/src/geometry.cpp`; the nil
-   propagates cleanly through `Geometry::streamRead` -> `Clump::streamRead`
-   (`failgeo`) -> `LoadAtomicFile` -> `ConvertBufferToObject`, so a failed load
-   is retried by the streamer instead of killing the process. This is the same
-   contract `rasterCreate` and the d3d texture path already used. Verified over
-   two cold boots that previously died at ~5 min.
-2. **FPS counter lying — fixed.** `FramesPerSecond` is a 30-sample mean and read
-   a flat 30 through a 266ms hitch. The HUD now derives the rate from the
-   measured frame period (`gxSnapFrame`, Idle-entry to Idle-entry) and holds the
-   worst period of the last 5s: `29 f33.3 max50 work29 end20 vs4`.
-3. **`TrimStreamedModels()` removed** (`src/core/Streaming.cpp`) — the cause of
-   bugs 2/3 (LOD flicker, missing trees/posts) and probably 1. It evicted 64
-   least-used models every 16th `ConvertBufferToObject`, regardless of pressure.
-   `RemoveLeastUsedModel` protects models with live refs, but a model that just
-   streamed in has *no* refs until its entity instantiates it — so its favourite
-   targets were exactly what had just been loaded, on a cadence driven by
-   loading itself. `MakeSpaceFor` already evicts correctly, bounded by the
-   budget. **Not yet visually confirmed** — needs a drive through the city
-   looking for trees/lamp posts and LOD stability.
-4. **Black characters — largely fixed.** Two real bugs, both found from probe
-   data, not theory:
-   - **The big one:** 165 of 235 sampled ped meshes carry `gflags` `0x11`/`0x13`
-     — **no `TEXTURED` flag, so no texture coordinates** — yet the draw loop
-     bound the material's texture anyway and streamed `UV (0,0)` for every
-     vertex (the `uv ? uv[vi].u : 0.0f` fallback), painting each mesh with one
-     corner texel. `tex` is now gated on `uv != nil`. This fixed ped hair and
-     shoes, car tail lights and plates, and building detail across the scene.
-   - Meshes with neither prelight nor `LIGHT` had no colour source and streamed
-     `(0,0,0,255)` vertex colours (librw's gl3 leans on GL's `(0,0,0,1)` attrib
-     default; it never shows on PC because skinned atomics take the skin
-     pipeline, and GX has no skin pipe). `sendColor` is now decided once in
-     `atomicRenderCB` and passed into `setup3DDraw`, falling back to the
-     material register — RW fixed-function behaviour.
+- **Character textures.** `gxGetTexture` frees the staging pixels after tiling;
+  `rasterLock` then fabricated a zeroed buffer on any later lock and
+  `rasterUnlock` marked the raster dirty, so a good texture was rebuilt from
+  zeros or from one mip level in a level-0-sized allocation.
+- **Lighting on everything non-prelit** (cars, peds, props). `worldBeginUpdateCB`
+  set `engine->currentWorld` and the end-update never restored it; CShadowCamera
+  is created with `RwCameraCreate()` and never added to a world, so everything
+  drawn after a shadow pass evaluated its LIGHT flag against a nil world.
+- **Interior walls and ceilings.** The shadow camera was drawing its
+  stripped-flag silhouette straight into the scene framebuffer (there is no
+  render-to-texture in the GX backend) and its white clear became the frame's
+  copy-clear colour. Offscreen passes are skipped.
+- **Radar mask.** GX does not update Z while the depth compare is disabled, so
+  `CRadar::DrawRadarMask`'s "don't test, do write" has to be an always-passing
+  compare.
+- **Analog sticks.** `PAD_StickX` reaches about ±72 at the physical gate; the
+  game scales against ±128, so full deflection asked for barely half speed.
+- **OOM `exit 1`.** `Geometry::create`'s large allocations soft-fail now, and the
+  nil propagates cleanly to the streamer, which retries.
+- **Honest metrics.** HUD shows presentation rate from the measured frame period,
+  free heap, free-chunk count, and streaming time.
 
-## Still open
+## Open, with the numbers
 
-- **Tommy's shirt/torso mesh is still black** while his jeans, arms, hair and
-  shoes render. Same clump, same white material (`mat=ffffffff` on every one of
-  235 samples), so it is per-mesh.
-  **It is not a lighting problem.** Confirmed on a long soak: the game clock
-  reached 10:16, full daylight, blue sky, every other surface correctly lit —
-  and the torso was still pure black. That rules out the `lit=1 hw=1` /
-  near-zero-`ambL` path (34/119 samples had `ambL` as low as 0.01) as the cause
-  for this mesh.
-  So the fault is the texture or the material binding for that one mesh. Next
-  step: re-enable `GX_PROBE_SKIN` and log the torso mesh specifically —
-  `mat` pointer, `texture` pointer, `texture->raster`, `gxFmt`, tiled first
-  word — to separate "this raster converts to black" from "no texture is bound
-  and it falls back to a black-ish material path". Check the CMPR encoder
-  (`tileCMPR`) against a known texture first: a block where every texel is
-  transparent leaves `mn`/`mx` at their init values (255/0), and the player
-  torso is exactly the kind of texture the player-clothes callback swaps at
-  render time.
-- **Bug 1 (interiors)** — not investigated. Test whether removing the trim
-  already fixed it; "walls missing, character reads as a wall" is consistent
-  with interior models being evicted before instantiation.
-- **Bugs 2/3** — fix in place, needs the visual drive test.
+Measured in gameplay on the original archive:
+`29 f33.3 max483 work31 oom0 m11585K fr6991K blk10701 str0`
 
-## Diagnostics in the tree
+- **Stutter**: nominal 29fps with 483ms worst frames.
+- **Everything draws at the far LOD**; trees, lamp posts and props flicker.
+- **Fragmentation**: ~7MB free split across ~10700 chunks. Allocation fails on
+  shape, not capacity.
 
-- `gx.cpp`: `GX_PROBE_SKIN` (**0**; set to 1 to dump every input to the skinned
-  draw to `dvd:/skin.log`, one sample/second so it spans intro *and* gameplay).
-  Also `GX_WIREFRAME`, `GX_MARK_SKINNED`, `GX_NO_SKIN`, `GX_SKIN_LOCALSPACE`,
-  `GX_USE_INDEXED`, `GX_DL_BUDGET`.
-- 5s heartbeat now writes `dvd:/hb.log` as well as the gecko.
+These are one problem, not three. VC map objects have exactly one atomic each
+(verified across all 3511 IDE entries) — LOD is entity-level, separate `LODxxx`
+models, and `SetupBigBuildingVisibility` only hides the far LOD once the
+detailed model is resident. Starve streaming and the world draws from LODs and
+flickers as models come and go. Do not attack the renderer for this.
 
-**Read SD logs without mounting** (`mount_msdos` needs root here):
-```bash
-LC_ALL=C grep -a -o "SKIN [^|]\{0,220\}" ~/Library/Application\ Support/Dolphin/Load/WiiSD.raw
-```
-SD logs **append across boots** — old generations stay in the image, so filter or
-compare counts rather than assuming the newest run is all that is there.
+Allocation profile, live, from `dvd:/alloc.log`:
+16176 allocations under 16KB holding 5.7MB, and 124 of 16KB or more holding
+6.6MB. Two thirds of the bytes in 124 blocks, 99% of the blocks small and
+long-lived scattered between them.
 
-## Do not re-try these (measured, no effect)
+## The AOT pipeline — built, verified offline, not yet paying off
 
-- **Texture cap 512 -> 256**: free-at-crash moved 2289K -> 2198K, i.e. nothing.
-  The OOM was fragmentation on one large contiguous request, not resident
-  texture bytes.
-- **Scaling `StreamedSize` above ~1.09x**: budget is 7428K against a resident
-  world of ~6.8MB, so any real expansion factor leaves the streamer permanently
-  over budget and evicting on every load — it re-creates the churn that
-  `TrimStreamedModels` caused. Measured at 3/2: `strMem=13569K` vs budget 7428K.
-- The eight perf experiments from last session (display lists, LOD distance,
-  early-Z, im2D memo, indexed arrays, `RGB565_Z16`, hoisting `loadWorldMtx`,
-  `MASTER`). The only win was removing the double `VIDEO_WaitVSync`.
-- Gecko as a transport for anything long: Dolphin's emulated gecko truncates
-  past ~20-30 chars. Every heartbeat in the first captures was cut mid-string.
-  Use the SD log for structured data.
+`tools/gamecube/`: `txdconv` (PC TXD → GameCube native, full resolution, CMPR
+or RGB5A3), `txdverify` (decodes a converted blob the way the console does),
+`repack_img.py` (whole archive, modelled on dca3's imgtool). librw side:
+`PLATFORM_GAMECUBE = 6`, `gx::readNativeTexture/writeNativeTexture/
+getSizeNativeTexture`, wired into `Texture::streamReadNative`.
 
-## Note on the previous session's plan
+Verified: the player atlas survives PC → GX-native → decode byte-exactly, and
+chunk arithmetic closes on `nativeEnd`. 1367 of 6043 entries convert.
 
-The prescriptive plan (GAMECUBE_RENDER_CORRECTNESS_MODE, one frame in flight,
-command-buffer ownership, immutable draw items so "the render worker" cannot
-re-read LOD) targets an asynchronous renderer **that does not exist**. There are
-no threads, no mutexes, no command queue and no frames in flight anywhere in the
-GX backend or the game loop — one FIFO, written synchronously. None of the four
-render bugs traced back to a race; they were a streaming sledgehammer, a missing
-UV guard, a missing colour source, and a smoothed FPS counter.
+**It still stalls.** With the converted archive the game stops on the intro
+title card; the same binary on the original archive reaches gameplay.
+
+What that stall is *not*, all measured:
+- not the native texture reader — `dvd:/native.log` stayed empty for a whole
+  boot, so it rejected nothing
+- not the directory — names and entry count are byte-identical after repack
+- not the chunk format — the per-texture extension chunk is written and the
+  arithmetic verifies
+- not a retry loop — `str0` and `ms_memoryUsed` frozen at 470K mean the streamer
+  is **idle**, not spinning. (An earlier "leak" reading was sampling noise
+  across boot phases; do not trust a single sample.)
+
+**Start here**: instrument `ConvertBufferToObject` with success/failure counts
+per asset type (DFF, TXD, COL, IFP) written to the SD. Today's instrumentation
+only covers geometry allocation (`oom`) and native texture reads, which is why
+the stall has a hole in the middle. Something makes the game decide it does not
+need to load; find which asset type stops resolving.
+
+## Do not re-try — all measured
+
+- Texture cap 512 → 256: free-at-crash moved 2289K → 2198K. No effect.
+- Scaling `StreamedSize`: the reserve was swung 8 → 4 → 6MB and each value
+  traded one failure mode for the other. The budget is not the problem, the
+  shape of the heap is.
+- `USE_CUSTOM_ALLOCATOR`: `MemoryHeap.cpp` does not exist in reVC (it is a re3
+  file). Disabled in dca3 as well, deliberately.
+- `ms_lodDistScale = 0.925`: that is the PC options-slider minimum, not a
+  console value. Stock is `1.2`.
+- Forcing the highest-detail atomic per model: no-op, every map object declares
+  `numAtomics = 1`.
+- Both `CULLBACK` mappings drop interior walls. `GX_CULL_NONE` is the only
+  setting verified correct; the winding is not simply inverted. Do not "fix"
+  this without an A/B in an interior.
+- Gecko for anything structured.
+
+## How to work on this
+
+Two things cost the most time in the last session, both avoidable.
+
+**Audit the consumers before changing a mechanism.** Every regression came from
+swapping something out without checking who depended on it: a semaphore whose
+count was not reset per request (loading-screen deadlock), an eviction that
+refunded zero bytes so `MakeSpaceFor` stripped the world (pause-menu stall), a
+cull mapping changed on reasoning instead of an A/B (interior walls lost). The
+one structural change that broke nothing — `rw::platform` — was the one where
+all seven consumers were listed first.
+
+**Measure before theorising.** Every real cause this session came from a
+measurement, and every long detour came from a plausible story: the allocation
+histogram found the fragmentation, the scene-transition log named
+`cl_tablesetlrg` at distance 8.4 against a threshold of exactly 8.4, the host
+tools proved the atlas and UVs correct in seconds where a console boot costs
+eight minutes, and an A/B with the same binary proved the archive was the
+trigger. Reading the assets directly settled in one command what several build
+cycles of guessing had not.
