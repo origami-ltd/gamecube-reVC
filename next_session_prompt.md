@@ -81,6 +81,17 @@ Corroborating detail worth keeping in mind: `boot.sh` has had to run
 what damage from small scattered FAT writes looks like, and it was read as a
 symptom of the freeze for a long time.
 
+### One more instrument correction, and it may reframe everything
+
+`SwitchMenuOnAndOff` renders two whole frames from inside itself, outside the
+main loop, before opening the menu — and `LoadAllTextures` runs there too.
+`gFrameTick` was bumped in the loop, so it froze for all of that and the
+watchdog called a slow menu load a hang after eight seconds. **Some of the
+freezes chased in this project may have been slow loads, not stopped games.**
+It now counts in `DoRWStuffEndOfFrame`, so "no frame reached the screen for
+eight seconds" is what is measured. Re-confirm the freeze is a freeze before
+chasing it further.
+
 ### The instrument, and how it lied before
 
 The watchdog thread reports over Gecko in short lines, GP status first because
