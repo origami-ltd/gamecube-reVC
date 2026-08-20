@@ -1710,8 +1710,14 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 		if(st->voice == nil){ fclose(st->file); st->file = nil; return FALSE; }
 	}
 	for(int32 i = 0; i < 2; i++)
-		if(st->buf[i] == nil)
+		if(st->buf[i] == nil){
 			st->buf[i] = (uint8*)memalign(32, STREAM_CHUNK_BYTES);
+			// Silence, not whatever MEM1 happened to hold. The DSP can read
+			// this the instant the voice is armed, and uninitialised heap
+			// played back as full-scale white noise.
+			if(st->buf[i])
+				memset(st->buf[i], 0, STREAM_CHUNK_BYTES);
+		}
 	if(st->buf[0] == nil || st->buf[1] == nil){
 		fclose(st->file); st->file = nil; return FALSE;
 	}
@@ -1784,16 +1790,27 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	AESND_SetVoiceFormat(st->voice, st->channels == 1 ? VOICE_MONO16 : VOICE_STEREO16);
 	AESND_SetVoiceFrequency(st->voice, (f32)st->rate);
 	AESND_SetVoiceVolume(st->voice, 255, 255);
-	AESND_SetVoiceStream(st->voice, true);
-	// Prime both chunks: the first goes straight to the voice, the second
-	// waits decoded for the first callback.
+
+	// DECODE FIRST, ARM SECOND. AESND_SetVoiceStream(true) used to run before
+	// any buffer had been handed over, so for the gap between the two the DSP
+	// streamed whatever was in the chunk allocation - full-scale white noise,
+	// and worse if the first decode did not land at all, because then no
+	// buffer was ever set and it never stopped.
 	gcStreamPump(st);
-	if(st->bufReady){
-		AESND_SetVoiceBuffer(st->voice, st->buf[st->play], STREAM_CHUNK_BYTES);
-		st->play ^= 1;
-		st->bufReady = FALSE;
-		gcStreamPump(st);
+	if(!st->bufReady){
+		// Nothing decoded: leave the voice silent rather than let it run on
+		// an empty buffer, and say so.
+		st->playing = FALSE;
+		DVD_FS_GUARD;
+		FILE *al = fopen("dvd:/audio.log", "a");
+		if(al){ fprintf(al, "STRM PRIME-EMPTY s%d %s\n", (int)nStream, path); fclose(al); }
+		return FALSE;
 	}
+	AESND_SetVoiceBuffer(st->voice, st->buf[st->play], STREAM_CHUNK_BYTES);
+	st->play ^= 1;
+	st->bufReady = FALSE;
+	gcStreamPump(st);            // second chunk waits for the first callback
+	AESND_SetVoiceStream(st->voice, true);
 	AESND_SetVoiceStop(st->voice, false);
 	return TRUE;
 }
