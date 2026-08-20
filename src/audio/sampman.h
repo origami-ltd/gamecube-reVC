@@ -133,7 +133,16 @@ enum
 
 #define MAX_STREAMS                3
 
+#ifdef GTA_OGC
+// The GameCube's audio interface runs at 48kHz, 16-bit stereo - that is the
+// hardware ceiling, and its DSP clocks at 54MHz/1124 = 48042.7Hz exactly
+// (libogc's DSP_DEFAULT_FREQ). 32000 was the PC mixer's assumption and it
+// only survives here as a fallback rate for a stream whose header cannot be
+// read, so it may as well be the rate the hardware actually runs at.
+#define DIGITALRATE                48000
+#else
 #define DIGITALRATE                32000
+#endif
 #define DIGITALBITS                16
 #define DIGITALCHANNELS            2
 

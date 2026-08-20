@@ -136,10 +136,16 @@ struct GcBank {
 static uint32 gBankSampleAddr[SAMPLEBANK_PED_START];
 static GcBank gBanks[MAX_SFX_BANKS];
 
-// The DSP's own output rate. Anything handed to it below this is
-// resampled by sample-repeat inside the ucode, which aliases audibly, so
-// channels convert once on the way in instead.
-enum { GC_DSP_RATE = 48000 };
+// The DSP's own output rate, taken from libogc rather than assumed: the
+// GameCube clocks it at 54MHz/1124 = 48042.7Hz and the Wii at a flat 48000.
+// Anything handed to the DSP at a different rate is resampled by
+// sample-repeat inside the ucode, with no interpolation, which aliases
+// audibly - so channels convert once on the way in, to THIS rate, and the
+// voice is then played at it. The ratio is exactly 1.0 and the ucode's
+// resampler never runs. 48kHz 16-bit is the hardware ceiling; there is no
+// higher-quality path on this machine.
+#define GC_DSP_RATE_F  ((f32)DSP_DEFAULT_FREQ)
+enum { GC_DSP_RATE = (uint32)(54000000.0/1124.0 + 0.5) };
 // Ceiling on a converted channel buffer. Above it the sample plays native
 // (the DSP's stair-step is the lesser evil against a 24MB arena).
 enum { GC_CH_RESAMPLE_CAP = 96*1024 };
@@ -690,8 +696,11 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 				return FALSE;
 			}
 			memcpy(c->pcm, gPedBuf + PED_BLOCKSIZE*slot, gSampleIndex[nSfx].nSize);
-		c->pcm48 = FALSE;
 		}
+		// Copied verbatim, never converted - and the flag has to be cleared
+		// for BOTH the ped and the player-talk path, or a channel that last
+		// played a converted bank sample keeps scaling this one's pitch.
+		c->pcm48 = FALSE;
 	}
 
 	c->sample = nSfx;
@@ -812,11 +821,31 @@ cSampleManager::StartChannel(uint32 nChannel)
 	f32 voiceFreq = (f32)c->freq;
 	if(c->pcm48 && c->sample < SAMPLEBANK_PED_START &&
 	   gSampleIndex && gSampleIndex[c->sample].nFrequency)
-		voiceFreq = (f32)GC_DSP_RATE*(f32)c->freq /
+		voiceFreq = GC_DSP_RATE_F*(f32)c->freq /
 		            (f32)gSampleIndex[c->sample].nFrequency;
 	AESND_SetVoiceFrequency(c->voice, voiceFreq);
 	AESND_SetVoiceLoop(c->voice, c->loopCount != 1);
 	AESND_SetVoiceBuffer(c->voice, c->pcm, c->pcmBytes);
+	// TEMP diagnostic (remove at bring-up close): what actually starts, so a
+	// doubled sound shows up as the same sfx twice instead of being argued
+	// about. Bounded, card only.
+	{
+		static int32 left = 300;
+		if(left > 0){
+			left--;
+			DVD_FS_GUARD;
+			FILE *sl = fopen("dvd:/chan.log", "a");
+			if(sl){
+				fprintf(sl, "CH %u sfx=%u b=%u f=%u v%u p%u l%u c48=%d t=%u\n",
+				    (unsigned)nChannel, (unsigned)c->sample,
+				    (unsigned)c->pcmBytes, (unsigned)voiceFreq,
+				    (unsigned)c->volume, (unsigned)c->pan,
+				    (unsigned)c->loopCount, (int)c->pcm48,
+				    (unsigned)ticks_to_millisecs(gettime()));
+				fclose(sl);
+			}
+		}
+	}
 	c->playing = TRUE;
 	AESND_SetVoiceStop(c->voice, false);
 }
