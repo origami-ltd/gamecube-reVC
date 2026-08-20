@@ -39,6 +39,9 @@
 #include "MBlur.h"
 #include "postfx.h"
 #include "custompipes.h"
+#ifdef GTA_OGC
+namespace rw { namespace gx { extern int8 gxEfbResPref; } }
+#endif
 #include "MemoryHeap.h"
 #include "FileMgr.h"
 #include "Camera.h"
@@ -126,9 +129,16 @@ void LangJapSelect(int8 action)
 }
 #endif
 
+#ifdef GTA_OGC
+int8 gNeoRowsIn = -1;   // -1 never evaluated, 0 open failed, 1 rows inserted
+#endif
+
 void
 CustomFrontendOptionsPopulate(void)
 {
+#ifdef GTA_OGC
+	gNeoRowsIn = 2;   // entered; 0/1 below overwrite with the open verdict
+#endif
 	// Most of custom options are done statically in MenuScreensCustom.cpp, we add them here only if they're dependent to extra files
 
 	int fd;
@@ -139,7 +149,48 @@ CustomFrontendOptionsPopulate(void)
 #if defined ANDROID
 	CFileMgr::ChangeDir("\\");
 #endif
+#ifdef GTA_OGC
+	gNeoRowsIn = 3;   // reached the open
+#ifndef HW_RVL
+	// Bounce diagnostic over the only debug channel this target has: the
+	// memory card. Counts every entry into this function; the GC-ISO boot
+	// spins re-reading neo.txd and this file names the loop from the host.
+	{
+		static int populateCalls;
+		populateCalls++;
+		extern RwUInt32 gGameState;
+		FILE *df = fopen("mc:/diag.bin", "wb");
+		if(df){
+			fprintf(df, "populate=%d state=%u", populateCalls, (unsigned)gGameState);
+			fclose(df);
+		}
+	}
+#endif
+#endif
+#if defined(GTA_OGC) && !defined(HW_RVL)
+	#define NEOCK(tag) do{ FILE *df_ = fopen("mc:/diag.bin","wb"); \
+		if(df_){ fputs(tag, df_); fclose(df_); } }while(0)
+#else
+	#define NEOCK(tag) do{}while(0)
+#endif
+	NEOCK("pre-open1");
 	fd = CFileMgr::OpenFile("neo/neo.txd","r");
+	NEOCK(fd ? "open1-ok" : "open1-fail");
+	#define NEOCK2 NEOCK
+	if (fd == 0){
+		fd = CFileMgr::OpenFile("dvd:/neo/neo.txd","r");
+		NEOCK(fd ? "open2-ok" : "open2-fail");
+	}
+	#undef NEOCK
+#ifdef GTA_OGC
+	// Latched only; reported later from Idle — at this point in boot neither
+	// the filesystem nor the Gecko listener exists yet, so any line emitted
+	// here just vanishes (measured).
+	{
+		extern int8 gNeoRowsIn;
+		gNeoRowsIn = fd ? 1 : 0;
+	}
+#endif
 	if (fd) {
 #ifdef GRAPHICS_MENU_OPTIONS
 		FrontendOptionSetCursor(MENUPAGE_GRAPHICS_SETTINGS, -3, false);
@@ -147,6 +198,17 @@ CustomFrontendOptionsPopulate(void)
 		FrontendOptionAddSelect("FED_PRM", 0, 0, MENUALIGN_LEFT, off_on, 2, (int8*)&CustomPipes::RimlightEnable, false, nil, "Graphics", "NeoRimLight");
 		FrontendOptionAddSelect("FED_WLM", 0, 0, MENUALIGN_LEFT, off_on, 2, (int8*)&CustomPipes::LightmapEnable, false, nil, "Graphics", "NeoLightMaps");
 		FrontendOptionAddSelect("FED_RGL", 0, 0, MENUALIGN_LEFT, off_on, 2, (int8*)&CustomPipes::GlossEnable, false, nil, "Graphics", "NeoRoadGloss");
+#ifdef GTA_OGC
+		{
+			// RESOLUTION: EFB height, applied at the NEXT boot (the video
+			// mode is committed before the menu exists). 480P, 528P
+			// supersampled to the 480 output, and the 720p row that names
+			// Dolphin's internal-resolution scaler as the thing actually
+			// rendering higher — the GP tops out at 640x528.
+			static const char *resNames[] = { "FED_R48", "FED_R52", "FED_R72" };
+			FrontendOptionAddSelect("FED_RES", 0, 0, MENUALIGN_LEFT, resNames, ARRAY_SIZE(resNames), (int8*)&rw::gx::gxEfbResPref, false, nil, "Graphics", "EfbHeight");
+		}
+#endif
 #else
 		FrontendOptionSetCursor(MENUPAGE_DISPLAY_SETTINGS, -3, false);
 		FrontendOptionAddSelect("FED_VPL", 0, 0, MENUALIGN_LEFT, vehPipelineNames, ARRAY_SIZE(vehPipelineNames), (int8*)&CustomPipes::VehiclePipeSwitch, false, nil, "Graphics", "VehiclePipeline");
@@ -155,7 +217,13 @@ CustomFrontendOptionsPopulate(void)
 		FrontendOptionAddSelect("FED_RGL", 0, 0, MENUALIGN_LEFT, off_on, 2, (int8*)&CustomPipes::GlossEnable, false, nil, "Graphics", "NeoRoadGloss");
 #endif
 		CFileMgr::CloseFile(fd);
+#if defined(GTA_OGC) && !defined(HW_RVL)
+		{ FILE *df_ = fopen("mc:/diag.bin","wb"); if(df_){ fputs("rows-closed", df_); fclose(df_);} }
+#endif
 	}
+#endif
+#if defined(GTA_OGC) && !defined(HW_RVL)
+	{ FILE *df_ = fopen("mc:/diag.bin","wb"); if(df_){ fputs("pre-langs", df_); fclose(df_);} }
 #endif
 	// Add outsourced language translations, if files are found
 #ifdef MORE_LANGUAGES
@@ -190,6 +258,9 @@ CustomFrontendOptionsPopulate(void)
 #endif
 #endif
 
+#if defined(GTA_OGC) && !defined(HW_RVL)
+	{ FILE *df_ = fopen("mc:/diag.bin","wb"); if(df_){ fputs("populate-end", df_); fclose(df_);} }
+#endif
 }
 #endif
 
@@ -197,7 +268,12 @@ CustomFrontendOptionsPopulate(void)
 #define MINI_CASE_SENSITIVE
 #include "ini.h"
 
+#if defined(GTA_OGC) && !defined(HW_RVL)
+// Straight to the memory card with the rest of the userfiles.
+mINI::INIFile ini("mc:/reVC.ini");
+#else
 mINI::INIFile ini("reVC.ini");
+#endif
 mINI::INIStructure cfg;
 
 bool ReadIniIfExists(const char *cat, const char *key, uint32 *out)
@@ -589,6 +665,11 @@ bool LoadINISettings()
 	CPopulation::MaxNumberOfPedsInUse = DEFAULT_MAX_NUMBER_OF_PEDS * CIniFile::PedNumberMultiplier;
 	CPopulation::MaxNumberOfPedsInUseInterior = DEFAULT_MAX_NUMBER_OF_PEDS_INTERIOR * CIniFile::PedNumberMultiplier;
 	CCarCtrl::MaxNumberOfCarsInUse = DEFAULT_MAX_NUMBER_OF_CARS * CIniFile::CarNumberMultiplier;
+#endif
+
+#ifdef GTA_OGC
+	// TEMP PROBE (#4 read-half proof): values actually parsed from mc:/reVC.ini
+	{ FILE *df = fopen("mc:/diag3.bin", "wb"); if(df){ fprintf(df, "ini-loaded sfx=%d music=%d\n", FrontEndMenuManager.m_PrefsSfxVolume, FrontEndMenuManager.m_PrefsMusicVolume); fclose(df); } }
 #endif
 
 	return true;

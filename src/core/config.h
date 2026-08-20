@@ -369,11 +369,20 @@ enum Config {
 //#define USE_TEXTURE_POOL
 #ifdef LIBRW
 #define EXTENDED_COLOURFILTER		// more options for colour filter (replaces mblur)
-// GX has no shader pipeline, so these have no implementation there either.
-#if !defined(RW_NULL) && !defined(RW_GAMECUBE)
+#if !defined(RW_NULL)
+// The GX backend renders the neo effects itself now — matfx env-maps, ped rim
+// light, road gloss and world lightmaps all run as an extra TEV stage
+// (vendor/librw/src/gx/gx.cpp), fed by CustomPipes' tables through the
+// bridges in the skel. What stays PC-only is below: droplets and the new
+// renderer are shader systems with no GX counterpart yet.
 #define EXTENDED_PIPELINES		// custom render pipelines (includes Neo)
+// Droplets run on GX too now: the mask x refracted-frame combine is two TEV
+// stages (gx.cpp gxDroplet*), fed by the same simulation. This is the lens
+// water the user knows from the PC/WASM build — hydrants and rain.
 #define SCREEN_DROPLETS			// neo water droplets
+#if !defined(RW_GAMECUBE)
 #define NEW_RENDERER		// leeds-like world rendering, needs librw
+#endif
 #endif
 #endif
 
@@ -430,7 +439,7 @@ enum Config {
 #		define GRAPHICS_MENU_OPTIONS // otherwise Display settings will be scrollable
 #		define NO_ISLAND_LOADING  // disable loadscreen between islands via loading all island data at once, consumes more memory and CPU
 #		define CUTSCENE_BORDERS_SWITCH
-#		define MULTISAMPLING		// adds MSAA option
+#		define MULTISAMPLING		// adds MSAA option; on GTA_OGC it drives the copy filter
 #		define INVERT_LOOK_FOR_PAD // enable the hidden option
 #		define PED_CAR_DENSITY_SLIDERS
 #	endif

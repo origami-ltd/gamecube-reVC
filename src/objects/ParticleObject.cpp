@@ -32,14 +32,22 @@ CAudioHydrant::Add(CParticleObject *particleobject)
 {
 	for ( int32 i = 0; i < MAX_AUDIOHYDRANTS; i++ )
 	{
-		if ( List[i].AudioEntity == AEHANDLE_NONE )
+		if ( List[i].AudioEntity == AEHANDLE_NONE && List[i].pParticleObject == nil )
 		{
 			List[i].AudioEntity = DMAudio.CreateEntity(AUDIOTYPE_FIREHYDRANT, particleobject);
 
-			if ( AEHANDLE_IS_FAILED(List[i].AudioEntity) )
-				return false;
-			
-			DMAudio.SetEntityStatus(List[i].AudioEntity, TRUE);
+			// The slot registers the hydrant even when the audio entity
+			// fails. The neo screen droplets read pParticleObject out of
+			// this list to soak the lens near a spraying hydrant, and the
+			// stock early-return chained that VISUAL to the AUDIO backend
+			// succeeding — on this port the lens stayed dry for exactly as
+			// long as the hydrant sound was unavailable. Remove() clears by
+			// pParticleObject and tolerates a NONE handle, so a sound-less
+			// slot lives and dies correctly.
+			if ( !AEHANDLE_IS_FAILED(List[i].AudioEntity) )
+				DMAudio.SetEntityStatus(List[i].AudioEntity, TRUE);
+			else
+				List[i].AudioEntity = AEHANDLE_NONE;
 			
 			List[i].pParticleObject = particleobject;
 			

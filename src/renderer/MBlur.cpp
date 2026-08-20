@@ -16,6 +16,15 @@
 #include "Hud.h"
 #include "Frontend.h"
 #include "MBlur.h"
+#ifdef GTA_OGC
+namespace rw { namespace gx {
+extern uint8 gxDropletBrighten;
+void gxDropletBegin(rw::Raster *mask, rw::Raster *screen);
+void gxDropletQuad(const float *px, const float *py, float u2l, float v2t,
+    float u2r, float v2b, uint32 rgba);
+void gxDropletEnd(void);
+} }
+#endif
 #include "postfx.h"
 
 // Originally taken from RW example 'mblur'
@@ -277,8 +286,18 @@ CMBlur::CreateImmediateModeData(RwCamera *cam, RwRect *rect, RwIm2DVertex *verts
 			y2 -= HALFPX;
 		}
 
+#ifdef GTA_OGC
+		// The frame-grab textures are camera-sized on this platform (see
+		// CPostFX::Open), not pow2-rounded, so screen->UV maps 1:1. Keeping
+		// the pow2 basis made every refraction quad sample a shrunken,
+		// displaced patch of the frame — the "ellipse repeating a piece of
+		// the game" artifact the user reported in the rain.
+		int32 width  = RwRasterGetWidth (RwCameraGetRaster(cam));
+		int32 height = RwRasterGetHeight(RwCameraGetRaster(cam));
+#else
 		int32 width  = Pow(2.0f, int32(log2(RwRasterGetWidth (RwCameraGetRaster(cam))))+1);
 		int32 height = Pow(2.0f, int32(log2(RwRasterGetHeight(RwCameraGetRaster(cam))))+1);
+#endif
 		u1 = x1/width + u1Off;
 		v1 = y1/height + v1Off;
 		u2 = x2/width + u2Off;
@@ -333,6 +352,33 @@ CMBlur::MotionBlurRender(RwCamera *cam, uint32 red, uint32 green, uint32 blue, u
 {
 #ifdef EXTENDED_COLOURFILTER
 	CPostFX::Render(cam, red, green, blue, blur, type, bluralpha);
+	// Drain the screen-effect queue.
+	//
+	// OverlayRenderFx is the ONLY thing that draws a render-fx, and it was
+	// only ever reached from inside OverlayRender — which this branch
+	// replaces wholesale with CPostFX::Render. So with EXTENDED_COLOURFILTER
+	// on, everything CMBlur::AddRenderFx queues is queued and never drawn:
+	// FXTYPE_SPLASH1 (the fire hydrant), SPLASH2/3 (car and ped splashes on
+	// the lens), WATER1/2 (rain on the lens), BLOOD1/2 and HEATHAZE. Those
+	// particle types deliberately carry no raster of their own — they are not
+	// sprites — which is why a texture census finds them "missing" and why no
+	// amount of looking at particle.txd was ever going to explain the hydrant.
+	//
+	// It also restores the pBufVertCount reset at the end of that function,
+	// without which the queue latches full at NUM_RENDER_FX forever.
+	// The drop and haze passes warp the CURRENT frame, so capture it now —
+	// into the back buffer, not the front one, because when motion blur is
+	// on the front buffer holds the trail history and overwriting it here
+	// would weaken the trails whenever a drop is on screen. Guarded because
+	// CPostFX::Open does not check RwRasterCreate, and binding a nil raster
+	// into the GP is the one failure mode on this console with no way back.
+	if(pBufVertCount > 0 && CPostFX::pBackBuffer){
+		RwRasterPushContext(CPostFX::pBackBuffer);
+		RwRasterRenderFast(RwCameraGetRaster(cam), 0, 0);
+		RwRasterPopContext();
+		OverlayRenderFx(cam, CPostFX::pBackBuffer);
+	}else
+		pBufVertCount = 0;   // nothing drew; do not let the queue latch full
 #else
 	PUSH_RENDERGROUP("CMBlur::MotionBlurRender");
 	RwRGBA color = { (RwUInt8)red, (RwUInt8)green, (RwUInt8)blue, (RwUInt8)blur };
@@ -586,6 +632,14 @@ CMBlur::AddRenderFx(RwCamera *cam, RwRect *rect, float z, FxType type)
 	fxZ[pBufVertCount] = z;
 	fxType[pBufVertCount] = type;
 	pBufVertCount++;
+#ifdef GTA_OGC
+	{
+		// Queue/draw tallies for the heartbeat: the splash chain has five
+		// links and the missing-hydrant reports never said which one broke.
+		extern uint32 gFxQueued;
+		gFxQueued++;
+	}
+#endif
 
 	return true;
 }
@@ -618,6 +672,35 @@ CMBlur::OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf)
 		case FXTYPE_BLOOD1:
 		case FXTYPE_BLOOD2: {
 			drawWaterDrops = true;
+#ifdef GTA_OGC
+			// One pass through the droplet TEV: dot mask x shifted frame,
+			// plus the PC pass-1 gray glint (K2 brighten stage) so the drop
+			// reads watery instead of a dark spot over dark scenery. The
+			// PC's own two-pass needs the stencil/dest-alpha emulation that
+			// Dolphin's EFB settings defeat (that was the square).
+			{
+				int32 width  = RwRasterGetWidth (RwCameraGetRaster(cam));
+				int32 height = RwRasterGetHeight(RwCameraGetRaster(cam));
+				float u1Off = (fxRect[i].w - fxRect[i].x)/(float)width;
+				float u2Off = u1Off - (fxRect[i].w - fxRect[i].x + 0.5f)*0.66f/width;
+				float halfHeight = (fxRect[i].h - fxRect[i].y + 0.5f)*0.25f/height;
+				float x1 = fxRect[i].x, y1 = fxRect[i].y;
+				float x2 = fxRect[i].w, y2 = fxRect[i].h;
+				float ul = x1/width  + u1Off;
+				float vt = y1/height + halfHeight;
+				float ur = x2/width  + u2Off;
+				float vb = y2/height - halfHeight;
+				float px[4] = { x1, x1, x2, x2 };
+				float py[4] = { y1, y2, y2, y1 };
+				bool blood = fxType[i] == FXTYPE_BLOOD1 || fxType[i] == FXTYPE_BLOOD2;
+				uint32 rgba = blood ? 0xFF0000C8u : 0xE1E1E1C8u;
+				rw::gx::gxDropletBrighten = blood ? 0 : 32;
+				rw::gx::gxDropletBegin(gpDotRaster, frontBuf);
+				rw::gx::gxDropletQuad(px, py, ul, vt, ur, vb, rgba);
+				rw::gx::gxDropletEnd();
+			}
+			break;
+#else
 			int32 width  = Pow(2.0f, int32(log2(RwRasterGetWidth (RwCameraGetRaster(cam))))+1);
 			int32 height = Pow(2.0f, int32(log2(RwRasterGetHeight(RwCameraGetRaster(cam))))+1);
 
@@ -682,6 +765,7 @@ CMBlur::OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf)
 				}
 				RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, verts, 4, Index, 6);
 			}
+#endif
 			break;
 		}
 		case FXTYPE_SPLASH1:
@@ -691,6 +775,13 @@ CMBlur::OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf)
 			break;
 
 		case FXTYPE_HEATHAZE:
+#ifdef GTA_OGC
+			// Skipped whole. The refraction half is already disabled here
+			// (EFB dest-alpha mask unreliable under Dolphin), and the
+			// darkening half alone reads as a black ball stamped on the
+			// screen — user-reported, twice.
+			break;
+#endif
 			if(TheCamera.GetScreenFadeStatus() == FADE_0 && frontBuf){
 				int alpha = FrontEndMenuManager.m_PrefsBrightness > 255 ?
 					FrontEndMenuManager.m_PrefsBrightness - 90 :
@@ -720,6 +811,14 @@ CMBlur::OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf)
 				RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDONE);
 				RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, verts, 4, Index, 6);
 
+#ifndef GTA_OGC
+				// The refraction half of the haze masks itself with stencil
+				// (emulated as EFB dest alpha on GX). Whether that mask holds
+				// on Dolphin depends on the user's EFB accuracy settings —
+				// with format emulation off, dst alpha reads 1.0 and this
+				// pass smears a jittering rectangle across mid-screen.
+				// Reported and reproduced; the darkening pass above carries
+				// the effect alone on this platform.
 				CreateImmediateModeData(cam, &fxRect[i], verts, CRGBA(255, 255, 255, alpha),
 					CGeneral::GetRandomNumberInRange(-0.002f, 0.002f),
 					CGeneral::GetRandomNumberInRange(-0.002f, 0.002f),
@@ -737,6 +836,7 @@ CMBlur::OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf)
 				RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDSRCALPHA);
 				RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDINVSRCALPHA);
 				RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, verts, 4, Index, 6);
+#endif
 			}
 			break;
 		}
@@ -797,5 +897,11 @@ CMBlur::OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf)
 
 	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)FALSE);
 	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
+#ifdef GTA_OGC
+	{
+		extern uint32 gFxDrawn;
+		gFxDrawn += pBufVertCount;
+	}
+#endif
 	pBufVertCount = 0;
 }

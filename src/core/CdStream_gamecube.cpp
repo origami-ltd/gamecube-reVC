@@ -65,10 +65,23 @@ aramWaitDMA(void)
 static void
 AramCacheInit(uint32 maxRequestSectors)
 {
+#ifdef HW_RVL
+	// No ARAM on the Wii. Dolphin-Wii ignores AR DMA, so a "working" cache
+	// here would return untouched (garbage) buffers as hits. Never arm it.
+	(void)maxRequestSectors;
+	return;
+#else
 	if(aramReady || maxRequestSectors == 0)
 		return;
-	if(!AR_CheckInit())
-		AR_Init(nil, 0);
+	if(!AR_CheckInit()){
+		// AR_Alloc records each block length via *__ARBlockLen++ with no
+		// null or bounds check. AR_Init(nil, 0) here was a write through
+		// address zero on the first alloc — and the 256 slot allocs below
+		// overflow any smaller array (sampman guards with the same pattern;
+		// whichever runs first must leave room for BOTH users).
+		static u32 aramBlocks[300];
+		AR_Init(aramBlocks, 300);
+	}
 
 	aramSlotBytes = aramAlign32(maxRequestSectors * CDSTREAM_SECTOR_SIZE);
 
@@ -96,6 +109,7 @@ AramCacheInit(uint32 maxRequestSectors)
 	}
 	aramSlotCount = slots;
 	aramReady = slots > 0;
+#endif
 }
 
 // Returns true when the request was served entirely from ARAM.
@@ -200,6 +214,14 @@ CdStreamFsUnlock(void)
 		LWP_MutexUnlock(fsLock);
 }
 
+extern "C" int
+CdStreamFsTryLock(void)
+{
+	if(fsLock == LWP_MUTEX_NULL)
+		return 1;
+	return LWP_MutexTryLock(fsLock) == 0;
+}
+
 static FILE *imageFiles[MAX_CDIMAGES];
 static char imageNames[MAX_CDIMAGES][64];
 static uint64 imageBytes[MAX_CDIMAGES];
@@ -256,8 +278,27 @@ CdStreamDoRead(int32 channel)
 	}
 
 	CdStreamFsLock();
+#ifdef GTA_OGC
+	// Worker-thread bracket: the boot heap-smash trips on the MAIN thread at
+	// a point that drifts between builds — the signature of a concurrent
+	// writer. This pairs every disc read with before/after checks.
+	{
+		extern void gcHeapGuardCheck(const char *marker);
+		char m[40];
+		snprintf(m, sizeof(m), "cdr-pre %x+%x", (unsigned)sector, (unsigned)size);
+		gcHeapGuardCheck(m);
+	}
+#endif
 	bool ok = fseeko(file, (off_t)byteOffset, SEEK_SET) == 0 &&
 	          fread(buffer, 1, byteCount, file) == byteCount;
+#ifdef GTA_OGC
+	{
+		extern void gcHeapGuardCheck(const char *marker);
+		char m[40];
+		snprintf(m, sizeof(m), "cdr-post %x+%x", (unsigned)sector, (unsigned)size);
+		gcHeapGuardCheck(m);
+	}
+#endif
 	CdStreamFsUnlock();
 	if(!ok)
 		return STREAM_ERROR;

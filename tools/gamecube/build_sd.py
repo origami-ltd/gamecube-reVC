@@ -29,6 +29,22 @@ import sys
 # repack_img.py never sees them.
 LOOSE_TXD_DIRS = ("models", "txd")
 
+# Controller diagrams for pads this console does not have. Frontend.cpp points
+# every controller slot at FRONTEND_GCC.TXD, so none of these is ever opened —
+# about 6MB, and FRONTEND_DS2.TXD is the one dictionary txdconv cannot read,
+# which made shipping it a live D3D8 path in a GX-only build.
+SKIP_TXD = ("frontend_ds2.txd", "frontend_ds3.txd", "frontend_ds4.txd",
+            "frontend_x360.txd", "frontend_xone.txd", "frontend_nsw.txd")
+
+# fe_arrows1..4 are the highlight overlays drawn on top of the pad. Blank
+# rather than absent: CSprite2d::Draw on a sprite with no texture paints an
+# untextured quad, which would cover the diagram it is meant to annotate.
+GCC_TXD_IMAGES = (("fe_controller", "fe_controller.tga"),
+                  ("fe_arrows1", "fe_blank.tga"),
+                  ("fe_arrows2", "fe_blank.tga"),
+                  ("fe_arrows3", "fe_blank.tga"),
+                  ("fe_arrows4", "fe_blank.tga"))
+
 
 def convert_txd(txdconv, src, dst, max_dim=None):
     cmd = [txdconv]
@@ -76,6 +92,14 @@ def main():
             if not name.lower().endswith(".txd"):
                 continue
             path = os.path.join(d, name)
+            if name.lower() in SKIP_TXD:
+                os.remove(path)
+                continue
+            # Already GX, and rebuilt below: feeding it back through txdconv
+            # only produces a "cannot read" on a re-run into the same staging
+            # directory.
+            if name.lower() == "frontend_gcc.txd":
+                continue
             tmp = path + ".gx"
             if convert_txd(args.txdconv, path, tmp, args.max_dim):
                 os.replace(tmp, path)
@@ -88,6 +112,41 @@ def main():
                     os.remove(tmp)
                 failed += 1
                 print("  FAILED %s/%s — its textures will be missing" % (sub, name))
+
+    # neo/ — the neo pipeline assets (env/rim/gloss tweak tables and
+    # neo.txd) ship with the reVC source, not with the PC game, which is why
+    # the card kept losing them: this script only copied from the game dir.
+    # Without neo/neo.txd the four pipeline rows never appear in Graphics
+    # Setup at all (re3.cpp gates them on opening that file).
+    repo_neo = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "..", "gamefiles", "neo")
+    if os.path.isdir(repo_neo):
+        print("copy neo", flush=True)
+        shutil.copytree(repo_neo, os.path.join(args.out, "neo"),
+                        dirs_exist_ok=True)
+        # neo.txd is an RW 3.5 D3D8 dictionary; the console's reader refuses
+        # it the same way the host's does, so it ships GX-converted (txdconv
+        # grew a manual walker for exactly this file).
+        neo_txd = os.path.join(args.out, "neo", "neo.txd")
+        if convert_txd(args.txdconv, neo_txd, neo_txd + ".gx"):
+            os.replace(neo_txd + ".gx", neo_txd)
+        else:
+            if os.path.exists(neo_txd + ".gx"):
+                os.remove(neo_txd + ".gx")
+            print("  FAILED neo/neo.txd — gloss/lightmap textures will be missing")
+
+    # The GameCube pad diagram, built from loose TGAs because no PC-side
+    # dictionary contains one.
+    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    gcc = os.path.join(args.out, "models", "frontend_gcc.txd")
+    cmd = [args.txdconv]
+    for texname, img in GCC_TXD_IMAGES:
+        cmd += ["--image", "%s=%s" % (texname, os.path.join(assets, img))]
+    cmd.append(gcc)
+    print("build frontend_gcc.txd", flush=True)
+    if subprocess.run(cmd, stdout=subprocess.DEVNULL).returncode != 0:
+        sys.exit("frontend_gcc.txd failed; the frontend would draw an "
+                 "untextured quad where the pad goes")
 
     if args.audio and os.path.isdir(args.audio):
         dst = os.path.join(args.out, "audio")

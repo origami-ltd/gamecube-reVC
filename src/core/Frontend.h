@@ -612,6 +612,9 @@ public:
 	int8 m_PrefsUseWideScreen;
 	int8 m_PrefsVsync;
 	int8 m_PrefsVsyncDisp;
+	// OFF / 60 / 30. Stays an int8 and stays 1-for-on, so the saved gta_vc.set
+	// from before this change still reads as 60 rather than as garbage.
+	enum { FRAMELIMIT_OFF = 0, FRAMELIMIT_60 = 1, FRAMELIMIT_30 = 2, FRAMELIMIT_COUNT = 3 };
 	int8 m_PrefsFrameLimiter;
 	int8 m_nPrefsAudio3DProviderIndex;
 	int8 m_PrefsSpeakers;

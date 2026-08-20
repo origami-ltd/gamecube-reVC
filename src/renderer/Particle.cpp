@@ -19,6 +19,9 @@
 #include "ParticleObject.h"
 #include "Particle.h"
 #include "soundlist.h"
+#ifdef GTA_OGC
+#include "CdStream.h"
+#endif
 #include "SaveBuf.h"
 #include "debugmenu.h"
 
@@ -671,6 +674,34 @@ void CParticle::Initialise()
 		}
 	}
 
+#ifdef GTA_OGC
+	// Count the particle types that came out of Initialise with no raster.
+	//
+	// Every one of those draws nothing, silently, for the whole run — which is
+	// exactly the reported symptom ("a lot of effects are missing") and is not
+	// visible from anywhere else: RwTextureRead returning nil here is not an
+	// error the game reports, and the hydrant is only one entry in this table.
+	// The first few missing indices are named because the type number says
+	// which effect it is, and a table-wide zero would end the question outright.
+	{
+		extern void GeckoLog(const char*);
+		char line[64];
+		int missing = 0, first[4] = { -1, -1, -1, -1 };
+		for(int32 i = 0; i < MAX_PARTICLES; i++){
+			tParticleSystemData *entry = &mod_ParticleSystemManager.m_aParticles[i];
+			if(entry->m_ppRaster == nil || *entry->m_ppRaster == nil){
+				if(missing < 4) first[missing] = i;
+				missing++;
+			}
+		}
+		snprintf(line, sizeof(line), "PART miss%d %d %d %d %d",
+		    missing, first[0], first[1], first[2], first[3]);
+		GeckoLog(line);
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/automenu.log", "a");
+		if(f){ fprintf(f, "%s\n", line); fclose(f); }
+	}
+#endif
 	debug("CParticle ready");
 }
 

@@ -1263,14 +1263,11 @@ CAnimManager::CreateAnimAssocGroups(void)
 {
 	int i, j;
 
+	// No per-iteration log here. This function is re-entered while models are
+	// still streaming in — the `continue` below is what makes that safe — so
+	// the line was emitted 52 times a frame, and each one is an EXI
+	// round-trip on the main thread. It reported an index and cost the load.
 	for(i = 0; i < NUM_ANIM_ASSOC_GROUPS; i++){
-#ifdef GTA_OGC
-		{
-			char line[64];
-			snprintf(line, sizeof(line), "  assoc %d/%d", i, NUM_ANIM_ASSOC_GROUPS);
-			BootLog(line);
-		}
-#endif
 		CAnimBlock *block = GetAnimationBlock(ms_aAnimAssocDefinitions[i].blockName);
 		if(block == nil || !block->isLoaded || ms_aAnimAssocGroups[i].assocList)
 			continue;
@@ -1278,7 +1275,6 @@ CAnimManager::CreateAnimAssocGroups(void)
 		CBaseModelInfo *mi = CModelInfo::GetModelInfo(ms_aAnimAssocDefinitions[i].modelIndex);
 		RpClump *clump = (RpClump*)mi->CreateInstance();
 #ifdef GTA_OGC
-		BootLog(clump ? "   inst ok" : "   inst NIL");
 		// CreateInstance can fail — the model may not be resident, or its load
 		// may have failed — and everything below dereferences the clump. Stock
 		// code assumes it always succeeds, which on a console with a real
@@ -1293,9 +1289,6 @@ CAnimManager::CreateAnimAssocGroups(void)
 		group->groupId = i;
 		group->firstAnimId = def->animDescs[0].animId;
 		group->CreateAssociations(def->blockName, clump, def->animNames, def->numAnims);
-#ifdef GTA_OGC
-		BootLog("   assocs made");
-#endif
 		for(j = 0; j < group->numAssociations; j++)
 			// GetAnimation(i) in III (but it's in LoadAnimFiles), GetAnimation(group->animDesc[j].animId) in VC
 			group->GetAnimation(def->animDescs[j].animId)->flags |= def->animDescs[j].flags;
@@ -1472,7 +1465,11 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 
 	for(j = 0; j < fileNumAnims; j++){
 #ifdef GTA_OGC
-		if(j % 100 == 0){
+		// j > 0, because a block holds four anims and j%100 was therefore
+		// true on every single one of the several hundred blocks in cuts.img.
+		// Each line is an EXI round-trip on the main thread; together they
+		// were most of the load, and the watchdog kept calling that a hang.
+		if(j > 0 && j % 100 == 0){
 			char line[64];
 			snprintf(line, sizeof(line), "  anim %d/%d", j, fileNumAnims);
 			BootLog(line);

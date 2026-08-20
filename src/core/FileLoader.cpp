@@ -33,6 +33,10 @@
 
 char CFileLoader::ms_line[256];
 
+#ifdef GTA_OGC
+void gcHeapGuardCheck(const char *marker);   // gamecube.cpp, boot-smash bracketing
+#endif
+
 const char*
 GetFilename(const char *filename)
 {
@@ -104,19 +108,31 @@ CFileLoader::LoadLevel(const char *filename)
 				LoadingScreenLoadingFile("Collision");
 				PUSH_MEMID(MEMID_WORLD);
 				CObjectData::Initialise("DATA\\OBJECT.DAT");
+#ifdef GTA_OGC
+				gcHeapGuardCheck("objectdat");
+#endif
 				if(!CStreaming::Init()){
 					POP_MEMID();
 					CFileMgr::CloseFile(fd);
 					RwTexDictionarySetCurrent(savedTxd);
 					return false;
 				}
+#ifdef GTA_OGC
+				gcHeapGuardCheck("streaming-init");
+#endif
 				POP_MEMID();
 				PUSH_MEMID(MEMID_COLLISION);
 				CColStore::LoadAllCollision();
+#ifdef GTA_OGC
+				gcHeapGuardCheck("colstore-all");
+#endif
 				POP_MEMID();
 				for(int i = 0; i < MODELINFOSIZE; i++)
 					if(CModelInfo::GetModelInfo(i))
 						CModelInfo::GetModelInfo(i)->ConvertAnimFileIndex();
+#ifdef GTA_OGC
+				gcHeapGuardCheck("anim-convert");
+#endif
 				objectsLoaded = true;
 			}
 			PUSH_MEMID(MEMID_WORLD);
@@ -532,8 +548,14 @@ AllocateCollisionStages(uint32 count)
 		(StagedCollisionModel*)RwMalloc((size_t)count * sizeof(StagedCollisionModel));
 	if(stages == nil)
 		return nil;
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("stages-malloc");
+#endif
 	for(uint32 i = 0; i < count; i++)
 		new (&stages[i]) StagedCollisionModel;
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("stages-ctor");
+#endif
 	return stages;
 }
 
@@ -570,10 +592,23 @@ StageCollisionRecord(const CollisionRecord &record, CBaseModelInfo *modelInfo, i
 			return false;
 		stage.target = stage.replacement;
 	}
-	if(!ValidateCollisionModel(record.data, record.size, stage.layout) ||
-	   !AllocateCollisionModel(stage.layout, stage.loaded))
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("stg-target");
+#endif
+	if(!ValidateCollisionModel(record.data, record.size, stage.layout))
 		return false;
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("stg-validated");
+#endif
+	if(!AllocateCollisionModel(stage.layout, stage.loaded))
+		return false;
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("stg-allocated");
+#endif
 	PopulateCollisionModel(stage.layout, stage.loaded);
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("stg-populated");
+#endif
 	return true;
 }
 
@@ -624,9 +659,15 @@ ReadCollisionRecord(CollisionCursor &cursor, CollisionRecord &record, bool &hasR
 	uint32 modelSize = ReadLE32(cursor.data + 4);
 	if(modelSize < 84 || modelSize > cursor.remaining - 8)
 		return false;
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("rec-header");
+#endif
 	const uint8 *data = cursor.data + 8;
 	if(!DecodeCollisionRecord(data, modelSize, record) || !cursor.Skip(8 + modelSize))
 		return false;
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("rec-decoded");
+#endif
 	hasRecord = true;
 	return true;
 }
@@ -677,15 +718,33 @@ StageCollisionBuffer(const uint8 *buffer, uint32 size, uint8 colSlot, bool first
 
 		if(record.size + 24 > 15 * 1024)
 			debug("colmodel %s is huge, size %u\n", record.name, record.size + 24);
+#ifdef GTA_OGC
+		{
+			char m[40];
+			snprintf(m, sizeof(m), "read %s", record.name);
+			::gcHeapGuardCheck(m);
+		}
+#endif
 		int modelIndex = -1;
 		CBaseModelInfo *modelInfo = firstTime ?
 			CModelInfo::GetModelInfo(record.name, &modelIndex) :
 			CModelInfo::GetModelInfo(record.name, slot->minIndex, slot->maxIndex);
+#ifdef GTA_OGC
+		{
+			char m[40];
+			snprintf(m, sizeof(m), "mi %s", record.name);
+			::gcHeapGuardCheck(m);
+		}
+#endif
 		if(!modelInfo)
 			debug("colmodel %s can't find a modelinfo\n", record.name);
 		if(!StageCollisionRecord(record, modelInfo, modelIndex, firstTime,
 		                         stages, stageIndex))
 			return false;
+#ifdef GTA_OGC
+		// downtows.col is where the boot smash lands; name the exact record.
+		::gcHeapGuardCheck(record.name);
+#endif
 		stageIndex++;
 	}
 	return stageIndex == recordCount;
@@ -697,12 +756,21 @@ LoadCollisionBuffer(const uint8 *buffer, uint32 size, uint8 colSlot, bool firstT
 	uint32 recordCount = 0;
 	if(!CountCollisionBufferRecords(buffer, size, recordCount))
 		return false;
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("colbuf-counted");
+#endif
 	StagedCollisionModel *stages = AllocateCollisionStages(recordCount);
 	if(stages == nil)
 		return false;
 	bool success = StageCollisionBuffer(buffer, size, colSlot, firstTime, stages, recordCount);
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("colbuf-staged");
+#endif
 	if(success)
 		CommitCollisionStages(stages, recordCount, colSlot);
+#ifdef GTA_OGC
+	::gcHeapGuardCheck("colbuf-committed");
+#endif
 	DestroyCollisionStages(stages, recordCount);
 	return success;
 }
@@ -765,6 +833,11 @@ StageCollisionFile(int fd, StagedCollisionModel *stages, uint32 recordCount)
 			debug("colmodel %s can't find a modelinfo\n", record.name);
 		if(!StageCollisionRecord(record, modelInfo, -1, false, stages, stageIndex))
 			return false;
+#ifdef GTA_OGC
+		// The GENERIC.COL step is where the boot heap-smash lands; per-record
+		// checks name the exact record that does it.
+		::gcHeapGuardCheck(record.name);
+#endif
 		stageIndex++;
 	}
 }
@@ -779,15 +852,27 @@ CFileLoader::LoadCollisionFile(const char *filename, uint8 colSlot)
 
 	PUSH_MEMID(MEMID_COLLISION);
 	debug("Loading collision file %s\n", filename);
+#ifdef GTA_OGC
+	gcHeapGuardCheck("col-open");
+#endif
 	int fd = CFileMgr::OpenFile(filename, "rb");
 	uint32 recordCount = 0;
 	bool success = fd > 0 && CountCollisionFileRecords(fd, recordCount);
+#ifdef GTA_OGC
+	gcHeapGuardCheck("col-counted");
+#endif
 	StagedCollisionModel *stages = success ? AllocateCollisionStages(recordCount) : nil;
 	if(success)
 		success = stages != nil && CFileMgr::Seek(fd, 0, SEEK_SET) &&
 		          StageCollisionFile(fd, stages, recordCount);
+#ifdef GTA_OGC
+	gcHeapGuardCheck("col-staged");
+#endif
 	if(success)
 		CommitCollisionStages(stages, recordCount, colSlot);
+#ifdef GTA_OGC
+	gcHeapGuardCheck("col-committed");
+#endif
 	DestroyCollisionStages(stages, recordCount);
 	if(fd > 0)
 		CFileMgr::CloseFile(fd);

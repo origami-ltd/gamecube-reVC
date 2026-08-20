@@ -123,6 +123,17 @@ RenderEnvMapScene(void)
 void
 EnvMapRender(void)
 {
+#ifdef RW_GAMECUBE
+	// Nothing on GX consumes EnvMapTex: the TEV env stage samples the
+	// material's own matfx texture (vendor gx.cpp), same as gloss/rim.
+	// Running this anyway re-rendered the world into a 128x128 camera-texture
+	// viewport — which on GX is the EFB's top-left corner, over the finished
+	// frame, with no restore — then multiplied it by CarReflectionMask
+	// (BLENDZERO/BLENDSRCCOLOR): the dark square and the dark ball stamped on
+	// the corner of the screen. Neo became the default vehicle pipe on GC,
+	// so it happened every frame in every weather.
+	return;
+#endif
 	if(VehiclePipeSwitch != VEHICLEPIPE_NEO)
 		return;
 
@@ -341,7 +352,7 @@ ReadTweakValueTable(char *fp, InterpolatedValue &interp)
  * Neo Vehicle pipe
  */
 
-int32 VehiclePipeSwitch = VEHICLEPIPE_MATFX;
+int8 VehiclePipeSwitch = VEHICLEPIPE_NEO;   // GC default: neo vehicle pipe
 float VehicleShininess = 1.0f;
 float VehicleSpecularity = 1.0f;
 InterpolatedFloat Fresnel(0.4f);
@@ -369,7 +380,7 @@ AttachVehiclePipe(rw::Clump *clump)
  * Neo World pipe
  */
 
-bool LightmapEnable;
+bool LightmapEnable = true;   // GC default: world lightmaps on
 float LightmapMult = 1.0f;
 InterpolatedFloat WorldLightmapBlend(1.0f);
 rw::ObjPipeline *worldPipe;
@@ -394,7 +405,7 @@ AttachWorldPipe(rw::Clump *clump)
  * Neo Gloss pipe
  */
 
-bool GlossEnable;
+bool GlossEnable = true;      // GC default: road gloss on
 float GlossMult = 1.0f;
 rw::ObjPipeline *glossPipe;
 
@@ -463,18 +474,49 @@ AttachRimPipe(rw::Clump *clump)
  * High level stuff
  */
 
+#ifdef RW_GAMECUBE
+// The pipes-as-pipelines exist only for shader backends (d3d9/gl). On GX the
+// same effects run as an extra TEV stage inside the one immediate pipeline
+// (vendor/librw/src/gx/gx.cpp), fed by this file's tables and switches — so
+// the create/destroy pairs are deliberately nothing.
+void CreateVehiclePipe(void) {}
+void DestroyVehiclePipe(void) {}
+void CreateWorldPipe(void) {}
+void DestroyWorldPipe(void) {}
+void CreateGlossPipe(void) {}
+void DestroyGlossPipe(void) {}
+void CreateRimLightPipes(void) {}
+void DestroyRimLightPipes(void) {}
+#endif
+
 void
 CustomPipeInit(void)
 {
+#if defined(GTA_OGC) && !defined(HW_RVL)
+	// Breadcrumbs over the memory card — the only debug channel on this
+	// target. The GC-ISO boot spins forever somewhere in this block.
+	#define NEO_CRUMB(tag) do{ FILE *df_ = fopen("mc:/diag.bin", "wb"); \
+		if(df_){ fprintf(df_, "neo:%s", tag); fclose(df_); } }while(0)
+#else
+	#define NEO_CRUMB(tag) do{}while(0)
+#endif
+	NEO_CRUMB("opening");
 	RwStream *stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, "neo/neo.txd");
 	RwUInt32 size;
 	if(stream == nil)
 		printf("Error: couldn't open 'neo/neo.txd'\n");
 	else{
-		if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil))
+		NEO_CRUMB("open-ok");
+		if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil)){
+			NEO_CRUMB("chunk-found");
 			neoTxd = RwTexDictionaryGtaStreamRead(stream, size);
+			NEO_CRUMB(neoTxd ? "dict-read-ok" : "dict-read-nil");
+		}else
+			NEO_CRUMB("chunk-missing");
 		RwStreamClose(stream, nil);
+		NEO_CRUMB("closed");
 	}
+	#undef NEO_CRUMB
 
 	EnvMapInit();
 

@@ -271,11 +271,30 @@ FrameUpdateCallBackSkinned(AnimBlendFrameData *frame, void *arg)
 	}
 
 	if((frame->flag & AnimBlendFrameData::IGNORE_ROTATION) == 0){
+#ifdef GTA_OGC
+		// A near-zero blend sum happens when partial anims at full weight
+		// leave a node uncovered (measured: root node, QZERO id0). Exact
+		// zero normalises to identity, but near-zero normalises NUMERICAL
+		// NOISE into a random unit rotation — the twisted limbs. Keep last
+		// frame's rotation instead; one frame of lag on a node nothing is
+		// animating is invisible.
+		if(rot.x*rot.x + rot.y*rot.y + rot.z*rot.z + rot.w*rot.w < 0.01f){
+			// Keep the previous rotation — but if there has never been one
+			// (fresh node, first pose degenerate), a kept zero is a zero
+			// MATRIX: the node collapses to the origin and its shadow smears
+			// across the screen corner. Seed identity instead.
+			if(xform->q.real == 0.0f && xform->q.imag.x == 0.0f &&
+			   xform->q.imag.y == 0.0f && xform->q.imag.z == 0.0f)
+				xform->q.real = 1.0f;
+		}else
+#endif
+		{
 		rot.Normalise();
 		xform->q.imag.x = rot.x;
 		xform->q.imag.y = rot.y;
 		xform->q.imag.z = rot.z;
 		xform->q.real = rot.w;
+		}
 	}
 
 	if((frame->flag & AnimBlendFrameData::IGNORE_TRANSLATION) == 0){
@@ -344,11 +363,30 @@ FrameUpdateCallBackWithVelocityExtractionSkinned(AnimBlendFrameData *frame, void
 	}
 
 	if((frame->flag & AnimBlendFrameData::IGNORE_ROTATION) == 0){
+#ifdef GTA_OGC
+		// A near-zero blend sum happens when partial anims at full weight
+		// leave a node uncovered (measured: root node, QZERO id0). Exact
+		// zero normalises to identity, but near-zero normalises NUMERICAL
+		// NOISE into a random unit rotation — the twisted limbs. Keep last
+		// frame's rotation instead; one frame of lag on a node nothing is
+		// animating is invisible.
+		if(rot.x*rot.x + rot.y*rot.y + rot.z*rot.z + rot.w*rot.w < 0.01f){
+			// Keep the previous rotation — but if there has never been one
+			// (fresh node, first pose degenerate), a kept zero is a zero
+			// MATRIX: the node collapses to the origin and its shadow smears
+			// across the screen corner. Seed identity instead.
+			if(xform->q.real == 0.0f && xform->q.imag.x == 0.0f &&
+			   xform->q.imag.y == 0.0f && xform->q.imag.z == 0.0f)
+				xform->q.real = 1.0f;
+		}else
+#endif
+		{
 		rot.Normalise();
 		xform->q.imag.x = rot.x;
 		xform->q.imag.y = rot.y;
 		xform->q.imag.z = rot.z;
 		xform->q.real = rot.w;
+		}
 	}
 
 	if((frame->flag & AnimBlendFrameData::IGNORE_TRANSLATION) == 0){
@@ -424,11 +462,30 @@ FrameUpdateCallBackWith3dVelocityExtractionSkinned(AnimBlendFrameData *frame, vo
 	}
 
 	if((frame->flag & AnimBlendFrameData::IGNORE_ROTATION) == 0){
+#ifdef GTA_OGC
+		// A near-zero blend sum happens when partial anims at full weight
+		// leave a node uncovered (measured: root node, QZERO id0). Exact
+		// zero normalises to identity, but near-zero normalises NUMERICAL
+		// NOISE into a random unit rotation — the twisted limbs. Keep last
+		// frame's rotation instead; one frame of lag on a node nothing is
+		// animating is invisible.
+		if(rot.x*rot.x + rot.y*rot.y + rot.z*rot.z + rot.w*rot.w < 0.01f){
+			// Keep the previous rotation — but if there has never been one
+			// (fresh node, first pose degenerate), a kept zero is a zero
+			// MATRIX: the node collapses to the origin and its shadow smears
+			// across the screen corner. Seed identity instead.
+			if(xform->q.real == 0.0f && xform->q.imag.x == 0.0f &&
+			   xform->q.imag.y == 0.0f && xform->q.imag.z == 0.0f)
+				xform->q.real = 1.0f;
+		}else
+#endif
+		{
 		rot.Normalise();
 		xform->q.imag.x = rot.x;
 		xform->q.imag.y = rot.y;
 		xform->q.imag.z = rot.z;
 		xform->q.real = rot.w;
+		}
 	}
 
 	if((frame->flag & AnimBlendFrameData::IGNORE_TRANSLATION) == 0){

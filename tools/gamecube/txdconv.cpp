@@ -146,12 +146,12 @@ struct Conv {
 	uint32 size;
 };
 
+// Takes an Image rather than a Texture so the same tiling serves both inputs:
+// a dictionary read off disc, and a loose TGA. Destroys img.
 static bool
-convertTexture(Texture *tex, Conv *out)
+convertImage(Image *img, const char *name, const char *mask,
+	uint32 filterAddressing, uint32 format, Conv *out)
 {
-	Raster *ras = tex->raster;
-	if(ras == nil) return false;
-	Image *img = ras->toImage();
 	if(img == nil) return false;
 	img->unpalettize(true);
 	int w = img->width, h = img->height;
@@ -205,7 +205,10 @@ convertTexture(Texture *tex, Conv *out)
 
 	// CMPR is 4bpp and fine for anything without a gradient alpha ramp;
 	// RGB5A3 is 16bpp and keeps the ramp. Full resolution either way.
-	bool cmpr = !gradientAlpha;
+	// Small textures stay RGB5A3 outright: at 64px and below CMPR saves a
+	// few KB total while its 4x4 blocks butcher soft effect gradients —
+	// the additive rain drip drew its DXT block edges as a square halo.
+	bool cmpr = !gradientAlpha && (w > 64 || h > 64);
 	int align = cmpr ? 7 : 3;
 	int tw = (w + align) & ~align;
 	int th = (h + align) & ~align;
@@ -218,14 +221,108 @@ convertTexture(Texture *tex, Conv *out)
 
 	out->tw = tw; out->th = th;
 	out->gxFmt = cmpr ? GXFMT_CMPR : GXFMT_RGB5A3;
-	out->format = ras->format & 0xF00;
-	out->filterAddressing = tex->filterAddressing;
-	memset(out->name, 0, 32); strncpy(out->name, tex->name, 31);
-	memset(out->mask, 0, 32); strncpy(out->mask, tex->mask, 31);
+	out->format = format;
+	out->filterAddressing = filterAddressing;
+	memset(out->name, 0, 32); strncpy(out->name, name, 31);
+	memset(out->mask, 0, 32); strncpy(out->mask, mask, 31);
 
 	free(rgba);
 	img->destroy();
 	return true;
+}
+
+// Manual walk of a D3D8 texture dictionary librw's reader refuses (old RW
+// versions). Returns texture count or -1.
+static int
+readD3D8TxdManually(const char *path, Conv *convs, int maxn)
+{
+	FILE *f = fopen(path, "rb");
+	if(f == nil) return -1;
+	fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+	u8 *d = (u8*)malloc(len);
+	if(fread(d, 1, len, f) != (size_t)len){ fclose(f); free(d); return -1; }
+	fclose(f);
+
+	auto rd32 = [&](long o){ return (uint32)d[o] | d[o+1]<<8 | d[o+2]<<16 | ((uint32)d[o+3]<<24); };
+	auto rd16 = [&](long o){ return (uint32)d[o] | d[o+1]<<8; };
+	if(len < 24 || rd32(0) != ID_TEXDICTIONARY){ free(d); return -1; }
+	long off = 12;
+	if(rd32(off) != ID_STRUCT){ free(d); return -1; }
+	int count = rd16(off+12);
+	off += 12 + rd32(off+4);
+
+	int n = 0;
+	for(int t = 0; t < count && n < maxn && off + 24 < len; t++){
+		if(rd32(off) != ID_TEXTURENATIVE) break;
+		long chunkEnd = off + 12 + rd32(off+4);
+		long p = off + 12;
+		if(rd32(p) != ID_STRUCT) break;
+		long body = p + 12;
+		uint32 plat = rd32(body);
+		if(plat != 8){ off = chunkEnd; continue; }   // PLATFORM_D3D8
+		uint32 filterAddr = rd32(body+4);
+		char name[33]; memcpy(name, d+body+8, 32); name[32] = 0;
+		char mask[33]; memcpy(mask, d+body+40, 32); mask[32] = 0;
+		uint32 rasterFmt = rd32(body+72);
+		/* uint32 hasAlpha = rd32(body+76); */
+		int w = rd16(body+80), h = rd16(body+82);
+		int depth = d[body+84];
+		/* numLevels d[85], type d[86] */
+		int compression = d[body+87];
+		long q = body + 88;
+
+		Image *img = nil;
+		if(compression){
+			uint32 lvlSize = rd32(q); q += 4;
+			img = Image::create(w, h, 32);
+			img->allocate();
+			img->setPixelsDXT(compression, d+q);
+			if((rasterFmt & 0xF00) == Raster::C565)
+				img->removeMask();
+		}else if(depth == 8 && (rasterFmt & Raster::PAL8)){
+			const u8 *pal = d + q; q += 256*4;
+			uint32 lvlSize = rd32(q); q += 4;
+			img = Image::create(w, h, 32);
+			img->allocate();
+			for(long i = 0; i < (long)lvlSize && i < (long)w*h; i++){
+				const u8 *c = pal + d[q+i]*4;
+				u8 *o = img->pixels + i*4;
+				o[0]=c[0]; o[1]=c[1]; o[2]=c[2]; o[3]=c[3];
+			}
+		}else if(depth == 32 || depth == 24 || depth == 16){
+			uint32 lvlSize = rd32(q); q += 4;
+			img = Image::create(w, h, 32);
+			img->allocate();
+			int bpp = depth/8;
+			for(long i = 0; i < (long)w*h && (i+1)*bpp <= (long)lvlSize; i++){
+				const u8 *c = d + q + i*bpp;
+				u8 *o = img->pixels + i*4;
+				if(depth == 32){ o[0]=c[2]; o[1]=c[1]; o[2]=c[0]; o[3]=c[3]; }
+				else if(depth == 24){ o[0]=c[2]; o[1]=c[1]; o[2]=c[0]; o[3]=255; }
+				else{ // 1555
+					uint32 v = c[0] | c[1]<<8;
+					o[0]=(v>>10&31)*255/31; o[1]=(v>>5&31)*255/31;
+					o[2]=(v&31)*255/31; o[3]=(v&0x8000)?255:0;
+				}
+			}
+		}
+		if(img){
+			if(convertImage(img, name, mask, filterAddr, rasterFmt & 0xF00, &convs[n]))
+				n++;
+		}
+		off = chunkEnd;
+	}
+	free(d);
+	return n;
+}
+
+static bool
+convertTexture(Texture *tex, Conv *out)
+{
+	Raster *ras = tex->raster;
+	if(ras == nil) return false;
+	return convertImage(ras->toImage(), tex->name, tex->mask,
+	    tex->filterAddressing, ras->format & 0xF00, out);
 }
 
 static void
@@ -266,19 +363,40 @@ main(int argc, char **argv)
 	// --max-dim N caps the largest texture axis, halving in powers of two.
 	// Texture data is 191.6MB of the 329.8MB archive, so this is the only
 	// lever on disc size worth pulling.
+	// --image texname=file.tga builds a dictionary from loose images instead
+	// of converting one. Needed because a GameCube has no DualShock: the pad
+	// diagram in the frontend has to be drawn from something that is not in
+	// the PC game's files. Uncompressed TGA only — librw's readTGA asserts on
+	// RLE (imageType 10).
+	const char *imgName[16], *imgPath[16];
+	int nimg = 0;
+
 	int argi = 1;
 	while(argi < argc && strncmp(argv[argi], "--", 2) == 0){
 		if(strcmp(argv[argi], "--max-dim") == 0 && argi+1 < argc){
 			gMaxDim = atoi(argv[argi+1]);
 			if(gMaxDim < 8) gMaxDim = 8;
 			argi += 2;
+		}else if(strcmp(argv[argi], "--image") == 0 && argi+1 < argc){
+			char *eq = strchr(argv[argi+1], '=');
+			if(eq == nil || nimg >= 16){
+				fprintf(stderr, "bad --image %s\n", argv[argi+1]);
+				return 1;
+			}
+			*eq = '\0';
+			imgName[nimg] = argv[argi+1];
+			imgPath[nimg] = eq+1;
+			nimg++;
+			argi += 2;
 		}else{
 			fprintf(stderr, "unknown option %s\n", argv[argi]);
 			return 1;
 		}
 	}
-	if(argc - argi < 2){
-		fprintf(stderr, "usage: %s [--max-dim N] in.txd out.txd\n", argv[0]);
+	if(argc - argi < (nimg ? 1 : 2)){
+		fprintf(stderr, "usage: %s [--max-dim N] in.txd out.txd\n"
+		                "       %s --image name=img.tga [...] out.txd\n",
+		    argv[0], argv[0]);
 		return 1;
 	}
 
@@ -286,19 +404,40 @@ main(int argc, char **argv)
 	Engine::open(nil);
 	Engine::start();
 
+	Conv convs[512];
+	int n = 0;
+	if(nimg){
+		for(int i = 0; i < nimg; i++){
+			// LINEAR filter, WRAP on both axes — the frontend overrides
+			// addressing to BORDER on these sprites anyway.
+			if(!convertImage(readTGA(imgPath[i]), imgName[i], "",
+			    0x1102, Raster::C8888, &convs[n])){
+				fprintf(stderr, "cannot read %s\n", imgPath[i]);
+				return 1;
+			}
+			n++;
+		}
+	}else{
 	StreamFile in;
 	if(in.open(argv[argi], "rb") == nil){ fprintf(stderr, "cannot open %s\n", argv[argi]); return 1; }
 	if(!findChunk(&in, ID_TEXDICTIONARY, nil, nil)){ fprintf(stderr, "not a TXD\n"); return 1; }
 	TexDictionary *txd = TexDictionary::streamRead(&in);
 	in.close();
-	if(txd == nil){ fprintf(stderr, "TXD read failed\n"); return 1; }
-
-	Conv convs[512];
-	int n = 0;
+	if(txd == nil){
+		// Old-version D3D8 dictionaries (neo.txd is RW 3.5) fail librw's
+		// reader wholesale. The d3d8 native layout is simple enough to walk
+		// by hand: header, optional palette, mip levels — level 0 is all the
+		// converter keeps anyway.
+		n = readD3D8TxdManually(argv[argi], convs, 512);
+		if(n < 0){ fprintf(stderr, "TXD read failed\n"); return 1; }
+		fprintf(stderr, "%s: librw refused it; manual d3d8 walk got %d textures\n",
+		    argv[argi], n);
+	}else
 	FORLIST(lnk, txd->textures){
 		if(n >= 512) break;
 		if(convertTexture(Texture::fromDict(lnk), &convs[n]))
 			n++;
+	}
 	}
 	// An empty dictionary is legal — Vice City ships several — and writing a
 	// valid empty GX one matters, because copying the D3D8 original through
@@ -314,8 +453,9 @@ main(int argc, char **argv)
 		total += 12 + 12 + GXNATIVE_HEADER + 4 + convs[i].size + 12;
 	total += 12;                        // empty extension
 
+	const char *outPath = nimg ? argv[argi] : argv[argi+1];
 	StreamFile out;
-	if(out.open(argv[argi+1], "wb") == nil){ fprintf(stderr, "cannot write %s\n", argv[argi+1]); return 1; }
+	if(out.open(outPath, "wb") == nil){ fprintf(stderr, "cannot write %s\n", outPath); return 1; }
 	writeChunkHeader(&out, ID_TEXDICTIONARY, total);
 	writeChunkHeader(&out, ID_STRUCT, 4);
 	out.writeU16((uint16)n);
@@ -336,6 +476,7 @@ main(int argc, char **argv)
 
 	uint32 bytes = 0;
 	for(int i = 0; i < n; i++) bytes += convs[i].size;
-	printf("%s -> %s : %d textures, %u KB tiled\n", argv[argi], argv[argi+1], n, bytes>>10);
+	printf("%s -> %s : %d textures, %u KB tiled\n",
+	    nimg ? "images" : argv[argi], outPath, n, bytes>>10);
 	return 0;
 }

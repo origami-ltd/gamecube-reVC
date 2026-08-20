@@ -26,6 +26,15 @@ CCutsceneShadow::~CCutsceneShadow()
 bool
 CCutsceneShadow::Create(RwObject *object, int32 rasterSize, bool resample, int32 blurPasses, bool gradient)
 {
+#ifdef GTA_OGC
+	// Refused wholesale on GX: every one of this shadow's render-to-texture
+	// passes (ShadowCamera's multiply/invert/blur quads) draws to the MAIN
+	// screen at the origin instead of its texture camera — the permanent
+	// top-left square and ball. Callers all check IsInitialized(), so a
+	// failed Create falls back to the regular projected shadows.
+	(void)object; (void)rasterSize; (void)resample; (void)blurPasses; (void)gradient;
+	return false;
+#endif
 	ASSERT(object != nil);
 	
 	RwRGBAReal color;

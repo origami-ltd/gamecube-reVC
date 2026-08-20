@@ -87,7 +87,7 @@ enum {
 	VEHICLEPIPE_MATFX,
 	VEHICLEPIPE_NEO
 };
-extern int32 VehiclePipeSwitch;
+extern int8 VehiclePipeSwitch;   // int8: edited via (int8*) by the frontend; see postfx.h
 extern float VehicleShininess;
 extern float VehicleSpecularity;
 extern InterpolatedFloat Fresnel;

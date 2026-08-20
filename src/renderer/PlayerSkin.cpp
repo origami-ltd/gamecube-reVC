@@ -132,10 +132,39 @@ CPlayerSkin::GetSkinTexture(const char *texName)
 	else
 		sprintf(gString, "skins\\%s.bmp", texName);
 
-	if (RwImage *image = RtBMPImageRead(gString)) {
+	RwImage *image = RtBMPImageRead(gString);
+#ifdef GTA_OGC
+	// Which of the four steps fails decides the fix, and each guess costs a
+	// boot: a nil image is the file or the BMP reader, a nil raster is the GX
+	// allocator, a nil setFromImage is the format conversion.
+	{
+		extern void GeckoLog(const char*);
+		char line[96];
+		snprintf(line, sizeof(line), "SKIN %s img%d", gString, image != nil);
+		GeckoLog(line);
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/automenu.log", "a");
+		if(f){ fprintf(f, "%s\n", line); fclose(f); }
+	}
+#endif
+	if (image) {
 		RwImageFindRasterFormat(image, rwRASTERTYPETEXTURE, &width, &height, &depth, &format);
 		raster = RwRasterCreate(width, height, depth, format);
+#ifdef GTA_OGC
+		{
+			extern void GeckoLog(const char*);
+			char line[96];
+			snprintf(line, sizeof(line), "SKIN %dx%d d%d f%x ras%d set%d",
+			    width, height, depth, (unsigned)format, raster != nil,
+			    raster != nil && RwRasterSetFromImage(raster, image) != nil);
+			GeckoLog(line);
+			DVD_FS_GUARD;
+			FILE *f = fopen("dvd:/automenu.log", "a");
+			if(f){ fprintf(f, "%s\n", line); fclose(f); }
+		}
+#else
 		RwRasterSetFromImage(raster, image);
+#endif
 
 		tex = RwTextureCreate(raster);
 		RwTextureSetName(tex, texName);

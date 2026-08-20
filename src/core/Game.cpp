@@ -117,6 +117,12 @@ CVector CGame::PlayerCoords;
 bool8 CGame::VarUpdatePlayerCoords;
 #endif
 
+#if defined(GTA_OGC) && defined(EXTENDED_PIPELINES)
+namespace rw { namespace gx {
+extern rw::Texture *(*gxGlossLookup)(rw::Material*);
+} }
+#endif
+
 int gameTxdSlot;
 
 #ifdef SECUROM
@@ -275,6 +281,12 @@ CGame::InitialiseRenderWare(void)
 
 #ifdef EXTENDED_PIPELINES
 	CustomPipes::CustomPipeInit();	// need Scene.world for this
+#ifdef GTA_OGC
+	// The GX backend draws the gloss stage itself (extra TEV stage); it only
+	// needs the game's texture-name table. Function pointer, so librw links
+	// without the game.
+	rw::gx::gxGlossLookup = CustomPipes::GetGlossTex;
+#endif
 #endif
 #ifdef SCREEN_DROPLETS
 	ScreenDroplets::InitDraw();
@@ -616,6 +628,15 @@ bool CGame::Initialise(const char* datFile)
 
 	DMAudio.SetStartingTrackPositions(TRUE);
 	DMAudio.ChangeMusicMode(MUSICMODE_GAME);
+#ifdef GTA_OGC
+	// Load the frontend dictionaries here, once, while there is still room.
+	//
+	// The menu can now be opened during a cutscene, and a cutscene is the
+	// worst moment this game has to ask the streamer for 1.7MB — the intro
+	// was measured at 616K free. UnloadTextures keeps them for the run, so
+	// doing it here means no menu open ever allocates anything at all.
+	FrontEndMenuManager.LoadAllTextures();
+#endif
 	return true;
 }
 
@@ -890,8 +911,19 @@ void CGame::Process(void)
 #endif
 	CCutsceneMgr::Update();
 
+#ifdef GTA_OGC
+	// Start during a cutscene has to reach the frontend. Stock code skips
+	// Process() entirely while a cutscene runs, so the request raised by the
+	// pad — or by the automated open — was never consumed, and measurement
+	// during the intro showed exactly that: `cut1 rq1` every heartbeat with
+	// the menu never coming up. A code pause still blocks it; that one is the
+	// engine genuinely mid-teardown.
+	if (!CTimer::GetIsCodePaused())
+		FrontEndMenuManager.Process();
+#else
 	if (!CCutsceneMgr::IsCutsceneProcessing() && !CTimer::GetIsCodePaused())
 		FrontEndMenuManager.Process();
+#endif
 
 	CTheZones::Update();
 #ifdef SECUROM

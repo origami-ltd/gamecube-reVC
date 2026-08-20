@@ -1,276 +1,389 @@
 # reVC on GameCube — next session
 
-Two priorities, in this order:
+TWO Claude sessions worked this tree in parallel on 08-19/20 (github-3f =
+audio/ISO/droplets/menu; the goal session = artifacts/anim/streaming). They
+coordinated live via SendMessage; everything below is merged and current.
+The tree is ALL uncommitted; be surgical.
 
-1. **The pause menu freezes**, on opening or on closing.
-2. **Music, VFX and audio at 32kHz stereo**, and on the card.
+## 08-20 evening — HEAP CORRUPTION ROOT-CAUSED AND KILLED — READ FIRST
 
-Everything else — 60fps in dense scenes, the missing effects — waits.
+Supersedes item 10 below and every corruption theory in this file.
 
-- Source: `~/Documents/GitHub/reVC-gamecube`
-- Build (the .dol Dolphin runs): `build/wii` → `src/reVC.dol`
-- Tools and the Dolphin harness: `tools/gamecube/`
+**ROOT CAUSE: libogc's `_sbrk_r` silently falls back to MEM2 when Arena1
+runs out.** MEM1 genuinely fills (the streaming budget overbooks it), the brk
+then JUMPS ~300MB to Arena2Lo — newlib's arena accounting reads ~302MB (every
+"impossible mallinfo" ever logged), the top chunk spans the unmapped
+0x8180-0x8FFF gap, and Arena2Lo is the SAME bump pointer gcBankAlloc (audio
+bank) owns, so audio and malloc overwrite each other. That one mechanism
+produced EVERY observed corpse: _calloc_r/__sflush_r invalid writes to 0xC
+(smashed free-list/`__sf`), binary junk blocks in audio.log (smashed stdio
+buffers), OV_EREAD at healthy margins, mallinfo garbage, the null objectList
+link (`null-syncCB obj=0xfffffff8` park), the GC-ISO hud.txd re-read pin
+(consumer parsing through corrupted state, DI bytes CRC-proven good).
 
-```bash
-cd ~/Documents/GitHub/reVC-gamecube/build/wii && ninja
-cd <a scratch dir> && ~/Documents/GitHub/reVC-gamecube/tools/gamecube/boot.sh
-```
+Hunt method that worked (keep for next time): `gcHeapGuardCheck(marker)` in
+gamecube.cpp — cheap mallinfo sanity check, first poisoned marker names the
+step; bracketed LoadingScreen → colstore-all → downtows.col → record 0 →
+stg-allocated → tiny window → disassembled `_sbrk_r` (802f0798) and saw the
+SYS_GetArena2Lo fallback with its own eyes. Markers still in tree
+(FileLoader.cpp/Streaming.cpp/CdStream_gamecube.cpp) — REMOVE at close.
 
-Reconfiguring needs `CMAKE_MODULE_PATH` explicitly, or CMake never finds
-`Platform/NintendoWii.cmake`, `NINTENDO_OGC` stays unset, and the configure dies
-on `Illegal REVC_AUDIO`:
+**Fixes in tree (all uncommitted):**
+- gamecube.cpp: strong `_sbrk_r` override — Arena1-only, honest ENOMEM.
+  THE fix. Also mallopt(M_TRIM_THRESHOLD) disable (harmless belt).
+- gcFatalPark now powers off (SYS_ResetSystem) so a `-b` Dolphin closes
+  itself — user directive "dump the log and exit, don't park".
+- fs-guard sweep (older today): AHB heartbeat, cut.log, MMODE log,
+  screendroplets one-shots, ExportStats got DVD_FS_GUARD; watchdog hang.log
+  and gcFatalPark use new CdStreamFsTryLock (skip-when-busy).
+- sampman: ped slots + player talk + per-channel copies moved to MEM2
+  (HW_RVL) — kills the channel-pcm-alloc 205088B park and frees ~1-3MB MEM1.
+  DCFlushRange added for MEM2 PCM (hardware correctness).
+- CdStream_gamecube: ARAM cache gated OFF on HW_RVL (Dolphin-Wii ignores AR
+  DMA — a "working" cache would return garbage); AR_Init NULL-array bug
+  fixed both sides (300-entry arrays, was 16 vs 256 allocs = .bss overflow
+  on GC).
+- librw rwobjects/frame: sync() parks loudly with object identity on nil
+  syncCB (kept — cheap tripwire).
+- Streaming: HW_RVL reserve 1MB→3MB, budget re-measured at Init (XFBs move
+  the arena after boot measurement), probe floor 512K→2.5MB (UNTESTED, and
+  see below).
 
-```bash
-cmake -S . -B build/wii -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=/Users/ebellumat/dkp-wii/cmake/Wii.cmake \
-  -DCMAKE_MODULE_PATH=/Users/ebellumat/dkp-wii/cmake \
-  -DCMAKE_BUILD_TYPE=Release -DREVC_VENDORED_LIBRW=ON -DREVC_AUDIO=GC \
-  -DLIBRW_PLATFORM=GAMECUBE -DLIBRW_TOOLS=OFF -DLIBRW_INSTALL=OFF
-```
+**STATE AT HANDOFF: corruption gone; boot now OOM-aborts HONESTLY at
+CPlayerPed ctor (heap used 17702K free 218K) during autostart save-load.**
+MEM1 truly doesn't fit the working set the old builds "ran" only because the
+overflow corrupted MEM2 instead of failing. NEXT: rebalance MEM1 honestly.
+A miami-vs-gamecube comparison workflow was running at session end — check
+its verdict; the original PC build hands streaming a 65MB floor and none of
+the port's probe/reserve machinery exists there, so the whole accounting
+stack is port-local and negotiable. Levers: streaming budget/probe floor
+(untested values in tree), MEM1 diet (630KB ped slots already moved),
+smaller working set at spawn.
 
----
+User rules added today (in memory too): close ALL Dolphin instances before
+opening another; Dolphin window opens on the MacBook built-in display
+(AppleScript move after launch); no timed background waits — tail logs live;
+on error: dump to log + auto-close Dolphin (done via -b + poweroff).
 
-## 1. The menu freeze
+## 08-20 afternoon session (audio deep-dive) — READ FIRST, supersedes older audio notes
 
-Press Start and the game stops: frozen image, no exception, no crash.log, CPU
-at 1-6% because the main thread is blocked rather than spinning.
+User directive of record: "fix ALL audio, best possible quality, fail-loud".
 
-**Read this before forming a hypothesis. All of it is ruled out by
-measurement, and each one cost boots:**
+1. **THE sfx mute root cause, fixed**: sfx.sdt (tSample index) was read raw on
+   big-endian Gekko — every offset/size/frequency byteswapped garbage since the
+   backend was written. Bank 0 sized itself 1.58GB→alloc fail→no bank→every
+   channel silent (menu beeps, engine, footsteps — the "mute reports").
+   LE→BE swap at InitialiseSampleBanks. AHB now shows ch=27..29/29 playing.
+2. **Bank range fix**: bank 0 spanned all of sfx.raw (340MB); ends at
+   SAMPLEBANK_PED_START now (real 14.3MB; ped region streams per-sample).
+3. **Wii bank alloc fixed**: LoadSampleBank used raw AR_Alloc (no ARAM on Wii,
+   HW_RVL MEM2 shim existed but was never wired). gcBankAlloc everywhere.
+4. **Quality (HW_RVL)**: bank linear-resampled to 48kHz at load into MEM2
+   (~46MB, arena2 fits w/ 5.8MB spare) — AESND ucode is ZOH, native-rate
+   samples aliased ("qualidade uma merda"). Channels now POINT into the MEM2
+   bank (no per-channel MEM1 copies — the 205088B memalign crash). Ped/talk
+   still copy (slots rotate). StartChannel scales voice freq 48000*f/base for
+   bank samples. GC(!RVL) keeps native-rate ARAM path.
+5. **Cutscene "2x" + speech cut mid-scene = ONE bug, fixed**: ms_cutsceneTimer
+   used NonClipped dt; cut.log caught it jumping +68s across a 60-frame load
+   stall → scene hits end-time mid-load → teardown kills the (real-time)
+   audio halfway. Now clipped (GTA_OGC), same 60ms/frame cap as sim/anims.
+   User confirmed pacing fixed ("a cena em 2x ta resolvido").
+6. **Mission speech existed nowhere**: convert_audio.py only did .adf/.mp3 —
+   all 1120 .wav (intro1-4, dialogue, scanner) never converted. Now .wav too
+   (48k mono ogg, 28MB — NOT 400MB, measure properly), on card + staging.
+7. **lengths.cache prebuilt host-side** (big-endian u32 ms, StreamedNameTable
+   order, built by convert_audio.py build_lengths_cache) — REQUIRED for ISO:
+   the game's own cache write fails on read-only media every boot. Also fixes
+   the Flash-FM/Billie-Jean new-game rule (NewGameRadioTimers % length was
+   % 0 before). 1224 tracks, 0 missing.
+8. **Fail-loud audio (AUDIO_FAIL_LOUD in sampman_gamecube.cpp)**: any audio
+   that cannot be served → gcFatalPark maroon screen naming it (path, ov rc,
+   libc-free) + crash.log. User-requested diagnostic mode; one #define to
+   ship-silence. gcFatalPark made non-static for this.
+9. **MusicManager guard**: ChangeMusicMode(GAME) mid-cutscene w/ preloaded
+   track is blocked+logged (frontend teardown ran during cutscenes on OGC).
+   IsStreamPlaying: paused reads NOT-playing (OAL parity).
+10. **OPEN — THE blocker at session end: libc HEAP CORRUPTION in MEM1.**
+    Evidence chain, in order: (a) ov_open on water.ogg dies OV_EREAD(-128)
+    with fordblks=441K; (b) mallinfo uordblks reads impossible garbage
+    (308265K "used" in a 24MB arena); (c) audio.log gets binary junk blocks
+    written into it; (d) final boot: **Invalid write to 0x0000000C,
+    PC=0x80313d70 = _calloc_r** — allocator walking a smashed free list.
+    Someone writes through a stale/oob pointer into heap metadata.
+    VERDICT (session revc-gamecube-ad, 14:38): resampler and pointer-channels
+    CLEARED by static audit (alloc-sum matches writes; every free is
+    pcmOwned-guarded). Root cause: UNGUARDED dvd:/ stdio racing the CdStream
+    worker inside libfat — the disease the fsLock was born for, regressed by
+    the night's new logging (AHB heartbeat every 5s of gameplay = the junk
+    blocks in audio.log; cut.log; MMODE log; watchdog hang.log; gcFatalPark
+    crash.log; screendroplets one-shots; ExportStats). All sites now guarded
+    via new primitive CdStreamFsTryLock (CdStream.h/CdStream_gamecube.cpp);
+    watchdog uses try-lock skip-when-busy to preserve the empty-log-means-
+    fs-wedged signal. A live user crash at __sflush_r (stdio glue) matched
+    the class. Fixed build 14:38 — VALIDATION BOOT PENDING at handoff time:
+    confirm no _calloc_r/__sflush_r crash, then re-run the audio checklist
+    (intro speech full-length, car radio Flash-FM/Billie-Jean rule, menu
+    beeps, engine, quality pass by ear).
+11. **Hang WATCH updated**: hang.log now non-empty — phase=2dafterfade,
+    gp rd=1 cmd=1 under=1 (GP FIFO underrun, GX side, NOT fs). endofframe
+    spam variant seen too. Separate from audio.
+12. github-3f GC-ISO front, CLOSED for the day (full bisection): boot now
+    reaches mount ✓ mcprobe ✓ Populate(1x) ✓ neo.txd open+rows ✓ deep load
+    471MB ✓ then PINS at window 0x1c120000 = /models/hud.txd +0x28000 —
+    minutes rereading ONE 32KB window. Eliminated: DVD_ReadPrio failures
+    (never fail), md5 diffs (identical), alignment (fills now fixed 16-sector
+    windows in rewritten __read), gxNativeFail retry (never fires, routed to
+    mc:/diag). Remaining fork: parser re-seek loop with GOOD bytes vs DI
+    delivering WRONG bytes that double-read misses. NEXT (1 boot): CRC probe
+    in __read vs host-known ISO bytes → decides the fork; if wrong bytes,
+    root-fix DVD_ReadPrio's one-late (try DVD_ReadAbsAsyncPrio + own
+    completion flag instead of the sync LWP wait). TEMP crumbs to remove at
+    bring-up close: re3.cpp (NEOCK/diag), custompipes.cpp (NEO_CRUMB),
+    gxraster mc-mirror of nativeFail.
+    LATE CLOSURE: CRC probe ran — pinned window's bytes are byte-IDENTICAL
+    to the host ISO (crc b0506cfe both sides, zero diffs across fills). The
+    ISO/DI layer is EXONERATED; the consumer loops on good bytes. Convergent
+    hypothesis with item 10: hud.txd load alloc-fails (MEM1), caller retries
+    forever, gxNativeFail never fires because OOM doesn't route through it.
+    One mallinfo log at the txd-load fail confirms. The GC-ISO blocker and
+    the heap/margin disease are likely ONE workstream. MEM1 diet candidates
+    if margin is needed: the 630KB ped slots. (carddev.c DONE by github-3f
+    at close: on-demand alloc — read = file size, write = 8KB growing to
+    256KB cap, pad at flush; ~248KB less pressure per card open, both GCI
+    paths boot-verified.)
+13. **ISO budget**: mini-DVD 1.46GB. ISO was 1.51GB; +28MB speech. ~80-90MB
+    to trim. Lever: radio q4.5→q3.5 re-encode (~90-120MB) — user cares about
+    quality, get their sign-off first. lengths.cache MUST ship on the ISO.
+14. Boot etiquette while 2 sessions test: NO boot.sh (its pkill -9 kills all
+    Dolphins) — manual launch + kill by OWN pid only; gecko 55020 belongs to
+    the wii session; GC session uses mc:/ as its channel.
 
-- **Not the GP.** `GX_GetGPStatus` from the watchdog reported **`r1c1`** — read
-  idle and command idle, so the GP had finished and was waiting. Four earlier
-  hypotheses were aimed at a GP stall. Note also that the bounded draw-sync
-  wait in `showRaster` is too late to catch one by construction: when the GP
-  stalls the FIFO fills and the CPU parks in whichever GX call comes next,
-  `GX_CopyDisp`, long before `GX_DrawDone`.
-- **Not vsync.** An earlier revision concluded the retrace stall was what let
-  the menu open; that came from comparing builds differing in several things.
-  Tested directly afterwards: it freezes with the stall on too.
-- **Not the filesystem lock.** `CdStream_gamecube.cpp` serialises every libfat
-  user behind one recursive mutex, including all five CFileMgr primitives. The
-  freeze survived it.
-- **Not the periodic SD logging.** `hb.log`/`alloc.log` are off by default
-  (`gLogToSd` in main.cpp). The freeze survived that too.
-- **Not the unconverted loose TXDs.** They are converted on the card now
-  (backup at `WiiSD.raw.bak-preconvert`) and it still freezes.
+## FIXED this night — user-verified where noted
 
-**What the evidence does say.** The thread sits inside `DoRWStuffEndOfFrame`
-while the watchdog's own `fopen` never lands — even unguarded, even with all
-other SD writing disabled — and `GeckoLog` (EXI, a separate transport) gets
-through every single time. newlib serialises stdio globally, so a main thread
-stuck inside a file call explains every observation at once.
+1. **Corner square + ball: DEAD (user: "RESOLVIDO O QUADRADO E A BOLA").**
+   Three contributors, in discovery order: CCutsceneShadow RTT drew to the
+   main screen (Create() refuses on GTA_OGC); FrameUpdate's degenerate-blend
+   guard seeded zero quats (guard v2 seeds identity); and the LAST and main
+   one — `CustomPipes::EnvMapRender` re-rendered the world into a 128×128
+   camera texture (= EFB top-left corner) every frame and multiplied it by
+   CarReflectionMask (ZERO/SRCCOLOR = the corner hunter's first catch,
+   misattributed to ShadowCamera). Nothing on GX consumes EnvMapTex, so it
+   is stubbed on RW_GAMECUBE (custompipes.cpp). It fired every frame because
+   VehiclePipeSwitch defaulted to NEO (github-3f boot 24) — trigger and
+   artifact were introduced together, which is why it looked "new".
+   The corner hunter in gx.cpp drawIm2D stays armed (gecko+card, caller
+   return address; `powerpc-eabi-addr2line -e build/wii/src/reVC.elf -f -C`).
 
-**The strongest lead came from the user, not from the code:** the game's own
-Save menu opens and closes cleanly; only the pause menu freezes.
-`CMenuManager::LoadAllTextures` (Frontend.cpp) is what separates them — it
-reserves 716KB with `MakeSpaceFor(350 sectors)` then loads `fronten1.txd` and
-friends. The Save menu loads none of that.
+2. **Twisted limbs / upside-down peds (quiropraxia): root-caused + fixed.**
+   Compressed keyframes never get RemoveQuaternionFlips at load, and stock
+   `CalcDeltasCompressed` wrote `SetRotation(-rotB)` — the original value
+   back (no-op) — leaving theta computed from a flipped pair while
+   UpdateCompressed slerped the raw pair: up to 180° error mid-interpolation
+   (numeric proof ran in-session). IDLE_stance carries 75 flip pairs (most
+   in ped.ifp — the stretch fidget that "always bugged"), KO_*/HIT_*/CAR_*
+   next; anims play compressed constantly because the uncompressed LRU cache
+   is 25 hierarchies. FIX (AnimBlendNode.cpp): hemisphere-correct rotB
+   LOCALLY in BOTH CalcDeltasCompressed and UpdateCompressed. **NEVER write
+   the flip to storage** — sequences are shared across peds at different
+   phases and the loop seam (last→0) cascades the flip around the ring:
+   tried, produced upside-down peds, reverted same night. FrameUpdate's
+   near-zero guard stays as belt-and-suspenders for true QZERO nodes.
+   Post-fix captures (~200 frames: walking, idling, NPCs) all clean; an
+   in-car reverse close-up on the fixed build is still worth one user look.
 
-**One experiment succeeded and then regressed.** Making `SaveSettings` a no-op
-produced a clean open-and-close cycle, once. That pointed at the write path, so
-the last commit fixed the write path properly rather than skipping it:
-`CFileMgr` now buffers writers and commits once on close, because `SaveSettings`
-was issuing about forty tiny writes and each is a read-modify-write of a FAT
-sector. **The user reports it froze on opening again after that change, so the
-write path is not the whole story — or not the story at all.** Treat the
-SaveSettings result as one data point, not a solved cause.
+3. **Streaming eviction churn: 243 → 2.6 evictions/beat (measured).**
+   The ledger (ms_memoryUsed) sat at cap while the heap truly had 2.4MB
+   free: every load evicted a visible model, which was re-requested next
+   frame — the dark/bright LOD flicker on distant buildings AND interior
+   floors, the rainbow bands (live texobj sampling a freed tiled buffer),
+   and constant disc churn. FIX (Streaming.cpp MakeSpaceFor): probe
+   malloc(want+512K) and skip eviction when the block exists. NOT
+   mallinfo/fordblks — total-free ignores fragmentation and can live-lock a
+   large load with eviction gated off. Loads fell 230 → 6/beat.
 
-Corroborating detail worth keeping in mind: `boot.sh` has had to run
-`fsck_msdos` on the card before every boot for the life of this project. That is
-what damage from small scattered FAT writes looks like, and it was read as a
-symptom of the freeze for a long time.
+4. **P-line X vararg bug**: X%u (worst frame per beat) rode with no matching
+   argument since it was added — every later column shifted one arg left (X
+   showed the limiter; w printed stack garbage; github-3f's "X miswired"
+   readings were this). gxWorstSnap/100 is now actually passed. Full column
+   map: s sky, b begin, r render, m sim, F frame, X worst-frame, L limiter,
+   V vsync-pref, C colourfilter, M blur, li list, pr pre, a audio, fd fade,
+   af after, ti tile, st stream, cp copy, vs vsync-wait, d drops, q fxQueued,
+   w fxDrawn (tenths of ms).
 
-### One more instrument correction, and it may reframe everything
+5. **Small ones**: FPS box hugs the number (wrapx conditional; wide box only
+   in verbose — GetTextRect's right edge IS wrapX for left-justified text);
+   carddev.c truncates to actually-read bytes on CARD_Read failure so a
+   corrupt card file parses as short → defaults; duplicate hb.log HB line
+   removed (it was already written at the block end).
 
-`SwitchMenuOnAndOff` renders two whole frames from inside itself, outside the
-main loop, before opening the menu — and `LoadAllTextures` runs there too.
-`gFrameTick` was bumped in the loop, so it froze for all of that and the
-watchdog called a slow menu load a hang after eight seconds. **Some of the
-freezes chased in this project may have been slow loads, not stopped games.**
-It now counts in `DoRWStuffEndOfFrame`, so "no frame reached the screen for
-eight seconds" is what is measured. Re-confirm the freeze is a freeze before
-chasing it further.
+6. **MBlur water/blood lens drops: KEPT** (user rule: fix, don't remove).
+   The goal session briefly refused the whole fx queue on GC chasing the
+   corner ball (wrong suspect — it was EnvMapRender) and deleted the OGC
+   one-pass TEV draw; both restored verbatim. Note the cost that remains
+   real: ANY queued fx = one full-screen EFB grab per frame in
+   MotionBlurRender. The user's "hydrant → stutters ficam frequentes"
+   report may be this (burst hydrants queue splash fx forever) or may have
+   been the now-fixed eviction churn — re-test hydrants before touching it.
 
-### The instrument, and how it lied before
+## From github-3f (still current, see its full notes in git history of this file)
 
-The watchdog thread reports over Gecko in short lines, GP status first because
-Gecko drops what it cannot drain:
+- Audio subsystem live end-to-end (channel count, MEM2 bank shim, LE→BE
+  swap, AESND 1152-multiple chunks, callback-side swap). Radios re-encoded
+  **48kHz** stereo q4.5 — deliberate deviation from the "32kHz" spec: the
+  DSP resampler is zero-order-hold and 32kHz aliased ("metallic"),
+  user-approved direction. Boot audio machine-verified by DumpAudio RMS;
+  the goal session measured the user's own 8.7-min session at 39% loud.
+  STILL OWED: user-ear pass per category (radio in car, dialogue, frontend).
+- Both-zero-volume settings recovery (the "all muted" fossil) in LoadSettings.
+- ISO/GC-mode: build/gc + revc-full.iso boots; Dolphin GC DI delivers reads
+  one late (iso9660_dbg double-read is a workaround, root cause open); NEW
+  blocker: endless two-sector retry loop (0x2e800/0x07021000) pre-frontend.
+  SYS_STDIO_Report printf does NOT reach Dolphin's log (OSREPORT never
+  patches our libogc — count 0 across all runs), so the loop's failing file
+  cannot be named that way: fix DVD_ReadPrio's one-late delivery at the root
+  (kills the double-read AND likely the loop) or give gxNativeFail an
+  EXI/gecko path that works without the listener.
+  The loop is characterized: minutes of re-reads of ONE 32KB region =
+  /neo/neo.txd data (LBA 57410, 28968B), between mcprobe and big-data loads;
+  only two call-once readers exist (re3.cpp existence check via casepath,
+  CustomPipeInit RwStreamOpen+FindChunk). CODE-RULED-OUT: EOF masking —
+  _ISO9660_read_r clamps to entry.size and returns 0 exactly once, so
+  FindChunk cannot spin on short reads. Remaining: DVD_ReadPrio returning
+  <=0 (each __read fill = TWO ReadPrio probes; error resets the cache, so a
+  retrying caller re-hits the DVD every time) — find the retry layer or fix
+  the DI one-late root.
+  GC-mode render crash atomicRenderCB gx.cpp:1897 (nil+0x14) gates ALL
+  GC-mode verification (incl. the memcard GCI write proof). ISO is 1.51GB —
+  50MB over a real mini-DVD; trim before hardware.
+- Memcard (goal 5): mc:/ devoptab + _psGetUserFilesFolder("mc:") wired and
+  PROVEN BOTH DIRECTIONS on the GC-ISO boot: LoadSettings reads through mc:/
+  and a one-shot probe created 01-GRVC-mcprobe.bin.gci on Card A (8256B,
+  payload verified) with the carddev truncation fix compiled in. Remaining:
+  the in-game journey (menu exit → gta_vc.set GCI), gated on the GC-ISO
+  read-loop; the GS_INIT_FRONTEND SaveSettings one-shot self-verifies it
+  once that's fixed. REMOVE the mcprobe one-shot in gamecube.cpp when
+  in-game saving is demonstrable. Dev target (Wii .dol) settings on SD work
+  end-to-end.
+- Screen droplets rewritten on the im2D path (user: "RESOLVIDO CARALHO");
+  CMPR banned ≤64px in txdconv (square halos on additive textures).
+- STATS menu row (OFF/FPS/VERBOSE, ini-persisted).
 
-```
-HANG r<rdIdle>c<cmdIdle> s<state>
-at <phase>
-```
+## WATCH — the one open instability
 
-Phase markers now exist inside the frontend too — `menu-loadtex`,
-`menu-unloadtex`, `menu-process`, `menu-draw`, `menu-switch` — so the next
-freeze should name the step rather than the frame.
+One hang observed (gecko "HANG endoff", hang.log EMPTY = fs wedged with the
+main thread inside, then Dolphin ITSELF died: "libc++abi: terminating" right
+after "Stopping DSP Audio logging"). Happened ONCE on the fordblks-gate
+build; a 10-min walking soak on the probe-gate build ran clean past 7min
+(check soak result in the goal session's last messages). Suspects, ordered:
+the replaced fordblks gate (gone), the file-write freeze class
+(c2725998/902b9c29), Dolphin's DSP-dump teardown racing shutdown
+(DumpAudio=True still on in Dolphin.ini — github-3f suggests capturing one
+more repro before turning it off, else it becomes unreproducible).
 
-**The frame-phase markers were broken for most of this project**: set on
-entering a phase and never cleared, so every hang reported `endofframe` because
-that is the last marker `Idle` sets. Any conclusion in an older log resting on
-`phase=endofframe` is worth nothing. They close with `after-<name>` now.
+## Remaining user reports / goal items
 
-### Things not yet tried
+- **Pink save-point light pops with distance** (no smooth falloff) —
+  untouched; needs a live A/B at the hotel save room. Suspect per-mesh
+  binary point-light application in the GX path or marker draw distance.
+- **Interior floor flicker** — likely the (now fixed) eviction churn;
+  verify an interior on the probe-gate build; if it survives, A/B menu
+  Graphics → NeoLightMaps / NeoRoadGloss.
+- **Stutters** — churn fixed; X column now real. Known secondary: gxSnapTile
+  40–60ms/beat when textures stream in (tiling on main thread). Get the
+  user's exact scenario with X>250 beats from hb.log.
+- **Anim**: user look at reverse-legs + idle stretch on the current build.
+- **Audio**: user-ear category pass; ARAM stream ring (cache.aramAddr never
+  AR_Alloc'd) still dead code — wire or delete.
 
-- **Done, unread:** `LoadAllTextures` is now instrumented step by step —
-  `menu-space1`, `menu-fronten1`, `menu-usedmem`, `menu-space2`,
-  `menu-fronten2`. The next freeze on opening should name one of them, and
-  which one decides the fix: a stall in `MakeSpaceFor` is the streamer evicting
-  under a 716KB reservation, a stall in `LoadTxd` is the file path.
-- Check whether `MakeSpaceFor(350 sectors)` before the load is enough, given
-  `d3d8::readNativeTexture` keeps a D3D raster, a full RGBA8 Image and a
-  staging buffer live per texture. The card's dictionaries are converted now,
-  which should have removed that path — verify it actually did rather than
-  assuming.
-- `AR_Alloc` is a stack allocator and `UnloadSampleBank` cannot release out of
-  order; check nothing in the menu path is exhausting ARAM.
+## Traps (all of github-3f's still apply)
 
----
-
-## 2. Audio at 32kHz stereo
-
-**The user's decision: music, VFX and audio all at 32kHz stereo.** `DIGITALRATE`
-in sampman.h is already 32000, so the engine's own mixer rate agrees.
-
-What that costs, measured, so it is a choice and not a surprise: over
-`sfx.sdt`, 9941 samples, **81% at 12kHz**, 13% at 16kHz, eleven at 32kHz, all
-mono, 324.5MB as PCM. Resampling them to 32kHz stereo multiplies the bank
-roughly fivefold. The disc has room (the card totals about 1352MB of 1500MB
-with everything else), but it is upsampling — the fidelity is not in the input.
-
-Radio is Vorbis, decided by arithmetic: 32kHz stereo in ADPCM is 1060MB and the
-card would total 1608MB against a 1536MB disc. In Vorbis the same 32kHz stereo
-is 504MB.
-
-### What is already built
-
-`src/audio/sampman_gamecube.cpp`, `REVC_AUDIO=GC`, replacing the 47 empty
-methods of `sampman_null.cpp`:
-
-- AESND voices, one per channel, with the voice callback clearing a per-channel
-  flag because AESND has no way to ask whether a voice is still sounding.
-- Sample banks DMA'd from disc into ARAM; a sample crosses to MEM1 only when a
-  voice starts. 324MB of samples never sit in a 16MB arena.
-- Three streaming voices, double-buffered, pumped from `Service()`.
-- A 4MB ARAM ring in front of the radio: 250 seconds of lookahead at 128kbps,
-  so the disc is read once every four minutes per stream instead of every few
-  frames. This matters on a Mini-DVD, where the seek is the expensive part.
-- Tremor (`ppc-libvorbisidec`, installed) decoding Vorbis out of that ring.
-- Radio files resolve through the game's own `StreamedNameTable`, not a second
-  numbering that would drift from the enum.
-
-**Correction worth carrying:** libogc's AESND takes PCM only. The DSP's hardware
-ADPCM decode lives in Nintendo's AX microcode, which libogc does not ship, so
-ADPCM would be a CPU decode. An earlier session called it free; it is not.
-
-### What is left
-
-**The card has no audio on it.** `~/revc-sd` has no audio directory, so nothing
-can play regardless of the backend. Two commands from the repository root:
-
-```bash
-python3 tools/gamecube/convert_audio.py ~/GTAVC/audio ~/revc-audio-ogg
-python3 tools/gamecube/build_sd.py --game ~/GTAVC --out ~/revc-sd \
-    --audio ~/revc-audio-ogg --txdconv /tmp/txdconv
-```
-
-`convert_audio.py` currently keeps each file at its source rate. For the 32kHz
-stereo decision it needs a resample step — sox can do it in the same pipe
-(`rate 32000` and `channels 2`).
-
-`build_sd.py` also converts the loose texture dictionaries, which
-`repack_img.py` never touched. `frontend_ds2.txd` fails to convert (the host
-librw cannot read it); those are DualShock 2 button icons.
-
----
-
-## Held for later
-
-**60fps in dense scenes.** `work` is 11-16ms in a quiet street and was 17-20ms
-on Ocean Drive. Measured with the GP idle (`gp0`), so it is CPU-bound.
-
-The profiler says where, and it is not where anyone guessed:
-**`sky96(sz0 cl0 cd0)`** — 9.6ms in `DoRWStuffStartOfFrame_Horizon`, and *none*
-of it in `CameraSize`, `RwCameraClear` or `CClouds::RenderBackground`. It is in
-`RsCameraBeginUpdate`, the only call between them that is not timed. Clearing
-should be nearly free on GX, since it happens during the EFB→XFB copy. Time
-that call before optimising anything else.
-
-`GX_USE_INDEXED` is written, gated and left at 0 deliberately: it moves work
-from the CPU to the GP, and would touch `rnd` (7.5ms), not `sky`.
-
-**Missing effects.** No water spray at a hydrant, and the user reports every
-additional effect missing. One real cause was found and fixed — the GX backend
-blended only on `stVertexAlpha` while gl3 and d3d9 blend on
-`vertexAlpha || textureAlpha` — but that does not explain the hydrant, because
-`Particle.cpp:1796` already sets vertex alpha. One shared cause is more likely
-than several.
-
-A wrong turn not to repeat: the loose PC dictionaries are **not** silently
-rejected. `d3d8.cpp` is compiled into this build, so `Texture::streamReadNative`
-dispatches them to `d3d8::readNativeTexture` and they load. `gx::readNativeTexture`
-only rejects textures claiming to be GameCube. The HUD rendering on screen was
-the evidence against that conclusion and should have outweighed the code
-reading.
-
----
-
-## The HUD
-
-One block, one string:
-
-```
-60 f16.6 max20 work16 oom0/0 m12902K tex150K fr3312K blk11519 str0 ar0%
- | sim0 rnd84 sky96(sz0 cl0 cd0) fx8 hud2 lit0 str0 cpy0 gp0 vs0 oth0
-```
-
-`oom<geo>/<tex>` — allocation failures split; the texture half was invisible
-until recently, which made "black silhouettes with oom 0" look like a lighting
-bug. `ar%` is the ARAM disc-cache hit rate. `oth` is the residual: frame period
-minus everything instrumented, so a large one means the cost is somewhere
-nothing measures yet. L + A held three seconds toggles the boot console.
-
-## The streaming budget is a cliff on both sides
-
-`reserve` in `CStreaming::Init`; `ms_memoryAvailable = arena - reserve`, arena
-about 16.4MB. **Reserve is the leftover, budget is what the streamer gets — do
-not restate one as the other.** A revision that turned "reserve = 2MB" into
-"budget = 3MB" cut resident world to a fifth and stopped the picture.
-
-Too large a reserve and the streamer evicts: far LOD shells, characters without
-textures. Too small and it fills the arena until an allocation fails silently
-mid-cutscene — measured at 616K free with a 404ms spike, then a stop. Measured
-either side in the intro cutscene, 2MB gave 616K free and 6MB gave 908K: four
-megabytes of reserve bought under 300K, because there the cutscene's own working
-set dominates.
-
-Demand side counts too. Draw distance at 1.8 (the top of the Options slider)
-brings the LOD flicker straight back. It is at the engine default of 1.2.
+- `git checkout <file>` destroyed uncommitted work once. Tree is ALL
+  uncommitted. gxBeginUs/gxListUs increment sites are still lost (read 0).
+- mtype/mcopy from the card while Dolphin runs shows STALE data for files
+  Dolphin buffers; gecko is the realtime channel. (hb.log pulls mid-run
+  worked for the goal session, but treat as possibly stale.)
+- `pkill -x Dolphin` (boot.sh does it) kills EVERY instance — the user's,
+  the scratch GC one, and any soak. Coordinate between sessions first;
+  kill by PID when two instances must coexist.
+- Gecko mangles concatenated lines: `grep -c "HB t="` undercounts (multiple
+  HBs glue into one line). strings + count occurrences, not lines.
+- Two Claude sessions share this tree. `ListAgents` → SendMessage before
+  boot.sh, before editing files the other named, and before rewriting this
+  handoff.
 
 ## How to work on this
 
-**Measure before theorising, and measure the thing you are about to change.**
-The expensive failures were all one shape: a number measured in one scene and
-generalised. Free bytes measured standing in an alley said there was room to
-spare, the reserve was cut on that basis, and the intro cutscene froze.
+Measure before theorising; one variable per boot; an empty log is not a
+passing log; trust the screen over the code reading; the user's eyes are the
+best instrument this project has — their one-line reports solved three hunts
+this night. When they take the keyboard, stop injecting input instantly; when
+they say "vou dormir, se vira", the pad is yours.
 
-**Change one thing per boot.** Several conclusions in this project came from
-comparing builds that differed in more than one way. All of them were wrong.
+## Part 2 (early morning 08-20, after the user's "test it yourself" directive)
 
-**An empty log is not a passing log.** `native.log` empty was read as "nothing
-rejected" when it meant the reader had not run. The phase markers were the same
-trap: `endofframe` was not where the hang was, it was the last marker set.
+- **Anim layer proven 1:1 offline**: 283,746 interpolation samples across every
+  anim/bone/keyframe of ped.ifp — STOCK compressed path diverges >2° in 8,105
+  of them (worst 180°); the FIXED path's worst error is 0.04° (int16
+  quantization floor). The visible "legs out of the car" in the user's morning
+  screenshot is NOT the blend layer: a live skeleton probe (dvd:/autoanim.txt
+  arms it; ANIM lines = player @250ms, BADBONE = any ped out of bounds) shows
+  thigh/calf/foot distances sane through reverse, KO and death. Distances are
+  rotation-invariant though — a twisted-but-bone-lengthed pose passes — so the
+  remaining suspect list is: the jacked/ejected DRIVER ped lying by the door
+  (KO/jacked anims), or the render/skin side. Reproduce by jacking an OCCUPIED
+  car and looking at the passenger side.
+- **wasm-revc save-loss bug FIXED and verified live**: SetSaveDirectory used
+  "%s\\%s" outside _WIN32; on emscripten saves became a literal file
+  "userfiles\GTAVCsf1.b" OUTSIDE the persistent IDBFS mount (lost on tab
+  close) and slot probes could never match. PCSave.cpp now branches on _WIN32;
+  runtime log confirmed /gtavc/userfiles/GTAVCsf.b paths. Rebuilt into
+  web/public + web/dist. (Repo rule there: commits sole-author Erasmo, no AI
+  trailers.)
+- **wasm menu anomaly found**: page transitions never complete visually (the
+  doubled "main menu" title = two pages drawn); input and state advance under
+  a stale frame. Separate from the in-game stutter report. Stutter analysis so
+  far: menu frames are 6.9ms median/9ms max (clean); the streamer spin-waits
+  the main thread on cache misses by design (256K chunks, 400MB LRU,
+  readahead) — in-game data still needed, blocked on menu navigation
+  (keyboard only reaches the engine after a real canvas click, and the
+  transition bug hides progress).
+- **GC menu: FED_WIS relabelled "ASPECT RATIO"** on card (american+portuguese)
+  via the new tools/gamecube/gxtpatch.py (repoint or add keys; TKEY stays
+  sorted for the binary search). build_sd.py should run it so rebuilt cards
+  keep the label + the three new keys FED_R48/FED_R52/FED_R72.
+- **RESOLUTION row added** (Graphics): 480P / 528P SUPERSAMPLED / 720P
+  (DOLPHIN IR), int8 rw::gx::gxEfbResPref, INI key Graphics/EfbHeight.
+  MEASURED DEAD END on the apply side: efbHeight=528 with DispCopyYScale
+  480/528 rendered a solid magenta frame — GX's YScale only scales UP
+  (interlace doubling); the EFB->XFB copy cannot vertically downsample.
+  The row persists the pref but 528/720 are INERT (behave as 480p) until a
+  real path exists: PAL 576 output modes, or an EFB->texture resample pass
+  drawn back before the display copy. 720p on the GP is impossible either
+  way (640x528 raster cap) — that entry names Dolphin's IR scaler.
+- User request log: default stays 480p.
+- **NEVER mcopy-WRITE the card while Dolphin runs** — Dolphin's buffered view
+  of the raw image clobbers host writes on its next flush (an INI hand-edit
+  and two GXT pushes silently vanished this way). Reads lie too (older trap);
+  writes CORRUPT. Card writes only with Dolphin dead, fsck after.
 
-**Trust the screen over the code reading.** The conclusion that loose TXDs were
-rejected came from reading `gx::readNativeTexture` and stopping before the
-dispatch that never calls it. The HUD was on screen the whole time.
+## GC × wasm parity audit (wasm = base) — 02:20
 
-**Instrumentation must not depend on what it is instrumenting.** The hang
-reporter wrote to the SD and produced nothing, because the thing it was
-reporting on had wedged the filesystem. Gecko is independent and works.
+ANIMATION: SAME, now provably. Hierarchy/Association/RpAnimBlend byte-equal;
+ANIM_COMPRESSION is off in BOTH configs so ped anims play uncompressed in
+both; the compressed (keepCompressed cutscene) math carried the same stock
+180°-flip bug in BOTH — fixed on GC during the night and now PORTED to the
+wasm base (AnimBlendNode.cpp local hemisphere correction, both sites;
+rebuilt + deployed to web/public and web/dist). Offline differential across
+all of ped.ifp: 0/283,746 samples divergent (worst 0.04° = int16 floor).
+GC-only deltas are defensive (IFP loader hardening, FrameUpdate degenerate-
+sum guard) and do not alter output for valid data.
 
-**Ask the user what they saw.** Two of the three real breakthroughs this
-session came from the user's observations, not from the code: that the Save
-menu works while the pause menu does not, and that two debug HUDs were
-overlapping. Neither was visible from here.
+AUDIO: decision layer (AudioManager/AudioLogic/MusicManager/AudioCollision/
+sampman.h/soundlist.h) is 0-diff — identical what/when/volume/priority.
+SFX source data byte-identical (sfx.raw 340,245,502B + sfx.sdt 198,820B match
+the install; GC byteswaps at load only). Deliberate divergences, documented:
+radio/streams are 48kHz stereo Vorbis re-encodes on GC (base plays install
+originals; 32kHz aliased through the DSP's zero-order-hold), and the voice
+cap is AESND's 29 game channels vs the PC pool. Backends differ by necessity
+(OAL vs AESND) under the same interface.

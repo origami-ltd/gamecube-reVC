@@ -10,12 +10,20 @@
 #include "ControllerConfig.h"
 #include "FileMgr.h"
 #include "CdStream.h"
+#ifdef EXTENDED_PIPELINES
+#include "custompipes.h"
+#endif
 
 #include <gccore.h>
 #include <ogc/machine/processor.h>
 #include <ogc/usbgecko.h>
 #include <ogc/dvd.h>
+#ifndef HW_RVL
+extern "C" int GcCardMountDevice(void);
+#endif
+namespace rw { namespace gx { int8_t gxReadEfbPref(void); } }
 #include <iso9660.h>
+extern "C" bool ISO9660_MountDbg(const char *name, const DISC_INTERFACE *disc_interface);
 #include <fat.h>
 #ifdef HW_RVL
 #include <sdcard/wiisd_io.h>
@@ -29,6 +37,15 @@
 #include <dirent.h>
 #include <stdarg.h>
 #include <malloc.h>
+
+namespace rw { namespace gx {
+extern bool32 gxRimEnable;
+extern uint32 gxCopyFilterLevel;
+extern bool32 gxGlossEnable;
+extern float gxGlossMult;
+extern bool32 gxLightmapEnable;
+extern float gxLightmapBlend;
+} }
 
 long _dwOperatingSystemVersion = OS_WINXP;
 size_t _dwMemAvailPhys;
@@ -46,6 +63,104 @@ const char *gPhase = "boot";
 static lwp_t watchdogThread = LWP_THREAD_NULL;
 static volatile bool watchdogStop;
 
+// Boot-smash bracketing. current_mallinfo.arena IS newlib's sbrked_mem
+// accumulator; the corruptor blasts it to ~300MB within the first ~50 frames.
+// Called from every LoadingScreen step (and anywhere else worth a marker),
+// the first caller that sees poison names the init step that did the deed.
+extern "C" { extern struct mallinfo __malloc_current_mallinfo; }
+void
+gcHeapGuardCheck(const char *marker)
+{
+	static bool hit;
+	if(hit)
+		return;
+	// arena alone trips LATE: it only goes insane on the next sbrk AFTER the
+	// top-chunk header is smashed. mallinfo() walks every free chunk and the
+	// top, so a smashed header shows up at the first marker after the write.
+	struct mallinfo gmi = mallinfo();
+	// Memory map: one line per marker where used moved >256K since the last
+	// line. One boot = the whole boot's consumption curve, the number the
+	// budget graveyard in Streaming.cpp never had.
+	{
+		static uint32 lastUsed;
+		uint32 used = (uint32)gmi.uordblks;
+		uint32 delta = used > lastUsed ? used - lastUsed : lastUsed - used;
+		// audio-* markers always log: they're the requested MEM1 audit and
+		// their deltas sit under the 256K noise gate.
+		if(delta > 256u*1024 ||
+		   (marker && marker[0]=='a' && marker[1]=='u' && marker[2]=='d')){
+			lastUsed = used;
+			if(CdStreamFsTryLock()){
+				FILE *mf = fopen("dvd:/memmap.log", "a");
+				if(mf){
+					fprintf(mf, "MEM %s used=%uK free=%uK\n",
+					    marker ? marker : "-", used/1024,
+					    (unsigned)((uint32)gmi.fordblks/1024));
+					fclose(mf);
+				}
+				CdStreamFsUnlock();
+			}
+		}
+	}
+	if((uint32)gmi.arena <= 20u*1024*1024 &&
+	   (uint32)gmi.fordblks <= 20u*1024*1024 &&
+	   (uint32)gmi.uordblks <= 20u*1024*1024 &&
+	   (uint32)gmi.keepcost <= 20u*1024*1024)
+		return;
+	hit = true;
+	char l[128];
+	snprintf(l, sizeof(l), "SMASH-AT %s arena=%uK ford=%uK uord=%uK keep=%uK",
+	    marker ? marker : "-",
+	    (unsigned)((uint32)gmi.arena/1024), (unsigned)((uint32)gmi.fordblks/1024),
+	    (unsigned)((uint32)gmi.uordblks/1024), (unsigned)((uint32)gmi.keepcost/1024));
+	GeckoLog(l);
+	if(CdStreamFsTryLock()){
+		FILE *f = fopen("dvd:/crash.log", "a");
+		if(f){ fprintf(f, "%s\n", l); fclose(f); }
+		CdStreamFsUnlock();
+	}
+}
+
+// ROOT CAUSE of the boot heap smash: libogc's _sbrk_r silently FALLS BACK TO
+// MEM2 when Arena1 runs out — the brk jumps ~300MB (the impossible
+// mallinfo.arena), newlib's top spans the unmapped 0x8180-0x8FFF gap, and
+// MEM2's Arena2Lo is the same bump pointer the audio bank owns, so the two
+// overwrite each other. This override keeps malloc in MEM1 and makes
+// exhaustion an honest nil instead of a corrupted heap.
+extern "C" void*
+_sbrk_r(struct _reent *r, ptrdiff_t incr)
+{
+	u32 level;
+	_CPU_ISR_Disable(level);
+	u8 *lo = (u8*)SYS_GetArena1Lo();
+	u8 *hi = (u8*)SYS_GetArena1Hi();
+	if(lo + incr <= hi && lo + incr >= (u8*)0x80003100){
+		SYS_SetArena1Lo(lo + incr);
+		_CPU_ISR_Restore(level);
+		return lo;
+	}
+	// NO MEM2 fallback: tried on 08-20 — newlib's dlmalloc treats the
+	// discontiguous brk as one span, mallinfo read 3.9GB free and the carve
+	// from the gap-top aborted the game mid-cutscene. MEM2 relief is done
+	// with a dedicated lwp_heap for texture buffers (gxraster) instead.
+	_CPU_ISR_Restore(level);
+	r->_errno = ENOMEM;
+	return (void*)-1;
+}
+
+void *gcLifeboat;
+void
+gcNewHandler(void)
+{
+	if(gcLifeboat){
+		free(gcLifeboat);
+		gcLifeboat = nil;
+		GeckoLog("LIFEBOAT released");
+		return;   // operator new retries
+	}
+	std::set_new_handler(nil);   // second failure: fail loud as before
+}
+
 static void*
 watchdogMain(void*)
 {
@@ -54,6 +169,42 @@ watchdogMain(void*)
 	bool reported = false;
 	while(!watchdogStop){
 		usleep(1000*1000);
+		// Re-arm the spawn lifeboat: released boats sink into the dust of
+		// small allocations within seconds; a re-armed one means the next
+		// OOM burst is also survivable. Quiet failure — tries again next
+		// second.
+		if(gcLifeboat == nil){
+			gcLifeboat = malloc(2560*1024);
+			if(gcLifeboat){
+				extern void gcNewHandler(void);
+				std::set_new_handler(gcNewHandler);
+				GeckoLog("LIFEBOAT re-armed");
+			}
+		}
+		// Heap-smash tripwire. mallinfo walks every chunk under the malloc
+		// lock; a corrupted chunk header makes its sums impossible (measured:
+		// "used 308266K" in a 16MB arena, twice, two builds). First trip
+		// stamps the second and the phase — the corruptor's time of death.
+		{
+			static bool tripped;
+			struct mallinfo wmi = mallinfo();
+			if(!tripped && ((uint32)wmi.uordblks > 20u*1024*1024 ||
+			                (uint32)wmi.fordblks > 20u*1024*1024)){
+				tripped = true;
+				char hl[96];
+				snprintf(hl, sizeof(hl),
+				    "HEAPSMASH t=%u phase=%s used=%uK free=%uK",
+				    (unsigned)gFrameTick, gPhase ? gPhase : "-",
+				    (unsigned)((uint32)wmi.uordblks/1024),
+				    (unsigned)((uint32)wmi.fordblks/1024));
+				GeckoLog(hl);
+				if(CdStreamFsTryLock()){
+					FILE *hf = fopen("dvd:/crash.log", "a");
+					if(hf){ fprintf(hf, "%s\n", hl); fclose(hf); }
+					CdStreamFsUnlock();
+				}
+			}
+		}
 		if(gFrameTick != last){
 			last = gFrameTick;
 			stuck = 0;
@@ -69,9 +220,15 @@ watchdogMain(void*)
 			stuck = 0;
 			continue;
 		}
-		if(++stuck < 8 || reported)
+		// Re-report every eight seconds it stays stalled, rather than once and
+		// then silence. One line cannot tell a genuinely stopped game from a
+		// single slow step that recovered, and this project has spent whole
+		// sessions on that ambiguity. A repeating line is a stopped game; a
+		// lone one was a slow load.
+		if(++stuck < 8)
 			continue;
-		reported = true;   // one report per hang, not one per second
+		stuck = 0;
+		(void)reported;
 		extern unsigned gxWaitRetrace, gxCamW, gxCamH;
 		extern const char *gxLastPath;
 		char line[256];
@@ -115,10 +272,16 @@ watchdogMain(void*)
 			// the second line has been lost every time — and it was the line
 			// carrying the one fact that decides the whole question: r1c1 is
 			// an idle GP with the CPU stuck elsewhere, r0c0 is a stalled GP.
-			snprintf(part, sizeof(part), "HANG r%uc%u s%u", rdIdle, cmdIdle,
-			    (unsigned)gGameState);
+			// The phase FIRST, inside the first line. Splitting it onto a
+			// second line was the whole reason it never arrived: Gecko drops
+			// what it cannot drain, and the second line has been lost on
+			// every single hang in this project — the last capture ends
+			// literally at "HANG r1", mid-word. Whatever survives truncation
+			// is now the part worth having.
+			snprintf(part, sizeof(part), "HANG %s r%uc%u",
+			    gPhase ? gPhase : "-", rdIdle, cmdIdle);
 			GeckoLog(part);
-			snprintf(part, sizeof(part), "at %s", gPhase ? gPhase : "-");
+			snprintf(part, sizeof(part), "s%u", (unsigned)gGameState);
 			GeckoLog(part);
 			snprintf(part, sizeof(part), "H s%u m%d %s v%u r%uc%u",
 			    (unsigned)gGameState,
@@ -127,17 +290,15 @@ watchdogMain(void*)
 			    rdIdle, cmdIdle);
 			GeckoLog(part);
 
-			// And to the SD, deliberately WITHOUT the filesystem guard.
-			//
-			// Guarding it is what made the first version silent: when the game
-			// is stuck the main thread is usually stuck holding libfat, so the
-			// watchdog queued behind it and the one report that matters never
-			// landed. At this point the run is already over — an unclean FAT
-			// volume costs nothing, boot.sh fsck's it before every boot anyway,
-			// and a report that arrives beats a volume that stays tidy.
-			//
-			// Gecko goes first, so if this call does block, the short line has
-			// already left the machine.
+			// And to the SD, via TRY-lock. A blocking guard made the first
+			// version silent (main thread wedged holding libfat = the report
+			// never landed), but writing with NO lock was worse: the watchdog
+			// false-fires on slow loads (frames stall while the worker is
+			// mid-read inside libfat), and an unguarded fopen racing that is
+			// heap corruption in a run that was NOT over. Try-lock keeps both
+			// properties: fs wedged → busy → skip (gecko already has the
+			// line, and hang.log-empty-means-fs-wedged stays a signal); GX/GP
+			// hang with fs idle → lock free → the full report lands.
 			snprintf(line, sizeof(line),
 			    "HANG phase=%s tick=%u state=%u menu=%d vsync=%u gx=%s "
 			    "cam=%ux%u gp rd=%u cmd=%u over=%u under=%u brk=%u",
@@ -145,10 +306,13 @@ watchdogMain(void*)
 			    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
 			    gxWaitRetrace, gxLastPath ? gxLastPath : "-", gxCamW, gxCamH,
 			    rdIdle, cmdIdle, overhi, underlow, brkpt);
-			FILE *hf = fopen("dvd:/hang.log", "a");
-			if(hf){
-				fprintf(hf, "%s\n", line);
-				fclose(hf);
+			if(CdStreamFsTryLock()){
+				FILE *hf = fopen("dvd:/hang.log", "a");
+				if(hf){
+					fprintf(hf, "%s\n", line);
+					fclose(hf);
+				}
+				CdStreamFsUnlock();
 			}
 		}
 	}
@@ -201,10 +365,29 @@ void __console_init(void *fb, int xstart, int ystart, int xres, int yres, int st
 void
 GeckoLog(const char *msg)
 {
-	// bounded retries: never hangs without a gecko, and the alive-probe
-	// false-negatives on Dolphin's emulated gecko, so don't gate on it
-	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, msg, strlen(msg), 1000);
-	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, "\n", 1, 1000);
+	// "Cheap no-op when no gecko is attached" was wrong, and it cost this
+	// project real time. 1000 retries is 1000 EXI transactions on the MAIN
+	// thread, per line, whenever nobody is draining the other end — and the
+	// reader drops all the time (Dolphin's listener takes one connection, so a
+	// dead `nc` never comes back). Loading logs one line per animation block,
+	// so a dropped reader turns a 40-second load into a twenty-minute one that
+	// looks exactly like a freeze: no output, and the CPU at 5% because the
+	// thread is parked in EXI rather than spinning.
+	//
+	// So: few retries, and give up on the transport entirely once it has
+	// clearly stopped being read. Any successful line brings it back, which is
+	// what makes a mid-run reconnect still work.
+	static int deadStreak;
+	if(deadStreak >= 8)
+		return;
+	// A SHORT write is not a failure: Dolphin partial-sends constantly, which
+	// is why the log has always looked chewed. Only nothing-at-all counts.
+	if(usb_sendbuffer_safe_ex(EXI_CHANNEL_1, msg, (int)strlen(msg), 16) <= 0){
+		deadStreak++;
+		return;
+	}
+	deadStreak = 0;
+	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, "\n", 1, 16);
 }
 
 static void
@@ -297,7 +480,8 @@ gcInstallPanicHandler(void)
 // never seen. Park on a readable screen instead. These run in normal thread
 // context, so unlike gcPanic they can write crash.log before stopping the
 // world. The stack walk names the caller (symbolize with addr2line).
-static void
+// Non-static: sampman's fail-loud audio path parks through here too.
+void
 gcFatalPark(const char *tag, const char *msg)
 {
 	char stack[220];
@@ -323,11 +507,22 @@ gcFatalPark(const char *tag, const char *msg)
 	// current ELF produces confident nonsense (lodepng frames inside
 	// CCullZones::Update, in one real case). Match this string against the
 	// build before trusting any address in the stack below it.
-	FILE *f = fopen("dvd:/crash.log", "a");
-	if(f){
-		fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
-		    tag, __DATE__, __TIME__, msg, heap, stack);
-		fclose(f);
+	// The streaming worker may be inside libfat right now — fail-loud parks
+	// fire during normal play. A healthy worker releases the lock in ms, so
+	// wait briefly; if it never comes, skip the file. The maroon screen and
+	// gecko carry the report either way, and writing through contended
+	// libfat is how heap corruption starts — a poor way to report one.
+	bool fsLocked = false;
+	for(int i = 0; i < 200 && !(fsLocked = CdStreamFsTryLock() != 0); i++)
+		usleep(1000);
+	if(fsLocked){
+		FILE *f = fopen("dvd:/crash.log", "a");
+		if(f){
+			fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
+			    tag, __DATE__, __TIME__, msg, heap, stack);
+			fclose(f);
+		}
+		CdStreamFsUnlock();
 	}
 
 	u32 level;
@@ -344,6 +539,11 @@ gcFatalPark(const char *tag, const char *msg)
 		snprintf(line, sizeof(line), "reVC %s\n%s%s\nSTACK:%s", tag, msg, heap, stack);
 		GeckoLog(line);
 	}
+	// Dump delivered (crash.log + gecko + this screen). Power off so a
+	// batch-mode (-b) Dolphin closes itself instead of parking forever —
+	// user directive: the log and the exit, not the museum piece.
+	_CPU_ISR_Restore(level);
+	SYS_ResetSystem(SYS_POWEROFF, 0, 0);
 	for(;;)
 		;
 }
@@ -380,6 +580,7 @@ gcFlushCrashLog(void)
 	   ck->length >= sizeof(ck->text))
 		return;
 
+	DVD_FS_GUARD;
 	FILE *f = fopen("dvd:/crash.log", "a");
 	if(f){
 		fputs("---- crash ----\n", f);
@@ -451,6 +652,9 @@ psInitialize(void)
 	// cap at half the retrace rate the moment vsync is off.
 	RsGlobal.maxFPS = 60;
 	FrontEndMenuManager.m_PrefsUseWideScreen = false;
+	// GC defaults; reVC.ini still overrides these when present.
+	FrontEndMenuManager.m_nPrefsMSAALevel = 1;
+	FrontEndMenuManager.m_nDisplayMSAALevel = 1;
 	_dwMemAvailPhys = (size_t)SYS_GetArena1Size();
 	gGameState = GS_START_UP;
 	return TRUE;
@@ -533,26 +737,38 @@ psInstallFileSystem(void)
 				break;
 			}
 		}
-		// ponytail: the DVD probe blocks forever on an empty/absent drive
-		// (startup() and isInserted() both block), so it is opt-in. It is only
-		// a fallback anyway: the 1.5GB asset set cannot fit a 1.35GB disc, so
-		// SD Gecko is the real medium. Hold B at boot to try a disc.
+		// The disc is the real GameCube medium (the asset set fits a 1.46GB
+		// mini-DVD). Probed after SD so the dev card still wins when present.
+		// ponytail: on real hardware with an EMPTY drive this probe blocks
+		// forever (startup() and isInserted() both block); if that setup ever
+		// matters, gate it on DVD_GetCoverStatus first.
 		if(!fileSystemReady){
-			PAD_ScanPads();
-			if(PAD_ButtonsHeld(0) & PAD_BUTTON_B){
-				printf("mount: probing DVD (ISO9660)...\n");
-				if(ISO9660_Mount("dvd", &__io_gcdvd)){
-					fileSystemReady = TRUE;
-					fileSystemIsFat = false;
-				}
-			}else
-				printf("mount: skipping DVD (hold B at boot to try disc)\n");
+			printf("mount: probing DVD (ISO9660)...\n");
+			{
+				extern int FindDevice(const char*);
+				printf("mount: FindDevice(dvd:)=%d\n", FindDevice("dvd:"));
+			}
+			if(ISO9660_MountDbg("dvd", &__io_gcdvd)){
+				printf("mount: DVD ISO9660 mounted\n");
+				fileSystemReady = TRUE;
+				fileSystemIsFat = false;
+			}else{
+				printf("mount: DVD ISO9660 mount FAILED\n");
+				;
+			}
 		}
 		if(!fileSystemReady)
 			return FALSE;
 	}
-	if(chdir("dvd:/") == 0)
+	if(chdir("dvd:/") == 0){
+		// RESOLUTION pref: read for the menu row's sake only. The 528-line
+		// EFB experiment is a measured dead end (DispCopyYScale cannot
+		// downsample — magenta frame; see startGX), so RsGlobal stays 480
+		// whatever the pref says until a real supersample path exists.
+		rw::gx::gxReadEfbPref();
 		return TRUE;
+	}
+	printf("mount: chdir dvd:/ FAILED errno=%d\n", errno);
 	if(fileSystemIsFat)
 		fatUnmount("dvd");
 	else
@@ -564,6 +780,15 @@ psInstallFileSystem(void)
 const char *
 _psGetUserFilesFolder(void)
 {
+#ifndef HW_RVL
+	// Userfiles (settings dump + story saves) live on the memory card, each
+	// as its own CARD file — options and progress separated, and nothing
+	// depends on the disc being writable.
+	if(GcCardMountDevice()){
+		static const char mc[] = "mc:";
+		return mc;
+	}
+#endif
 	static const char path[] = "dvd:/userfiles";
 	return path;
 }
@@ -604,9 +829,26 @@ _InputInitialiseJoys(void)
 void
 HandleExit(void)
 {
-	PAD_ScanPads();
-	if(PAD_ButtonsDown(0) & PAD_BUTTON_START)
-		RsGlobal.quit = TRUE;
+	// Nothing, deliberately.
+	//
+	// This used to be PAD_ScanPads() followed by "START quits", inherited from
+	// the desktop skels where Escape closes the window. On a GameCube START is
+	// the pause button, so every press both opened the pause menu and set
+	// RsGlobal.quit — the main loop then left on its next condition check and
+	// the port sat in shutdown with the menu still on screen. Frozen image, no
+	// exception, no crash.log, GP idle, CPU at 5% because the thread was no
+	// longer presenting anything. That is the pause-menu freeze this project
+	// spent its whole life chasing, and it is why the game's own Save menu
+	// never froze: that one is entered by walking into the save marker, not by
+	// pressing START.
+	//
+	// The second PAD_ScanPads was harmful on its own too. It recomputes the
+	// down/up edges against the previous scan, so calling it here consumed the
+	// press before CapturePad's own scan could see it.
+	//
+	// There is no "exit" on this console — Dolphin has a stop button and the
+	// hardware has reset. If a quit combo is ever wanted it needs a chord that
+	// is not a game button, and it must not scan the pads a second time.
 }
 
 void
@@ -706,6 +948,29 @@ main(int, char *[])
 	SYS_STDIO_Report(TRUE);
 	gcInstallPanicHandler();
 
+	// Spawn lifeboat: during the save-load refill nothing is evictable, so
+	// the player-creation `new`s can meet a heap ground to dust. Hold 1.5MB
+	// from boot; the new_handler releases it on the first failed `new` and
+	// the allocation retries into the freed block. Second failure surfaces
+	// as the normal fail-loud abort. std::set_new_handler is the stdlib's
+	// own emergency-pool hook — no call-site knowledge needed.
+	{
+		extern void *gcLifeboat;
+		extern void gcNewHandler(void);
+		gcLifeboat = malloc(2560*1024);
+		std::set_new_handler(gcNewHandler);
+	}
+
+	// ROOT CAUSE of the boot heap smash (08-20): newlib's free() runs
+	// malloc_trim past a 128K top and trims via sbrk(-X) — but libogc's sbrk
+	// is a bump pointer that was never meant to run backwards, and trim's
+	// resync path then recomputes arena = sbrk(0)-sbrk_base as ~302MB and
+	// hands out blocks overlapping late .bss (__sf, current_mallinfo,
+	// temp_cwd — every observed victim). The streaming probe-gate
+	// (malloc big + free immediately, MakeSpaceFor) fires exactly that
+	// pattern constantly. Trim buys nothing on a console: disable it.
+	mallopt(M_TRIM_THRESHOLD, 0x7fffffff);
+
 	psInitConsole();
 	PAD_Init();
 	printf("reVC GameCube booting...\n");
@@ -727,6 +992,21 @@ main(int, char *[])
 		psHalt();
 	}
 	printf("reVC GameCube: filesystem mounted (%s)\n", fileSystemIsFat ? "SD" : "DVD");
+#ifndef HW_RVL
+	// Memory-card write proof, one-shot, before any game code runs: a real
+	// CARD file through the mc:/ devoptab. The artifact is an mcprobe GCI on
+	// card A, checkable from the host even when the disc bring-up stalls
+	// later. Removed once a full settings save is demonstrable in-game.
+	if(GcCardMountDevice()){
+		FILE *mf = fopen("mc:/mcprobe.bin", "wb");
+		if(mf){
+			fputs("reVC mc probe", mf);
+			fclose(mf);
+			printf("mc: probe written\n");
+		}else
+			printf("mc: probe open FAILED\n");
+	}
+#endif
 	gcFlushCrashLog();
 
 	// Boot self-check: the game opens assets with Windows-style backslash
@@ -821,6 +1101,10 @@ main(int, char *[])
 	LWP_CreateThread(&watchdogThread, watchdogMain, nil, nil, 16*1024, 127);
 
 	while(SYS_MainLoop() && !RsGlobal.quit){
+		// Named, because it sits between the frame's last marker and "loop":
+		// a stall in here used to report as "endofframe" and send the search
+		// into the present path.
+		gPhase = "handleexit";
 		HandleExit();
 
 		// gFrameTick is bumped in DoRWStuffEndOfFrame now, not here: frames
@@ -838,8 +1122,28 @@ main(int, char *[])
 		// port freezes — so the first build that wired it that way could not
 		// tell a menu bug from a vsync-transition bug. One variable at a time:
 		// the preference alone decides, and it does not change under us.
+		// Options bridge into the GX backend, copied every frame so the menu
+		// toggles are live: rim light from the neo switch, the AA level into
+		// the copy-filter. librw stays ignorant of the menu manager.
+		{
+#ifdef EXTENDED_PIPELINES
+			rw::gx::gxRimEnable = CustomPipes::RimlightEnable;
+			rw::gx::gxGlossEnable = CustomPipes::GlossEnable;
+			rw::gx::gxGlossMult = CustomPipes::GlossMult;
+			rw::gx::gxLightmapEnable = CustomPipes::LightmapEnable;
+			rw::gx::gxLightmapBlend =
+			    CustomPipes::WorldLightmapBlend.Get()*CustomPipes::LightmapMult;
+#endif
+#ifdef MULTISAMPLING
+			rw::gx::gxCopyFilterLevel = FrontEndMenuManager.m_nPrefsMSAALevel > 0;
+#endif
+		}
 		extern unsigned gxWaitRetrace;
-		gxWaitRetrace = FrontEndMenuManager.m_PrefsVsync;
+		// m_PrefsVsyncDisp, not m_PrefsVsync: the menu toggles Disp, and the
+		// Disp->real copy only runs when starting a new game (and only under
+		// LEGACY_MENU_OPTIONS at that). Reading the real one meant the Frame
+		// Sync option did nothing until the next New Game.
+		gxWaitRetrace = FrontEndMenuManager.m_PrefsVsyncDisp;
 
 		switch(gGameState){
 		case GS_START_UP:
@@ -872,6 +1176,13 @@ main(int, char *[])
 			FrontEndMenuManager.m_bGameNotLoaded = true;
 			FrontEndMenuManager.m_bStartUpFrontEndRequested = true;
 			gGameState = GS_FRONTEND;
+#ifndef HW_RVL
+			// One-shot memory-card write proof: the full settings dump goes
+			// through mc:/ the moment the frontend exists. The artifact is a
+			// gta_vc.set file on card A — checkable from the host.
+			FrontEndMenuManager.SaveSettings();
+			printf("mc: settings save attempted\n");
+#endif
 			break;
 
 		case GS_FRONTEND:
@@ -898,9 +1209,20 @@ main(int, char *[])
 		// and audio threads. Absolute deadlines rather than sleep(period), so
 		// a frame that runs long is absorbed instead of pushing every
 		// subsequent frame late.
-		if(FrontEndMenuManager.m_PrefsFrameLimiter && !gxWaitRetrace){
+		// No "&& !gxWaitRetrace" any more. That gate meant Frame Sync ON — the
+		// default — skipped the limiter entirely, so OFF/30/60 all behaved
+		// identically and the option looked dead. The two are not exclusive:
+		// the retrace wait quantises to a whole field, and the limiter then
+		// holds the rest of the deadline. With sync on and 30 selected, that
+		// is what actually produces a steady 30 instead of a 60/30 swing.
+		if(FrontEndMenuManager.m_PrefsFrameLimiter){
 			static u64 tNext;
-			int fps = RsGlobal.maxFPS > 0 ? RsGlobal.maxFPS : 60;
+			// The Options entry is OFF / 60 / 30 now, so the cap comes from
+			// the preference rather than from RsGlobal alone. 30 is the useful
+			// one on this console: a scene that cannot hold 60 reads far
+			// steadier locked at 30 than oscillating between the two.
+			int fps = FrontEndMenuManager.m_PrefsFrameLimiter ==
+			    CMenuManager::FRAMELIMIT_30 ? 30 : 60;
 			u64 period = millisecs_to_ticks(1000)/fps;
 			u64 now = gettime();
 			if(tNext > now)

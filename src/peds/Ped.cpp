@@ -36,6 +36,9 @@
 #include "GameLogic.h"
 #include "Bike.h"
 #include "WindModifiers.h"
+#ifdef GTA_OGC
+#include "CdStream.h"   // DVD_FS_GUARD for the anim probe
+#endif
 #include "CutsceneShadow.h"
 #include "Clock.h"
 #include "Wanted.h"
@@ -4780,6 +4783,108 @@ CPed::PreRender(void)
 		CTimeCycle::m_fShadowSideX[CTimeCycle::m_CurrentStoredValue], CTimeCycle::m_fShadowSideY[CTimeCycle::m_CurrentStoredValue]);
 
 	UpdateRpHAnim();
+
+#ifdef GTA_OGC
+	// dvd:/autoanim.txt arms a skeleton probe on the player: every ~250ms,
+	// each anim association (id:blend, p = partial) plus the distance of each
+	// foot to the pelvis, straight off the post-anim matrices. A seated leg
+	// >1.2m from the pelvis IS the legs-out-of-the-car bug in numbers — the
+	// verdict comes from this log, not from eyeballing screenshots.
+	{
+		static int8 animProbe = -1;
+		static uint32 lastAnimLog;
+		if(animProbe < 0){
+			DVD_FS_GUARD;
+			FILE *aa = fopen("dvd:/autoanim.txt", "r");
+			animProbe = aa != nil;
+			if(aa) fclose(aa);
+		}
+		// Exception log for EVERY ped: any limb outside sane range gets a
+		// BADBONE line — the twisted body may be a jacked driver or a
+		// run-over ped (KO_*/jacked anims top the hemisphere-flip census),
+		// which a player-only probe can never see.
+		if(animProbe > 0 && !IsPlayer()){
+			RpHAnimHierarchy *eh = GetAnimHierarchyFromSkinClump(GetClump());
+			if(eh){
+				RwMatrix *em = RpHAnimHierarchyGetMatrixArray(eh);
+				int eip = RpHAnimIDGetIndex(eh, BONE_pelvis);
+				int elt = RpHAnimIDGetIndex(eh, BONE_l_thigh);
+				int elf = RpHAnimIDGetIndex(eh, BONE_l_foot);
+				int erf = RpHAnimIDGetIndex(eh, BONE_r_foot);
+				if(eip >= 0 && elt >= 0 && elf >= 0 && erf >= 0){
+					CVector ep = em[eip].pos;
+					float dt = (CVector(em[elt].pos)-ep).Magnitude();
+					float dl = (CVector(em[elf].pos)-ep).Magnitude();
+					float dr = (CVector(em[erf].pos)-ep).Magnitude();
+					static uint32 lastBad;
+					if((dt > 0.35f || dl > 1.25f || dr > 1.25f ||
+					    dt != dt || dl != dl) &&
+					   CTimer::GetTimeInMilliseconds() - lastBad > 150){
+						lastBad = CTimer::GetTimeInMilliseconds();
+						char bl[192]; int bn = 0;
+						bn += snprintf(bl+bn, sizeof(bl)-bn,
+						    "BADBONE t=%u mi=%d Lt=%.2f Lf=%.2f Rf=%.2f",
+						    lastBad, GetModelIndex(), dt, dl, dr);
+						for(CAnimBlendAssociation *ba = RpAnimBlendClumpGetFirstAssociation(GetClump());
+						    ba && bn < 170; ba = RpAnimBlendGetNextAssociation(ba))
+							bn += snprintf(bl+bn, sizeof(bl)-bn, " %d:%.2f%s",
+							    (int)ba->animId, ba->blendAmount,
+							    ba->IsPartial() ? "p" : "");
+						DVD_FS_GUARD;
+						FILE *bf = fopen("dvd:/anim.log", "a");
+						if(bf){ fprintf(bf, "%s\n", bl); fclose(bf); }
+					}
+				}
+			}
+		}
+		if(animProbe > 0 && IsPlayer() && CTimer::GetTimeInMilliseconds() - lastAnimLog > 250){
+			lastAnimLog = CTimer::GetTimeInMilliseconds();
+			char ln[224]; int n = 0;
+			n += snprintf(ln+n, sizeof(ln)-n, "ANIM t=%u v=%d",
+			    (unsigned)lastAnimLog, bInVehicle ? 1 : 0);
+			for(CAnimBlendAssociation *a = RpAnimBlendClumpGetFirstAssociation(GetClump());
+			    a && n < 150; a = RpAnimBlendGetNextAssociation(a))
+				n += snprintf(ln+n, sizeof(ln)-n, " %d:%.2f%s",
+				    (int)a->animId, a->blendAmount, a->IsPartial() ? "p" : "");
+			RpHAnimHierarchy *ph = GetAnimHierarchyFromSkinClump(GetClump());
+			if(ph){
+				RwMatrix *pm = RpHAnimHierarchyGetMatrixArray(ph);
+				int ip = RpHAnimIDGetIndex(ph, BONE_pelvis);
+				// Thigh and calf too: HAnim matrices are absolute per node, so
+				// a rotten thigh does not displace the foot — feet alone can
+				// read sane while the visible leg is through the door.
+				static const int tags[] = { BONE_l_thigh, BONE_r_thigh,
+				    BONE_l_calf, BONE_r_calf, BONE_l_foot, BONE_r_foot };
+				static const char *tn[] = { "Lt","Rt","Lc","Rc","Lf","Rf" };
+				if(ip >= 0){
+					CVector pp = pm[ip].pos;
+					for(int b = 0; b < 6; b++){
+						int bx = RpHAnimIDGetIndex(ph, tags[b]);
+						if(bx >= 0)
+							n += snprintf(ln+n, sizeof(ln)-n, " %s=%.2f",
+							    tn[b], (CVector(pm[bx].pos)-pp).Magnitude());
+					}
+					// Rotation signal — distances are rotation-invariant and
+					// blind to a folded leg. Dot of each thigh's up axis with
+					// the pelvis up axis: seated ~steady; a leg folded into
+					// the body swings this hard negative.
+					int lt2 = RpHAnimIDGetIndex(ph, BONE_l_thigh);
+					int rt2 = RpHAnimIDGetIndex(ph, BONE_r_thigh);
+					if(lt2 >= 0 && rt2 >= 0){
+						RwV3d *pu = &pm[ip].up;
+						RwV3d *lu = &pm[lt2].up, *ru = &pm[rt2].up;
+						n += snprintf(ln+n, sizeof(ln)-n, " Lq=%.2f Rq=%.2f",
+						    pu->x*lu->x + pu->y*lu->y + pu->z*lu->z,
+						    pu->x*ru->x + pu->y*ru->y + pu->z*ru->z);
+					}
+				}
+			}
+			DVD_FS_GUARD;
+			FILE *af = fopen("dvd:/anim.log", "a");
+			if(af){ fprintf(af, "%s\n", ln); fclose(af); }
+		}
+	}
+#endif
 
 	bool bIsWindModifierTurnedOn = false;
 	float fAnyDirectionShift = 1.0f;

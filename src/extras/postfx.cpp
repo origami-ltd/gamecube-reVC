@@ -13,10 +13,19 @@
 #include "MBlur.h"
 #include "postfx.h"
 
+#ifdef GTA_OGC
+// The GX backend's constant mult-add TEV override for full-screen filter
+// draws — the MOBILE contrast curve without a pixel shader.
+namespace rw { namespace gx {
+void setIm2DConstMulAdd(const float *mult, const float *add);
+void clearIm2DOverride(void);
+} }
+#endif
+
 RwRaster *CPostFX::pFrontBuffer;
 RwRaster *CPostFX::pBackBuffer;
 bool CPostFX::bJustInitialised;
-int CPostFX::EffectSwitch = POSTFX_NORMAL;
+int8 CPostFX::EffectSwitch = POSTFX_NORMAL;
 bool CPostFX::BlurOn = false;
 bool CPostFX::MotionBlurOn = false;
 
@@ -52,9 +61,20 @@ CPostFX::Open(RwCamera *cam)
 	if(pFrontBuffer)
 		Close();
 
+#ifdef GTA_OGC
+	// Camera-sized, not pow2-rounded. The pow2 round-up exists for hardware
+	// that cannot sample NP2 textures; GX can under CLAMP, which is all a
+	// frame grab needs. 640x480x16 is 600KB per buffer against 1MB for the
+	// 1024x512 version — and the EFB copy is then 1:1, no dead border, so
+	// the Vertex quad below maps UV 0..1 exactly.
+	uint32 width  = RwRasterGetWidth(RwCameraGetRaster(cam));
+	uint32 height = RwRasterGetHeight(RwCameraGetRaster(cam));
+	uint32 depth  = 16;
+#else
 	uint32 width  = Pow(2.0f, int32(log2(RwRasterGetWidth (RwCameraGetRaster(cam))))+1);
 	uint32 height = Pow(2.0f, int32(log2(RwRasterGetHeight(RwCameraGetRaster(cam))))+1);
 	uint32 depth  = RwRasterGetDepth(RwCameraGetRaster(cam));
+#endif
 	pFrontBuffer = RwRasterCreate(width, height, depth, rwRASTERTYPECAMERATEXTURE);
 	pBackBuffer = RwRasterCreate(width, height, depth, rwRASTERTYPECAMERATEXTURE);
 	bJustInitialised = true;
@@ -266,6 +286,49 @@ float CPostFX::Intensity = 1.0f;
 void
 CPostFX::RenderOverlayShader(RwCamera *cam, int32 r, int32 g, int32 b, int32 a)
 {
+#ifdef GTA_OGC
+	// No pixel shaders on GX. NORMAL is the frame re-added over itself
+	// tinted by the timecycle blur colour (the im2D TEV already multiplies
+	// texel by vertex colour, so one additive draw is exactly that).
+	// MOBILE is the contrast curve out = frame*mult + add, and the backend
+	// now runs that as a two-stage constant mult-add TEV — the same maths
+	// the PC pixel shader does, quantised to 8 bits.
+	(void)cam; (void)a;
+	if(EffectSwitch == POSTFX_MOBILE){
+		float mult[3], add[3];
+		mult[0] = (r-64)/256.0f + 1.4f;
+		mult[1] = (g-64)/256.0f + 1.4f;
+		mult[2] = (b-64)/256.0f + 1.4f;
+		add[0] = r/1536.f - 0.05f;
+		add[1] = g/1536.f - 0.05f;
+		add[2] = b/1536.f - 0.05f;
+		rw::gx::setIm2DConstMulAdd(mult, add);
+		RwRenderStateSet(rwRENDERSTATETEXTURERASTER, pBackBuffer);
+		// Direct write: the TEV output IS the filtered frame.
+		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
+		for(int i = 0; i < 4; i++)
+			RwIm2DVertexSetIntRGBA(&Vertex[i], 255, 255, 255, 255);
+		RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
+		rw::gx::clearIm2DOverride();
+		return;
+	}
+	{
+		float f = Intensity;
+		int tr = Min((int)(r*f), 255);
+		int tg = Min((int)(g*f), 255);
+		int tb = Min((int)(b*f), 255);
+		RwRenderStateSet(rwRENDERSTATETEXTURERASTER, pBackBuffer);
+		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)TRUE);
+		for(int i = 0; i < 4; i++)
+			RwIm2DVertexSetIntRGBA(&Vertex[i], tr, tg, tb, 255);
+		RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDONE);
+		RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDONE);
+		RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
+		RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDSRCALPHA);
+		RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDINVSRCALPHA);
+	}
+	return;
+#endif
 	RwRenderStateSet(rwRENDERSTATETEXTURERASTER, pBackBuffer);
 
 	if(EffectSwitch == POSTFX_MOBILE){
@@ -393,8 +456,15 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 
 	if(pFrontBuffer == nil)
 		Open(cam);
-	assert(pFrontBuffer);
-	assert(pBackBuffer);
+	// Open does not check RwRasterCreate, so on a full heap both buffers come
+	// back nil and this used to walk on into GetBackBuffer's
+	// RwRasterPushContext(nil) — and, worse, retry two 1MB allocations on
+	// every frame from here on. Skipping the effect is the only sane answer:
+	// the frame still draws, just without the filter.
+	if(pFrontBuffer == nil || pBackBuffer == nil){
+		POP_RENDERGROUP();
+		return;
+	}
 
 	if(type == MOTION_BLUR_LIGHT_SCENE){
 		SmoothColor(red, green, blue, blur);

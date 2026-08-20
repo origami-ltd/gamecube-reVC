@@ -131,7 +131,15 @@ CVector CCutsceneMgr::ms_cutsceneOffset;
 float CCutsceneMgr::ms_cutsceneTimer;
 bool CCutsceneMgr::ms_wasCutsceneSkipped;
 uint32 CCutsceneMgr::ms_cutsceneLoadStatus;
+#ifdef GTA_OGC
+// Off: the shadow's render-to-texture blur passes (ShadowCamera's multiply
+// and invert quads, 64/128px) land on the MAIN screen at the origin on GX —
+// the permanent top-left square + dark ball. The regular projected shadows
+// cover peds until the shadow camera's raster switch is honoured.
+bool CCutsceneMgr::ms_useCutsceneShadows = false;
+#else
 bool CCutsceneMgr::ms_useCutsceneShadows = true;
+#endif
 
 bool bCamLoaded;
 bool bIsEverythingRemovedFromTheWorldForTheBiggestFuckoffCutsceneEver; // pls don't shrink the name :P
@@ -449,7 +457,9 @@ CCutsceneMgr::DeleteCutsceneData(void)
 
 	ms_cutsceneProcessing = false;
 	ms_useLodMultiplier = false;
+#ifndef GTA_OGC
 	ms_useCutsceneShadows = true;
+#endif
 
 	for (--ms_numCutsceneObjs; ms_numCutsceneObjs >= 0; ms_numCutsceneObjs--) {
 		CWorld::Remove(ms_pCutsceneObjects[ms_numCutsceneObjs]);
@@ -557,7 +567,52 @@ CCutsceneMgr::Update(void)
 
 	if (!ms_running) return;
 
+#ifdef GTA_OGC
+	// Clipped, not NonClipped. NonClipped hands the scene clock the WHOLE of
+	// every load stall: cut.log caught it jumping +68s across 60 streaming
+	// frames, which runs the scene to its end time mid-load — the "cutscene
+	// at 2x" and the "speech cut halfway" reports are both this teardown.
+	// Clipped (60ms/frame cap) is what the sim and the anims already use, so
+	// the scene stays in step with them; on PC the two differ only in stall
+	// frames PCs do not have.
+	ms_cutsceneTimer += CTimer::GetTimeStepInSeconds();
+#else
 	ms_cutsceneTimer += CTimer::GetTimeStepNonClippedInSeconds();
+#endif
+
+#ifdef GTA_OGC
+	// 2x-speed hunt: three clocks once a second over gecko. rt = pause-mode
+	// ms (raw wall time, immune to ms_fTimeScale), gt = game ms (scaled +
+	// 60ms clip), ct = this cutscene timer (scaled, unclipped). Whichever
+	// one runs at twice rt names the culprit; if all three agree the speed
+	// bug is downstream of the clocks (anim data or render), not timing.
+	{
+		extern void GeckoLog(const char *msg);
+		static float prevTimer = 1e9f;
+		static uint32 rt0, gt0, frames;
+		if (ms_cutsceneTimer < prevTimer) {   // timer restarted = new scene
+			rt0 = CTimer::GetTimeInMillisecondsPauseMode();
+			gt0 = CTimer::GetTimeInMilliseconds();
+			frames = 0;
+		}
+		prevTimer = ms_cutsceneTimer;
+		if (++frames % 60 == 0) {
+			char line[96];
+			snprintf(line, sizeof(line), "CUT f=%u rt=%u gt=%u ct=%u ts=%.2f",
+			    (unsigned)frames,
+			    (unsigned)(CTimer::GetTimeInMillisecondsPauseMode() - rt0),
+			    (unsigned)(CTimer::GetTimeInMilliseconds() - gt0),
+			    (unsigned)(ms_cutsceneTimer * 1000.0f),
+			    CTimer::GetTimeScale());
+			GeckoLog(line);
+			// The card copy is the one that survives: the gecko capture
+			// reconnects mid-run and truncates lines.
+			DVD_FS_GUARD;
+			FILE *cl = fopen("dvd:/cut.log", "a");
+			if (cl) { fprintf(cl, "%s\n", line); fclose(cl); }
+		}
+	}
+#endif
 
 	for (int i = 0; i < ms_numCutsceneObjs; i++) {
 		int modelId = ms_pCutsceneObjects[i]->GetModelIndex();
@@ -571,7 +626,14 @@ CCutsceneMgr::Update(void)
 	if (bCamLoaded)
 		if (CGeneral::faststricmp(ms_cutsceneName, "finale") && TheCamera.Cams[TheCamera.ActiveCam].Mode == CCam::MODE_FLYBY && ms_cutsceneLoadStatus == CUTSCENE_LOADING_0) {
 			if (CPad::GetPad(0)->GetCrossJustDown()
+#ifndef GTA_OGC
 				|| (CGame::playingIntro && CPad::GetPad(0)->GetStartJustDown())
+#else
+				// Start opens the pause menu, including over a cutscene, so it
+				// cannot also tear the cutscene down — that ran FinishCutscene
+				// on the same frame the frontend was coming up. Cross still
+				// skips, which is the button the game prompts for anyway.
+#endif
 #ifdef GTA_PC_CONTROLS
 				|| CPad::GetPad(0)->GetLeftMouseJustDown()
 				|| CPad::GetPad(0)->GetEnterJustDown()

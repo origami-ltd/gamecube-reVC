@@ -9,6 +9,21 @@
 #include <string.h>
 #ifndef _WIN32
 #include "crossplatform.h"
+#ifdef GTA_OGC
+// CdStream.h drags the game's type headers in, which this file cannot see —
+// the two lock entry points are all the guard needs.
+extern "C" {
+void CdStreamFsLock(void);
+void CdStreamFsUnlock(void);
+}
+struct FakeRwFsGuard {
+	FakeRwFsGuard() { CdStreamFsLock(); }
+	~FakeRwFsGuard() { CdStreamFsUnlock(); }
+};
+#endif
+#ifdef GTA_OGC
+#include "gamecube/GameCubePath.h"
+#endif
 #endif
 
 using namespace rw;
@@ -1018,7 +1033,97 @@ RtBMPImageWrite(RwImage *image, const RwChar *imageName)
 RwImage *
 RtBMPImageRead(const RwChar *imageName)
 {
-#ifndef _WIN32
+#ifdef GTA_OGC
+	// Normalise against dvd:/ directly rather than through casepath.
+	//
+	// casepath's console branch resolves a relative path against getcwd(), and
+	// that is the step that fails here: the callers pass Windows-style relative
+	// paths ("models\generic\player.bmp"), and when getcwd does not hand back
+	// "dvd:/" the whole thing falls through to fopen on a backslash path that
+	// libfat cannot open. Measured on hardware: the player skin logged
+	// "SKIN models\generic\player.bmp img0" — the read returned nil — while
+	// librw's own readBMP opens that exact file on the host without complaint,
+	// so the reader was never the problem.
+	{
+		// readBMP -> getFileContents -> plain fopen: librw bypasses CFileMgr,
+		// so this is the one file reader in the game that was touching libfat
+		// with no guard. LoadPlayerSkin runs while the streaming worker is
+		// mid-load, and the race is what kept returning nil for a file that
+		// provably exists — the persistent "SKIN ... img0".
+		FakeRwFsGuard fsGuard;
+		char *p = NormalizeGameCubePath(imageName, "dvd:/");
+		// Which step dies: the normalize, the open, or the decode. Goes to
+		// the card because this fires during load, when Gecko drops lines.
+		{
+			FILE *probe = p ? fopen(p, "rb") : nil;
+			long sz = 0;
+			if(probe){ fseek(probe, 0, SEEK_END); sz = ftell(probe); fclose(probe); }
+			FILE *lg = fopen("dvd:/automenu.log", "a");
+			if(lg){
+				fprintf(lg, "SKINP norm=%d open=%ld path=%s\n",
+				    p != nil, sz, p ? p : "(nil)");
+				fclose(lg);
+			}
+		}
+		if(p){
+			// Decoded by hand. The file opens and reads whole (measured:
+			// SKINP open=66612), then rw::readBMP hands back nil on the
+			// console while the same bytes decode on the host — whatever
+			// that reader trips on, an 8-bit Windows BMP is sixty lines to
+			// parse and this is the only BMP the game ever loads.
+			RwImage *image = nil;
+			FILE *bf = fopen(p, "rb");
+			free(p);
+			if(bf){
+				fseek(bf, 0, SEEK_END);
+				long blen = ftell(bf);
+				fseek(bf, 0, SEEK_SET);
+				unsigned char *bd = blen > 54 ? (unsigned char*)malloc(blen) : nil;
+				if(bd && fread(bd, 1, blen, bf) == (size_t)blen &&
+				   bd[0] == 'B' && bd[1] == 'M'){
+					auto r32 = [&](long o){ return (unsigned)bd[o] |
+					    bd[o+1]<<8 | bd[o+2]<<16 | (unsigned)bd[o+3]<<24; };
+					unsigned dataOff = r32(10);
+					unsigned hdrSize = r32(14);
+					int w = (int)r32(18), h = (int)r32(22);
+					unsigned depth = bd[28] | bd[29]<<8;
+					unsigned comp = r32(30);
+					bool flip = h > 0;
+					if(h < 0) h = -h;
+					if(comp == 0 && (depth == 8 || depth == 24) &&
+					   w > 0 && h > 0 && w <= 1024 && h <= 1024){
+						image = rw::Image::create(w, h, 32);
+						image->allocate();
+						const unsigned char *pal = bd + 14 + hdrSize;
+						unsigned stride = ((w*depth/8) + 3) & ~3u;
+						for(int y = 0; y < h; y++){
+							const unsigned char *src = bd + dataOff +
+							    (size_t)(flip ? h-1-y : y)*stride;
+							unsigned char *out = image->pixels +
+							    (size_t)y*image->stride;
+							for(int x = 0; x < w; x++){
+								unsigned char r, g, b;
+								if(depth == 8){
+									const unsigned char *c = pal + src[x]*4;
+									b = c[0]; g = c[1]; r = c[2];
+								}else{
+									b = src[x*3]; g = src[x*3+1]; r = src[x*3+2];
+								}
+								out[x*4+0] = r; out[x*4+1] = g;
+								out[x*4+2] = b; out[x*4+3] = 255;
+							}
+						}
+					}
+				}
+				if(bd) free(bd);
+				fclose(bf);
+			}
+			if(image)
+				return image;
+		}
+	}
+	return nil;   // a backslash path cannot open on libfat; nothing to retry
+#elif !defined(_WIN32)
 	RwImage *image;
 	char *r = casepath(imageName);
 	if (r) {

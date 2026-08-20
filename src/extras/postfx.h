@@ -15,7 +15,12 @@ public:
 	static RwRaster *pFrontBuffer;
 	static RwRaster *pBackBuffer;
 	static bool bJustInitialised;
-	static int EffectSwitch;
+	// int8, not int: the frontend edits this through (int8*)&EffectSwitch,
+	// and on big-endian that cast writes the TOP byte of an int32 — measured
+	// on the GameCube as the colour filter applying only when NONE was
+	// selected (writing 0 left the initial 2 in the low byte; writing 2 made
+	// 0x02000002, which matches no case at all).
+	static int8 EffectSwitch;
 	static bool BlurOn;	// or use CMblur for that?
 	static bool MotionBlurOn;	// or use CMblur for that?
 	static float Intensity;

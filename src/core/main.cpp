@@ -731,6 +731,15 @@ bool gShowBootConsole = false;
 //
 // Off by default. Gecko carries the same lines and is a separate transport.
 bool gLogToSd = false;
+// Effect-pass vitals for the P profile line; MBlur counts into these.
+uint32 gFxQueued, gFxDrawn;
+// Lost with an uncommitted revert; zero until its increment site returns.
+unsigned gxBeginUs;
+// Worst frame period since the last heartbeat print — the X field in the P
+// line. gxSnapFrame samples one frame per beat and misses hitches; this one
+// cannot.
+unsigned gxWorstFrameUs, gxWorstSnap;
+
 
 // Boot-stage breadcrumbs: the last line in this file names the load stage
 // that hung or crashed. Console loads are slow and opaque otherwise.
@@ -765,6 +774,12 @@ LoadingScreen(const char *str1, const char *str2, const char *splashscreen)
 		    str1 ? str1 : "-", str2 ? str2 : "-",
 		    splashscreen ? splashscreen : "-");
 		BootLog(line);
+	}
+	// The boot-time heap smash lands between two of these calls; the first
+	// check that sees a poisoned arena names the init step that did it.
+	{
+		extern void gcHeapGuardCheck(const char *marker);
+		gcHeapGuardCheck(str2 ? str2 : (str1 ? str1 : "loadingscreen"));
 	}
 #endif
 
@@ -1682,6 +1697,13 @@ Render2dStuffAfterFade(void)
 		}
 	}
 	{
+		// Menu-driven debug level: OFF skips the whole readout (the early
+		// return the user asked for), FPS prints the short line, VERBOSE the
+		// full profile.
+		extern int8 gDebugLevel;
+		if(gDebugLevel == 0)
+			goto debugHudDone;
+		{
 		char fpsA[192];
 		wchar fpsW[192];
 		extern unsigned gxMeshCount, gxVertCount, gxDlMeshCount;
@@ -1702,6 +1724,7 @@ Render2dStuffAfterFade(void)
 			worstAt = nowMs;
 		}
 		#if OGC_PROFILE
+		if(gDebugLevel >= 2){
 		unsigned work = gxSnapFrame > gxSnapVsync ?
 		    gxSnapFrame - gxSnapVsync : 0;
 		// oom = geometry allocations the streamer had to soft-fail, mem =
@@ -1731,8 +1754,10 @@ Render2dStuffAfterFade(void)
 		    gxTiledBytes>>10,
 		    (unsigned)(mi.fordblks>>10), (unsigned)mi.ordblks,
 		    gxStreamUs/1000, arPct);
+		}else
+			sprintf(fpsA, "%u", 1000000u/per);
 #else
-		sprintf(fpsA, "%u max%u", 1000000u/per, worstUs/1000);
+		sprintf(fpsA, "%u", 1000000u/per);
 #endif
 		gxTileUs = 0; gxTexBuilds = 0;
 		gxMeshCount = 0;
@@ -1742,7 +1767,7 @@ Render2dStuffAfterFade(void)
 		// One block, one PrintString. Two overlapping text draws is not a
 		// readout, it is a mess — the phase line was landing on top of the
 		// last line of the counter. CFont wraps this for us.
-		{
+		if(gDebugLevel >= 2){
 			extern unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream,
 			    gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
 			extern unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
@@ -1752,11 +1777,12 @@ Render2dStuffAfterFade(void)
 			unsigned other = gxSnapFrame > acc ? gxSnapFrame - acc : 0;
 			int n = (int)strlen(fpsA);
 			snprintf(fpsA + n, sizeof(fpsA) - n,
-			    " | sim%u rnd%u sky%u(sz%u cl%u cd%u) fx%u hud%u lit%u str%u cpy%u gp%u vs%u oth%u",
+			    " | sim%u rnd%u sky%u(sz%u cl%u cd%u) fx%u hud%u lit%u str%u cpy%u gp%u vs%u oth%u max%u",
 			    gxSnapSim/100, gxSnapRender/100, gxSnapSky/100,
 			    gxCamSizeUs/100, gxClearUs/100, gxCloudUs/100, gxSnapFx/100,
 			    gxSnapHud/100, gxSnapLights/100, gxSnapStream/100,
-			    gxSnapCopy/100, gxSnapGp/100, gxSnapVsync/100, other/100);
+			    gxSnapCopy/100, gxSnapGp/100, gxSnapVsync/100, other/100,
+			    worstUs/1000);
 		}
 		AsciiToUnicode(fpsA, fpsW);
 		CFont::SetPropOn();
@@ -1764,17 +1790,23 @@ Render2dStuffAfterFade(void)
 		CFont::SetCentreOff();
 		CFont::SetRightJustifyOff();
 		CFont::SetJustifyOff();
-		CFont::SetWrapx(SCREEN_SCALE_X(8.0f) + SCREEN_SCALE_X(200.0f));
+		// The background box runs to wrapX no matter how short the text is
+		// (GetTextRect right = wrapX for left-justified text), so size the
+		// wrap to the content: a snug square for the bare FPS number, the
+		// full readout width only in verbose.
+		CFont::SetWrapx(SCREEN_SCALE_X(8.0f) + SCREEN_SCALE_X(gDebugLevel >= 2 ? 200.0f : 24.0f));
 		CFont::SetFontStyle(FONT_STANDARD);
 		CFont::SetBackgroundOn();
 		CFont::SetBackGroundOnlyTextOn();
-		CFont::SetBackgroundColor(CRGBA(0, 0, 0, 255));
+		CFont::SetBackgroundColor(CRGBA(0, 0, 0, 128));   // 50% transparent
 		CFont::SetDropShadowPosition(0);
 		CFont::SetColor(CRGBA(255, 255, 255, 255));
 		CFont::PrintString(SCREEN_SCALE_X(8.0f), SCREEN_SCALE_Y(8.0f), fpsW);
 		CFont::SetBackgroundOff();
 		CFont::SetBackGroundOnlyTextOff();
+		}
 	}
+	debugHudDone: ;
 #endif
 
 	CFont::DrawFonts();
@@ -1790,6 +1822,8 @@ Render2dStuffAfterFade(void)
 // left on the table.
 namespace rw { namespace gx {
 extern uint32 gxPackSaved, gxPackGeoms, gxPackRefusedPos, gxPackRefusedUV;
+extern uint32 gxDropQuads;
+extern int32 gxDropBeginState;
 } }
 #endif
 
@@ -1806,6 +1840,8 @@ Idle(void *arg)
 		unsigned long long now = gettime();
 		if(tPrevEntry)
 			gxFrameUs = (unsigned)ticks_to_microsecs(now - tPrevEntry);
+			if(gxFrameUs > gxWorstFrameUs)
+				gxWorstFrameUs = gxFrameUs;
 		tPrevEntry = now;
 	}
 	unsigned long long tIdle = gettime();
@@ -1837,6 +1873,7 @@ Idle(void *arg)
 			gxSnapSim = gxSimUs; gxSnapRender = gxRenderUs;
 			gxSnapEnd = gxEndUs; gxSnapVsync = gxVsyncUs;
 			gxSnapFrame = gxFrameUs; gxSnapSky = gxSkyUs;
+			gxWorstSnap = gxWorstFrameUs; gxWorstFrameUs = 0;
 			gxSnapShow = gxShowUs;
 			gxSnapHud = gxHudUs; gxSnapFx = gxFxUs;
 			gxSnapTile = gxTileUs; gxSnapStream = gxStreamUs;
@@ -1919,6 +1956,137 @@ Idle(void *arg)
 			lastLodMiss = gLodMiss;
 			lastEvict = gStrEvict; lastLoad = gStrLoad;
 			GeckoLog(hb);
+			// Cutscene clock ratio, to the card: ct (cutscene seconds) vs
+			// wall dt between beats answers "2x?" numerically, and ts names
+			// the culprit if the global timescale is the one doubled.
+			if(CCutsceneMgr::IsRunning()){
+				DVD_FS_GUARD;
+				FILE *cf = fopen("dvd:/cut.log", "a");
+				if(cf){
+					fprintf(cf, "CUT wall=%u ct=%d ts=%.2f step=%.4f\n",
+					    (unsigned)now,
+					    CCutsceneMgr::GetCutsceneTimeInMilleseconds(),
+					    CTimer::GetTimeScale(),
+					    CTimer::GetTimeStepNonClippedInSeconds());
+					fclose(cf);
+				}
+			}
+			// The frame profile on its own short line. The HB line above is
+			// far past what Gecko delivers intact, so anything appended to it
+			// is never read — and the whole question right now is which phase
+			// owns the frame. Tenths of a millisecond, same units as the HUD.
+			{
+				extern unsigned gxSnapSim, gxSnapRender, gxSnapSky, gxBeginUs,
+				    gxSnapFrame;
+				extern unsigned gxListUs, gxPreUs, gxAudioUs, gxFadeUs,
+				    gxAfterUs;
+				extern unsigned gxSnapTile, gxSnapStream, gxSnapCopy,
+				    gxSnapVsync;
+				char prof[96];
+				// F = whole frame period in tenths of a ms (333 = 30fps),
+				// L = limiter pref (0 off, 1 sixty, 2 thirty), V = vsync pref.
+				// X = worst single frame in the beat (gxWorstSnap). The
+				// specifier used to ride with NO argument — every later
+				// column shifted one arg left (X showed the limiter, w
+				// printed stack garbage). Keep count and args in lockstep.
+				snprintf(prof, sizeof(prof),
+				    "P s%u b%u r%u m%u F%u X%u L%d V%d C%d M%d li%u pr%u a%u fd%u af%u ti%u st%u cp%u vs%u d%d q%u w%u",
+				    gxSnapSky/100, gxBeginUs/100,
+				    gxSnapRender/100, gxSnapSim/100, gxSnapFrame/100,
+				    gxWorstSnap/100,
+				    (int)FrontEndMenuManager.m_PrefsFrameLimiter,
+				    (int)FrontEndMenuManager.m_PrefsVsyncDisp,
+				    (int)CPostFX::EffectSwitch, (int)CPostFX::MotionBlurOn,
+				    gxListUs/100, gxPreUs/100, gxAudioUs/100,
+				    gxFadeUs/100, gxAfterUs/100,
+				    gxSnapTile/100, gxSnapStream/100, gxSnapCopy/100,
+				    gxSnapVsync/100,
+#ifdef SCREEN_DROPLETS
+				    ScreenDroplets::ms_numDrops,
+#else
+				    -1,
+#endif
+				    gFxQueued, gFxDrawn);
+				gFxQueued = gFxDrawn = 0;
+				GeckoLog(prof);
+				// Droplet vitals + build tag, to the card unconditionally:
+				// every "which build are you on / which link broke" debate
+				// would have been one line in this file.
+				{
+					static int8 dropHb;
+					if(++dropHb >= 6){
+						dropHb = 0;
+						DVD_FS_GUARD;
+						FILE *df = fopen("dvd:/automenu.log", "a");
+						if(df){
+							fprintf(df,
+							    "DROP b=" __TIME__ " d=%d q=%u st=%d rain=%d\n",
+#ifdef SCREEN_DROPLETS
+							    ScreenDroplets::ms_numDrops,
+#else
+							    -1,
+#endif
+							    rw::gx::gxDropQuads, rw::gx::gxDropBeginState,
+							    (int)(CWeather::Rain*100));
+							fclose(df);
+						}
+					}
+					rw::gx::gxDropQuads = 0;
+				}
+				if(gLogToSd){
+					DVD_FS_GUARD;
+					FILE *pf = fopen("dvd:/hb.log", "a");
+					// The HB line (ev/ld churn counters) is appended once at
+					// the end of the heartbeat block; only the profile line
+					// belongs here.
+					if(pf){ fprintf(pf, "%s\n", prof); fclose(pf); }
+				}
+			}
+			// dvd:/autolog.txt turns the per-heartbeat SD logging on, so a
+			// hands-free run leaves hb.log with the full series.
+			{
+				static int8 autoLog = -1;
+				if(autoLog < 0){
+					DVD_FS_GUARD;
+					FILE *al = fopen("dvd:/autolog.txt", "r");
+					autoLog = al != nil;
+					if(al) fclose(al);
+					if(autoLog)
+						gLogToSd = true;
+				}
+			}
+			{
+				// dvd:/autoweather.txt forces rain. Re-forced every heartbeat,
+				// not once: the first beat lands during loading and
+				// CWeather::Init wipes the force right after — measured as a
+				// bone-dry street with the trigger armed.
+				static int8 autoWeather = -1;
+				if(autoWeather < 0){
+					DVD_FS_GUARD;
+					FILE *aw = fopen("dvd:/autoweather.txt", "r");
+					autoWeather = aw != nil;
+					if(aw) fclose(aw);
+				}
+				if(autoWeather > 0)
+					CWeather::ForceWeatherNow(WEATHER_RAINY);
+			}
+			// The neo-row probe, re-emitted here because the original in
+			// CustomFrontendOptionsPopulate fires before the filesystem
+			// (and the Gecko listener) exist. gNeoRowsIn is latched there;
+			// this line lands.
+			{
+				static bool8 neoReported;
+				if(!neoReported){
+					neoReported = TRUE;
+					extern int8 gNeoRowsIn;
+					char nl[32];
+					snprintf(nl, sizeof(nl), "NEO rows=%d", (int)gNeoRowsIn);
+					GeckoLog(nl);
+					DVD_FS_GUARD;
+					FILE *nf = fopen("dvd:/automenu.log", "a");
+					if(nf){ fprintf(nf, "%s\n", nl); fclose(nf); }
+				}
+			}
 			// dvd:/automenu.txt opens the pause menu once, hands-free, the
 			// same way autostart.txt skips the frontend. The menu freeze is
 			// only reachable by pressing Start, which makes it untestable

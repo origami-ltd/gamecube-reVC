@@ -3,7 +3,7 @@ if(NOT NINTENDO_OGC)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
 endif()
 
-file(GLOB_RECURSE ${PROJECT}_SOURCES "*.cpp" "*.h" "*.rc")
+file(GLOB_RECURSE ${PROJECT}_SOURCES "*.cpp" "*.c" "*.h" "*.rc")
 if(NINTENDO_OGC)
     list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "CdStream_posix\\.cpp$")
     list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "/audio/(eax|oal)/")

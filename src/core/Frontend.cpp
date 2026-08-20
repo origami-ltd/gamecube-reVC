@@ -513,7 +513,15 @@ CMenuManager::CMenuManager()
 	// not a measurement. Tested directly afterwards: the menu freezes with the
 	// stall on too.
 	m_PrefsVsync = 0;
+#ifdef GTA_OGC
+	// OFF at every boot, by explicit decision: presentation is tear-free
+	// either way on GX (the VI only flips at retrace), so the wait's only
+	// effect is quantising a 17ms frame into a 33ms one. The Frame Sync row
+	// still turns it on live for whoever prefers locked 60/30.
+	m_PrefsVsyncDisp = 0;
+#else
 	m_PrefsVsyncDisp = 1;
+#endif
 	m_PrefsFrameLimiter = 1;
 	m_PrefsLanguage = 0;
 	field_54 = 0;
@@ -1155,7 +1163,19 @@ CMenuManager::DrawStandardMenus(bool activeScreen)
 						leftText = TheText.Get(gString);
 					}
 				} else {
-					leftText = TheText.Get(aScreens[m_nCurrScreen].m_aEntries[i].m_EntryName);
+	#ifdef MORE_LANGUAGES
+				// No FEL_POR key exists in any shipped gxt (measured: absent
+				// from ours and from upstream's gamefiles), and a missing key
+				// renders as "FEL_POR missing". Plain ASCII, because the menu
+				// font's accent glyphs are per-language and unaudited here.
+				if (aScreens[m_nCurrScreen].m_aEntries[i].m_Action == MENUACTION_LANG_POR) {
+					static wchar porLabel[12];
+					if (!porLabel[0])
+						AsciiToUnicode("Portugues", porLabel);
+					leftText = porLabel;
+				} else
+#endif
+				leftText = TheText.Get(aScreens[m_nCurrScreen].m_aEntries[i].m_EntryName);
 				}
 
 				if (m_nPrefsAudio3DProviderIndex == NO_AUDIO_PROVIDER) {
@@ -1200,7 +1220,22 @@ CMenuManager::DrawStandardMenus(bool activeScreen)
 					rightText = TheText.Get(m_PrefsVsyncDisp ? "FEM_ON" : "FEM_OFF");
 					break;
 				case MENUACTION_FRAMELIMIT:
+#ifdef GTA_OGC
+					// Three states, not two: a console that cannot hold 60
+					// everywhere is better locked at 30 than swinging between
+					// them, and "off" is still wanted for measuring. The cap
+					// itself lives in the skel's limiter, which already reads
+					// a target rate rather than a boolean.
+					if (m_PrefsFrameLimiter == FRAMELIMIT_OFF) {
+						rightText = TheText.Get("FEM_OFF");
+					} else {
+						static wchar fpsText[8];
+						AsciiToUnicode(m_PrefsFrameLimiter == FRAMELIMIT_30 ? "30" : "60", fpsText);
+						rightText = fpsText;
+					}
+#else
 					rightText = TheText.Get(m_PrefsFrameLimiter ? "FEM_ON" : "FEM_OFF");
+#endif
 					break;
 				case MENUACTION_TRAILS:
 					rightText = TheText.Get(CMBlur::BlurOn ? "FEM_ON" : "FEM_OFF");
@@ -1431,6 +1466,17 @@ CMenuManager::DrawStandardMenus(bool activeScreen)
 					CFont::SetScale(BIGTEXT_X_SCALE, BIGTEXT_Y_SCALE);
 					
 					wchar *curOptionName = TheText.Get(aScreens[m_nCurrScreen].m_aEntries[m_nCurrOption].m_EntryName);
+#ifdef MORE_LANGUAGES
+				// Same substitution the draw path makes: the width must be
+				// measured on the label actually drawn, or the highlight
+				// covers only part of the word.
+				if (aScreens[m_nCurrScreen].m_aEntries[m_nCurrOption].m_Action == MENUACTION_LANG_POR) {
+					static wchar porHl[12];
+					if (!porHl[0])
+						AsciiToUnicode("Portugues", porHl);
+					curOptionName = porHl;
+				}
+#endif
 					float curOptionWidth = CFont::GetStringWidth(curOptionName, true);
 
 					if (CFont::Details.centre) {
@@ -3066,6 +3112,15 @@ CMenuManager::LoadAllTextures()
 	m_LeftMostRadioX = MENU_X_LEFT_ALIGNED(MENURADIO_ICON_FIRST_X - MENURADIO_ICON_SIZE);
 	CTimer::Stop();
 
+#ifdef GTA_OGC
+	// Load the full set even for the save menu, because UnloadTextures no
+	// longer frees any of it — see the note there. A half-loaded set would
+	// mean the first save point of the run permanently costs the pause menu
+	// its frontend2 sprites.
+	bool onlySave = m_OnlySaveMenu;
+	m_OnlySaveMenu = false;
+#endif
+
 	gPhase = "menu-space1";
 	CStreaming::MakeSpaceFor(350 * CDSTREAM_SECTOR_SIZE); // twice of it in mobile
 	CStreaming::ImGonnaUseStreamingMemory();
@@ -3124,6 +3179,9 @@ CMenuManager::LoadAllTextures()
 		CStreaming::IHaveUsedStreamingMemory();
 	}
 
+#ifdef GTA_OGC
+	m_OnlySaveMenu = onlySave;
+#endif
 	m_bSpritesLoaded = true;
 	CTimer::Update();
 }
@@ -3136,12 +3194,11 @@ CMenuManager::LoadSettings()
 
 	int32 prevLang = m_PrefsLanguage;
 	MousePointerStateHelper.bInvertVertically = true;
-#ifdef GTA_OGC
-	// Trails on with the rest of the effects; Options turns them off.
-	CMBlur::BlurOn = true;
-#else
+	// NOT forced on for GTA_OGC: CMBlur's own trails overlay subrasters a
+	// corner region of the camera raster and feeds it back every frame —
+	// on GX that drew a permanent translucent square + dark ball in the
+	// top-left (user: "prioridade zero"). CPostFX carries the trail look.
 	CMBlur::BlurOn = false;
-#endif
 
 	// 50 is silly
 	char headerText[50];
@@ -3183,7 +3240,14 @@ CMenuManager::LoadSettings()
 			CFileMgr::Read(fileHandle, gString, 4);
 			CFileMgr::Read(fileHandle, gString, 1);
 #ifdef LEGACY_MENU_OPTIONS
+#ifdef GTA_OGC
+			// Read and discard: the boot state is OFF by decision (see the
+			// default above), and honouring a saved ON here would re-arm the
+			// quantisation the user asked to keep away from cold start.
+			{ int8 savedVsync; CFileMgr::Read(fileHandle, (char*)&savedVsync, 1); }
+#else
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsVsyncDisp, 1);
+#endif
 			CFileMgr::Read(fileHandle, (char*)&CMBlur::BlurOn, 1);
 #else
 			CFileMgr::Read(fileHandle, gString, 1);
@@ -3195,6 +3259,16 @@ CMenuManager::LoadSettings()
 			CFileMgr::Read(fileHandle, (char*)&CVehicle::m_bDisableMouseSteering, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsSfxVolume, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsMusicVolume, 1);
+#ifdef GTA_OGC
+			// Both-zero volumes are the fossil of the era when audio was
+			// dead and the sliders did nothing ("it's all muted"). Nobody
+			// wants a silent game as a preference; deliberate near-silence
+			// can be 1.
+			if(m_PrefsSfxVolume == 0 && m_PrefsMusicVolume == 0){
+				m_PrefsSfxVolume = 102;
+				m_PrefsMusicVolume = 102;
+			}
+#endif
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsMP3BoostVolume, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsRadioStation, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsSpeakers, 1);
@@ -3811,6 +3885,9 @@ CMenuManager::ExportStats()
 {
 	char date[10];
 	CFileMgr::SetDirMyDocuments();
+#ifdef GTA_OGC
+	DVD_FS_GUARD;
+#endif
 	_strdate(date);
 	wchar *lastMission = TheText.Get(CStats::LastMissionPassedName[0] == '\0' ? "ITBEG" : CStats::LastMissionPassedName);
 	FILE *txtFile = fopen("stats.txt", "w");
@@ -4478,6 +4555,26 @@ CMenuManager::UserInput(void)
 
 #ifdef SCROLLABLE_PAGES
 		if (m_nTotalListRow > MAX_VISIBLE_OPTION) {
+#ifdef GTA_OGC
+			// Scroll from the page's own goUp/goDown instead of
+			// ProcessList's input reads. The moment the graphics page grew
+			// past twelve rows — the first page of this port ever to — the
+			// pad stopped moving it: ProcessList reads held-state keyboard
+			// checks first, and on this platform those never fire, while the
+			// JustDown checks that computed goUp/goDown above are the ones
+			// every other screen navigates with. Feed the list those.
+			m_nSelectedListRow = m_nCurrOption;
+			if (goDown)
+				ScrollDownListByOne();
+			else if (goUp)
+				ScrollUpListByOne();
+			goUp = false;
+			goDown = false;
+			m_nCurrOption = m_nSelectedListRow;
+
+			if (oldOption != m_nCurrOption)
+				m_nOptionHighlightTransitionBlend = 0;
+#else
 			bool temp = false;
 			
 			m_nSelectedListRow = m_nCurrOption;
@@ -4492,6 +4589,7 @@ CMenuManager::UserInput(void)
 	
 			if (oldOption != m_nCurrOption)
 				m_nOptionHighlightTransitionBlend = 0;
+#endif
 		}
 		
 		// Prevent sound on scroll. Mouse wheel is now belongs to us!
@@ -5291,7 +5389,11 @@ CMenuManager::ProcessOnOffMenuOptions()
 		SaveSettings(); // FIX: Again... This makes me very unhappy
 		break;
 	case MENUACTION_FRAMELIMIT:
+#ifdef GTA_OGC
+		m_PrefsFrameLimiter = (m_PrefsFrameLimiter + 1) % FRAMELIMIT_COUNT;
+#else
 		m_PrefsFrameLimiter = !m_PrefsFrameLimiter;
+#endif
 		SaveSettings();
 		break;
 	case MENUACTION_TRAILS:
@@ -5640,7 +5742,14 @@ CMenuManager::SwitchMenuOnAndOff()
 #ifdef GTA_OGC
 	gPhase = "menu-switch";
 #endif
+#ifdef GTA_OGC
+	// A cutscene turns widescreen on, and this gate is what made Start during
+	// one do nothing at all. The letterbox is a camera state, not a reason the
+	// pause menu cannot exist over it.
+	if (true) {
+#else
 	if (!TheCamera.m_WideScreenOn) {
+#endif
 
 		// Reminder: You need REGISTER_START_BUTTON defined to make it work.
 		if ((CPad::GetPad(0)->GetStartJustDown() || CPad::GetPad(0)->GetEscapeJustDown())
@@ -5684,10 +5793,23 @@ CMenuManager::SwitchMenuOnAndOff()
 				// we always expect CPostFX to be open
 				CMBlur::BlurOn = true;
 #endif
+#ifdef GTA_OGC
+				// Nothing here. With EXTENDED_COLOURFILTER this branch always
+				// took the MotionBlurOpen arm, and CPostFX::Open begins with
+				// Close() — so closing the menu destroyed and recreated two
+				// 1024x512x16 camera textures, 2MB, out of a 16.4MB arena,
+				// every single time. The camera has not changed across the
+				// menu, so the pair it tears down is the pair it builds back.
+				//
+				// CCamera::SetRwCamera opens them at startup and
+				// CPostFX::Render reopens if the front buffer is nil, so
+				// skipping this leaves nothing unopened.
+#else
 				if (CMBlur::BlurOn)
 					CMBlur::MotionBlurOpen(Scene.camera);
 				else
 					CMBlur::MotionBlurClose();
+#endif
 				DoRWStuffStartOfFrame(0, 0, 0, 0, 0, 0, 255);
 				DoRWStuffEndOfFrame();
 				DoRWStuffStartOfFrame(0, 0, 0, 0, 0, 0, 255);
@@ -5759,6 +5881,10 @@ CMenuManager::SwitchMenuOnAndOff()
 		}
 	}
 
+	// Safe to clear unconditionally again now that the widescreen gate above
+	// is open on this platform: whatever set these has just been acted on.
+	// It was not safe before — a request raised during a cutscene reached
+	// here and was thrown away with the menu never opening.
 	m_bStartUpFrontEndRequested = false;
 	m_bShutDownFrontEndRequested = false;
 
@@ -5782,6 +5908,26 @@ CMenuManager::UnloadTextures()
 
 	DMAudio.PlayFrontEndSound(SOUND_FRONTEND_MENU_STARTING, 0);
 	DMAudio.ChangeMusicMode(MUSICMODE_GAME);
+#ifdef GTA_OGC
+	// The frontend textures load once per boot and are never freed.
+	//
+	// The freeze has one reproducible shape: open, close and reopen, and it is
+	// the SECOND open that stops — which says the close leaves state the
+	// reload cannot survive, not that either half is wrong on its own.
+	// Debugging which piece of state that is costs a boot per attempt; not
+	// having a second load costs 1.3MB, held for the run.
+	//
+	// That 1.3MB comes out of the streamer, permanently, so it is not free:
+	// see the reserve note in CStreaming::Init for what being short does. If
+	// the world starts showing far LOD shells that never resolve, this is the
+	// first thing to weigh against MakeSpaceFor.
+	//
+	// ponytail: the honest fix is finding the leaked state; this removes the
+	// second load entirely, which is a smaller diff and a bounded cost.
+	m_OnlySaveMenu = false;
+	CUserDisplay::PlaceName.ProcessAfterFrontEndShutDown();
+	return;
+#endif
 	if (m_bSpritesLoaded) {
 		printf("REMOVE frontend\n");
 		int frontend = CTxdStore::FindTxdSlot("frontend1");
@@ -6052,12 +6198,30 @@ uint8 CMenuManager::GetNumberOfMenuOptions()
 
 #ifdef GAMEPAD_MENU
 const char* controllerTypesPaths[] = {
+#ifdef GTA_OGC
+	// One pad, six slots. A GameCube has no DualShock, no Xbox pad and no
+	// Joy-Con, so drawing any of them is wrong whatever gta_vc.set happens to
+	// hold — and every one of those dictionaries is a PC one that has to
+	// survive txdconv to be loadable at all. FRONTEND_DS2.TXD is the single
+	// file on the card that does not convert (the host librw cannot read it),
+	// so a saved controller type of DualShock 2 sent the loose D3D8 reader
+	// straight into the middle of LoadAllTextures.
+	//
+	// Built by tools/gamecube/txdconv --image, see build_sd.py.
+	"MODELS/FRONTEND_GCC.TXD",
+	"MODELS/FRONTEND_GCC.TXD",
+	"MODELS/FRONTEND_GCC.TXD",
+	"MODELS/FRONTEND_GCC.TXD",
+	"MODELS/FRONTEND_GCC.TXD",
+	"MODELS/FRONTEND_GCC.TXD",
+#else
 	"MODELS/FRONTEND_DS2.TXD",
 	"MODELS/FRONTEND_DS3.TXD",
 	"MODELS/FRONTEND_DS4.TXD",
 	"MODELS/FRONTEND_X360.TXD",
 	"MODELS/FRONTEND_XONE.TXD",
 	"MODELS/FRONTEND_NSW.TXD",
+#endif
 };
 
 void

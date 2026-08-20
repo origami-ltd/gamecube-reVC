@@ -18,6 +18,9 @@
 #include "ParticleObject.h"
 	#include "Pad.h"
 #include "RenderBuffer.h"
+#ifdef GTA_OGC
+#include "CdStream.h"
+#endif
 #include "custompipes.h"
 #include "postfx.h"
 #include "screendroplets.h"
@@ -90,7 +93,22 @@ CreateDropMask(int32 size)
 		float yf = ((y + 0.5f)/size - 0.5f)*2.0f;
 		for(int x = 0; x < size; x++){
 			float xf = ((x + 0.5f)/size - 0.5f)*2.0f;
+#ifdef RW_GAMECUBE
+			// Soft rim instead of the binary circle: the shader backends get
+			// their softness from bilinear filtering at higher output
+			// resolutions; at 480p the hard edge reads as a serrated ring.
+			// Written through the image path so the mask travels the same
+			// proven texture pipeline as every other alpha texture.
+			float r = sqrtf(xf*xf + yf*yf);
+			float af = (1.0f - r)*3.0f;
+			if(af < 0.0f) af = 0.0f;
+			if(af > 1.0f) af = 1.0f;
+			uint8 *px = &pixels[y*stride + x*4];
+			px[0] = px[1] = px[2] = 255;
+			px[3] = (uint8)(af*255.0f);
+#else
 			memset(&pixels[y*stride + x*4], xf*xf + yf*yf < 1.0f ? 0xFF : 0x00, 4);
+#endif
 		}
 	}
 
@@ -158,11 +176,53 @@ ScreenDroplets::Shutdown(void)
 	closeim2d_uv2();
 }
 
+#ifdef RW_GAMECUBE
+namespace rw { namespace gx { extern bool32 gxScreenDropDebugRed; extern bool32 gxScreenDropDebugMask; extern bool32 gxForceAddBlend; } }
+#endif
+
 void
 ScreenDroplets::Process(void)
 {
 	ProcessCameraMovement();
 	SprayDrops();
+#ifdef RW_GAMECUBE
+	// dvd:/autodrop.txt plants three fixed drops centre-screen every half
+	// second — the drop renderer becomes screenshotable without weather or
+	// a pad. Content "red" additionally draws them flat red (see gx.cpp),
+	// which shows the mask's shape and alpha with nothing else in the frame.
+	{
+
+		static int8 autoDrop = -1;
+		static uint32 lastPlant;
+		if(autoDrop < 0){
+			DVD_FS_GUARD;
+			FILE *ad = fopen("dvd:/autodrop.txt", "r");
+			autoDrop = 0;
+			if(ad){
+				char m[8] = {0};
+				fread(m, 1, 4, ad);
+				fclose(ad);
+				autoDrop = m[0] == 'r' ? 2 : m[0] == 'm' ? 3 : 1;
+			}
+			rw::gx::gxScreenDropDebugRed = autoDrop == 2;
+			// "mask": paint the quad with the mask's ALPHA as grayscale —
+			// soft circles = sampling fine, flat squares = UV/texcoord broken.
+			rw::gx::gxScreenDropDebugMask = autoDrop == 3;
+			// dvd:/autoblend.txt: force ONE/ONE on additive im2D draws (the
+			// rain-particle bisect — squares gone means blend state loss).
+			{
+				FILE *ab = fopen("dvd:/autoblend.txt", "r");
+				if(ab){ fclose(ab); rw::gx::gxForceAddBlend = 1; }
+			}
+		}
+		if(autoDrop > 0 && CTimer::GetTimeInMilliseconds() - lastPlant > 500){
+			lastPlant = CTimer::GetTimeInMilliseconds();
+			NewDrop(SCREEN_WIDTH/2 - 60, SCREEN_HEIGHT/2, 20, 4000, true, 255, 255, 255);
+			NewDrop(SCREEN_WIDTH/2 + 60, SCREEN_HEIGHT/2, 30, 4000, true, 255, 255, 255);
+			NewDrop(SCREEN_WIDTH/2, SCREEN_HEIGHT/2 - 60, 12, 4000, true, 255, 255, 255);
+		}
+	}
+#endif
 	ProcessMoving();
 	Fade();
 }
@@ -193,6 +253,52 @@ StartStoring(int numIndices, int numVertices, RwImVertexIndex **indexStart, Im2D
 	return vertOffset;
 }
 
+#ifdef RW_GAMECUBE
+// The UV2 im2d format registration is a shader-backend concern; the GX path
+// hands its quads straight to the TEV helper and never touches that buffer.
+static void openim2d_uv2(void) {}
+static void closeim2d_uv2(void) {}
+
+namespace rw { namespace gx {
+void gxDropletBegin(rw::Raster *mask, rw::Raster *screen);
+void gxDropletQuad(const float *px, const float *py, float u2l, float v2t,
+    float u2r, float v2b, uint32 rgba);
+void gxDropletEnd(void);
+extern bool32 gxScreenDropDebugRed;
+} }
+
+void
+ScreenDroplets::Render(void)
+{
+	// The shader that combines the drop mask with the refracted frame is a
+	// two-stage TEV setup on this platform (gx.cpp); this loop only feeds it
+	// the same quads AddToRenderList builds for the shader path.
+	ScreenDrop *drop;
+	if(CPostFX::pBackBuffer == nil)
+		return;
+	rw::gx::gxDropletBegin(RwTextureGetRaster(ms_maskTex), CPostFX::pBackBuffer);
+	static const float xy[] = { -1.0f,-1.0f, -1.0f,1.0f, 1.0f,1.0f, 1.0f,-1.0f };
+	for(drop = &ms_drops[0]; drop < &ms_drops[MAXDROPS]; drop++){
+		if(!drop->active)
+			continue;
+		float scale = 0.5f*SCREEN_SCALE_X(drop->size);
+		float magSize = SCREEN_SCALE_Y(drop->magnification*(300.0f-40.0f) + 40.0f);
+		float ul = Max(drop->x - magSize, 0.0f)/RwRasterGetWidth(CPostFX::pBackBuffer);
+		float vt = Max(drop->y - magSize, 0.0f)/RwRasterGetHeight(CPostFX::pBackBuffer);
+		float ur = Min(drop->x + magSize, SCREEN_WIDTH)/RwRasterGetWidth(CPostFX::pBackBuffer);
+		float vb = Min(drop->y + magSize, SCREEN_HEIGHT)/RwRasterGetHeight(CPostFX::pBackBuffer);
+		float px[4], py[4];
+		for(int i = 0; i < 4; i++){
+			px[i] = drop->x + xy[i*2]*scale;
+			py[i] = drop->y + xy[i*2+1]*scale;
+		}
+		uint32 rgba = ((uint32)drop->color.r<<24) | ((uint32)drop->color.g<<16) |
+		    ((uint32)drop->color.b<<8) | drop->color.a;
+		rw::gx::gxDropletQuad(px, py, ul, vt, ur, vb, rgba);
+	}
+	rw::gx::gxDropletEnd();
+}
+#else
 void
 ScreenDroplets::Render(void)
 {
@@ -236,6 +342,7 @@ ScreenDroplets::Render(void)
 	RwRenderStateSet(rwRENDERSTATETEXTURERASTER, nil);
 	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, FALSE);
 }
+#endif
 
 void
 ScreenDroplets::AddToRenderList(ScreenDroplets::ScreenDrop *drop)
@@ -442,8 +549,34 @@ ScreenDroplets::SprayDrops(void)
 		CAudioHydrant *hyd = CAudioHydrant::Get(i);
 		if (hyd->pParticleObject){
 			CVector dist = hyd->pParticleObject->GetPosition() - ms_prevCamPos;
+#ifdef RW_GAMECUBE
+			// Driving OVER the hydrant puts its base below the camera AND
+			// the chase camera 4-6m behind the car — both halves of the
+			// stock test reject exactly the case the effect exists for.
+			// Within the hydrant's reach, soak the lens, no questions —
+			// and fire the same SPLASH BURST the car/ped water splashes
+			// use (ms_splashDuration x the ndrops table, hundreds of
+			// static drops): FillScreenMoving alone caps at a handful of
+			// moving drops, which read as one lonely drip against the
+			// screenful the PC build shows.
+			if(dist.MagnitudeSqr() > 40.0f) continue;
+			// Arm ONCE per approach, and with no object on purpose. Two
+			// lessons paid for in boots: (a) re-arming every in-range frame
+			// pins the countdown at 14, and ndrops[14..5] are ZERO — the
+			// burst only fired after leaving the spray; (b) storing the
+			// hydrant's CParticleObject dangles when its 5-second remove
+			// timer frees it, and GetPosition() on freed memory turned the
+			// distance test into NaN coordinates for every later drop —
+			// reported as rain drops vanishing entirely. nil object means
+			// numDropMult = 1: full-strength burst, nothing to dangle.
+			if(ms_splashDuration < 0){
+				ms_splashDuration = 14;
+				ms_splashObject = nil;
+			}
+#else
 			if(dist.MagnitudeSqr() > 40.0f ||
 			   DotProduct(dist, ms_prevCamUp) < 0.0f) continue;
+#endif
 
 			FillScreenMoving(1.0f);
 		}

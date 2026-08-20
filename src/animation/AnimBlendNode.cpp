@@ -75,6 +75,11 @@ CAnimBlendNode::UpdateCompressed(CVector &trans, CQuaternion &rot, float weight)
 			CQuaternion rotA, rotB;
 			kfA->GetRotation(&rotA);
 			kfB->GetRotation(&rotB);
+			// Same local hemisphere correction as CalcDeltasCompressed, so
+			// the pair matches the theta/invSin computed there. See the
+			// comment in CalcDeltasCompressed for why storage stays untouched.
+			if(DotProduct(rotA, rotB) < 0.0f)
+				rotB = -rotB;
 			rot.Slerp(rotB, rotA, theta, invSin, t);
 			rot.Scale(blend);
 		}
@@ -237,8 +242,17 @@ CAnimBlendNode::CalcDeltasCompressed(void)
 	kfB->GetRotation(&rotB);
 	float cos = DotProduct(rotA, rotB);
 	if(cos < 0.0f){
+		// Compressed data never went through RemoveQuaternionFlips at load;
+		// correct the hemisphere LOCALLY for the theta below. Never write the
+		// flip back into the keyframes: the sequence is shared by every ped
+		// playing this anim at any phase, and the loop seam (last->0) makes a
+		// stored flip cascade around the ring re-flipping the whole sequence
+		// every loop — that was peds walking upside-down. (Stock code's
+		// SetRotation(-rotB) wrote the original value back, a no-op, which
+		// left theta inconsistent with what UpdateCompressed re-reads — the
+		// original twisted-limbs bug. UpdateCompressed now applies the same
+		// local correction, so both sides agree without touching storage.)
 		rotB = -rotB;
-		kfB->SetRotation(-rotB);
 	}
 	cos = DotProduct(rotA, rotB);
 	if(cos > 1.0f)

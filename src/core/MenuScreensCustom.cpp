@@ -45,8 +45,10 @@
 
 #ifdef MULTISAMPLING
 	#define MULTISAMPLING_SELECTOR MENUACTION_CFO_DYNAMIC, "FED_AAS", { new CCFODynamic((int8*)&FrontEndMenuManager.m_nPrefsMSAALevel, "Graphics", "MultiSampling", MultiSamplingDraw, MultiSamplingButtonPress) }, 0, 0, MENUALIGN_LEFT,
+	#define DEBUGLEVEL_SELECTOR MENUACTION_CFO_DYNAMIC, "FEH_STA", { new CCFODynamic(&gDebugLevel, "Graphics", "DebugLevel", DebugLevelDraw, DebugLevelButtonPress) }, 0, 0, MENUALIGN_LEFT,
 #else
 	#define MULTISAMPLING_SELECTOR
+	#define DEBUGLEVEL_SELECTOR
 #endif
 
 #ifdef CUTSCENE_BORDERS_SWITCH
@@ -77,7 +79,7 @@
 #endif
 
 #ifdef NO_ISLAND_LOADING
-	#define ISLAND_LOADING_SELECTOR MENUACTION_CFO_SELECT, "FEM_ISL", { new CCFOSelect((int8*)&FrontEndMenuManager.m_PrefsIslandLoading, "Graphics", "IslandLoading", islandLoadingOpts, ARRAY_SIZE(islandLoadingOpts), true, IslandLoadingAfterChange) }, 0, 0, MENUALIGN_LEFT,
+	#define ISLAND_LOADING_SELECTOR MENUACTION_CFO_SELECT, "FEM_ISL", { new CCFOSelect((int8*)&FrontEndMenuManager.m_PrefsIslandLoading, "Graphics", "IslandLoading", islandLoadingOpts, ARRAY_SIZE(islandLoadingOpts), false, IslandLoadingAfterChange) }, 0, 0, MENUALIGN_LEFT,
 #else
 	#define ISLAND_LOADING_SELECTOR 
 #endif
@@ -113,7 +115,12 @@ void RestoreDefGraphics(int8 action) {
 		gPS2alphaTest = false;
 	#endif
 	#ifdef MULTISAMPLING
+#ifdef GTA_OGC
+		// GC default: the copy-filter AA on.
+		FrontEndMenuManager.m_nPrefsMSAALevel = FrontEndMenuManager.m_nDisplayMSAALevel = 1;
+#else
 		FrontEndMenuManager.m_nPrefsMSAALevel = FrontEndMenuManager.m_nDisplayMSAALevel = 0;
+#endif
 	#endif
 	#ifdef NO_ISLAND_LOADING
 	    	if (!FrontEndMenuManager.m_bGameNotLoaded) {
@@ -216,7 +223,40 @@ void GraphicsGoBack() {
 	FrontEndMenuManager.m_nDisplayMSAALevel = FrontEndMenuManager.m_nPrefsMSAALevel;
 }
 
+// Debug HUD level: 0 off, 1 fps only, 2 the full verbose readout.
+int8 gDebugLevel;
+
+void DebugLevelButtonPress(int8 action) {
+	if (action == FEOPTION_ACTION_SELECT || action == FEOPTION_ACTION_RIGHT) {
+		gDebugLevel = (gDebugLevel + 1) % 3;
+		FrontEndMenuManager.SaveSettings();
+	} else if (action == FEOPTION_ACTION_LEFT) {
+		gDebugLevel = (gDebugLevel + 2) % 3;
+		FrontEndMenuManager.SaveSettings();
+	}
+}
+
+wchar* DebugLevelDraw(bool *disabled, bool userHovering) {
+	(void)disabled; (void)userHovering;
+	static wchar buf[12];
+	static const char *names[3] = { "OFF", "FPS", "VERBOSE" };
+	AsciiToUnicode(names[gDebugLevel % 3], buf);
+	return buf;
+}
+
 void MultiSamplingButtonPress(int8 action) {
+#ifdef GTA_OGC
+	// Toggle, in-game, applied on the next frame by the skel bridge.
+	if (action == FEOPTION_ACTION_SELECT || action == FEOPTION_ACTION_LEFT ||
+	    action == FEOPTION_ACTION_RIGHT) {
+		FrontEndMenuManager.m_nPrefsMSAALevel =
+		    FrontEndMenuManager.m_nPrefsMSAALevel ? 0 : 1;
+		FrontEndMenuManager.m_nDisplayMSAALevel =
+		    FrontEndMenuManager.m_nPrefsMSAALevel;
+		FrontEndMenuManager.SaveSettings();
+	}
+	return;
+#endif
 	if (action == FEOPTION_ACTION_SELECT) {
 		if (FrontEndMenuManager.m_nDisplayMSAALevel != FrontEndMenuManager.m_nPrefsMSAALevel) {
 			FrontEndMenuManager.m_nPrefsMSAALevel = FrontEndMenuManager.m_nDisplayMSAALevel;
@@ -252,6 +292,14 @@ void MultiSamplingButtonPress(int8 action) {
 
 wchar* MultiSamplingDraw(bool *disabled, bool userHovering) {
 	static wchar unicodeTemp[64];
+#ifdef GTA_OGC
+	// Live row: the level drives the EFB->XFB copy smoothing, applied every
+	// frame — nothing here needs the main menu or a device reset, so the
+	// PC's in-game lockout (the "disabled forever" the user hit) is gone.
+	(void)userHovering;
+	(void)unicodeTemp; (void)disabled;
+	return TheText.Get(FrontEndMenuManager.m_nPrefsMSAALevel ? "FEM_ON" : "FEM_OFF");
+#endif
 	if (userHovering) {
 		if (FrontEndMenuManager.m_nDisplayMSAALevel == FrontEndMenuManager.m_nPrefsMSAALevel) {
 			if (FrontEndMenuManager.m_nHelperTextMsgId == 1) // Press enter to apply
@@ -446,6 +494,7 @@ CMenuScreenCustom aScreens[] = {
 		MENUACTION_SCREENRES,	"FED_RES", {nil, SAVESLOT_NONE, MENUPAGE_DISPLAY_SETTINGS}, 0, 0, MENUALIGN_LEFT,
 		VIDEOMODE_SELECTOR
 		MULTISAMPLING_SELECTOR
+		DEBUGLEVEL_SELECTOR
 		ISLAND_LOADING_SELECTOR
 		DUALPASS_SELECTOR
 		CUTSCENE_BORDERS_TOGGLE
@@ -478,6 +527,14 @@ CMenuScreenCustom aScreens[] = {
 		MENUACTION_LANG_GER,	"FEL_GER", {nil, SAVESLOT_NONE, MENUPAGE_LANGUAGE_SETTINGS}, 0, 0, MENUALIGN_CENTER,
 		MENUACTION_LANG_ITA,	"FEL_ITA", {nil, SAVESLOT_NONE, MENUPAGE_LANGUAGE_SETTINGS}, 0, 0, MENUALIGN_CENTER,
 		MENUACTION_LANG_SPA,    "FEL_SPA", {nil, SAVESLOT_NONE, MENUPAGE_LANGUAGE_SETTINGS}, 0, 0, MENUALIGN_CENTER,
+#ifdef MORE_LANGUAGES
+		// The handler (MENUACTION_LANG_POR -> LANGUAGE_PORTUGUESE ->
+		// PORTUGUESE.GXT) has existed in this tree all along; only this row
+		// was missing, because the build uses MenuScreensCustom while
+		// upstream added its row to MenuScreens. portuguese.gxt is already
+		// on the card.
+		MENUACTION_LANG_POR,	"FEL_POR", {nil, SAVESLOT_NONE, MENUPAGE_LANGUAGE_SETTINGS}, 0, 0, MENUALIGN_CENTER,
+#endif
 		MENUACTION_GOBACK,		"FEDS_TB", {nil, SAVESLOT_NONE, MENUPAGE_NONE}, 0, 0, MENUALIGN_CENTER,
 	},
 
@@ -778,6 +835,7 @@ CMenuScreenCustom aScreens[] = {
 #endif
 		MENUACTION_FRAMELIMIT,	"FEM_FRM", { nil, SAVESLOT_NONE, MENUPAGE_GRAPHICS_SETTINGS }, 0, 0, MENUALIGN_LEFT,
 		MULTISAMPLING_SELECTOR
+		DEBUGLEVEL_SELECTOR
 		ISLAND_LOADING_SELECTOR
 		DUALPASS_SELECTOR
 #ifdef EXTENDED_COLOURFILTER
