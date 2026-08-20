@@ -41,6 +41,7 @@
 #include <ogc/lwp_watchdog.h>
 #include <malloc.h>
 #include <math.h>
+#include <stdarg.h>
 #include <tremor/ivorbisfile.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -276,67 +277,8 @@ gcBankRead(void *dst, uint32 src, uint32 n)
 
 static void gcStreamsShutdown(void);   // defined with the stream machinery
 static void gcLoadTrackLengths(void);  // same
+static void gcAudioSelfTest(void);     // defined after the stream machinery
 
-
-// ---------------------------------------------------------- conformance test
-//
-// Armed by dvd:/audiotest.txt. Plays a fixed list of bank samples, one at a
-// time with silence between them, straight through the sample manager - no
-// AudioManager, no reflections, no positioning - and then parks. With
-// Dolphin's DumpAudio on, the resulting *_dspdump.wav contains nothing but
-// this sequence, so it can be compared against the same samples decoded on a
-// host. That comparison is the only honest answer to "does it sound right":
-// tools/gamecube/audio_compare.py lines the two up and reports the error.
-//
-// The indices span the rate range the game actually ships (8000 to 26513Hz),
-// which is where the DSP's sample-repeat resampler used to do its damage.
-static const uint32 gAudioTestSfx[] = { 0, 1, 11, 19 };
-
-void
-gcAudioSelfTest(void)
-{
-	{
-		DVD_FS_GUARD;
-		FILE *f = fopen("dvd:/audiotest.txt", "r");
-		if(f == nil)
-			return;
-		fclose(f);
-	}
-	gEffectsVolume = 127;
-	gEffectsFade = 127;
-	GeckoLog("AUDIOTEST start");
-	{
-		DVD_FS_GUARD;
-		FILE *l = fopen("dvd:/audiotest.log", "w");
-		if(l){
-			fprintf(l, "# sfx size freq order=play, 0.5s lead-in, 1.5s each, 0.5s gap\n");
-			for(uint32 i = 0; i < ARRAY_SIZE(gAudioTestSfx); i++){
-				uint32 s = gAudioTestSfx[i];
-				fprintf(l, "%u %u %u\n", (unsigned)s,
-				    (unsigned)gSampleIndex[s].nSize,
-				    (unsigned)gSampleIndex[s].nFrequency);
-			}
-			fclose(l);
-		}
-	}
-	usleep(500*1000);                 // clean lead-in in the dump
-	for(uint32 i = 0; i < ARRAY_SIZE(gAudioTestSfx); i++){
-		uint32 sfx = gAudioTestSfx[i];
-		if(SampleManager.InitialiseChannel(0, sfx, 0)){
-			SampleManager.SetChannelVolume(0, 127);
-			SampleManager.SetChannelPan(0, 63);
-			SampleManager.SetChannelLoopCount(0, 1);
-			SampleManager.SetChannelFrequency(0, gSampleIndex[sfx].nFrequency);
-			SampleManager.StartChannel(0);
-		}
-		usleep(1500*1000);
-		SampleManager.StopChannel(0);
-		usleep(500*1000);
-	}
-	GeckoLog("AUDIOTEST done");
-	extern void gcFatalPark(const char *tag, const char *msg);
-	gcFatalPark("AUDIOTEST", "sequence played; dump is ready");
-}
 
 bool8
 cSampleManager::Initialise(void)
@@ -1045,12 +987,27 @@ cSampleManager::StopChannel(uint32 nChannel)
 void
 cSampleManager::SetEffectsMasterVolume(uint8 nVolume)
 {
+	// Mirror into the class member as well as the mixer's static. The member
+	// is what the rest of the engine reads back through GetEffectsVolume /
+	// GetMusicVolume, and this backend was only ever writing the static - see
+	// SetMusicMasterVolume below for what that cost.
+	m_nEffectsVolume = nVolume;
 	gEffectsVolume = nVolume;
 }
 
 void
 cSampleManager::SetMusicMasterVolume(uint8 nVolume)
 {
+	// THIS is why no radio station ever played. MusicManager::ServiceGameMode
+	// gates the entire radio branch on SampleManager.GetMusicVolume() != 0,
+	// and that getter returns the class member - which this backend never
+	// wrote, so it sat at its zero-init value forever and
+	// m_bGameplayAllowsRadio was set FALSE on every single frame. The station
+	// branch, and with it every call that could ever hand a station to
+	// StartStreamedFile, was unreachable. Ambience kept playing because its
+	// branch does not consult music volume, which is exactly why the logs
+	// showed city/water/int_a and never a station.
+	m_nMusicVolume = nVolume;
 	gMusicVolume = nVolume;
 }
 
@@ -2046,3 +2003,139 @@ cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffect
 }
 
 #endif // AUDIO_GAMECUBE
+
+// ---------------------------------------------------------- conformance test
+//
+// Armed by dvd:/audiotest.txt. Sweeps EVERY category of audio the game has -
+// bank effects across the whole rate range, all nine radio stations, mission
+// voice, ambience - measures what each one actually produces, and writes the
+// numbers to dvd:/audiotest.log before the game ever boots.
+//
+// RMS is the point. A stream that opens successfully and decodes silence
+// looks identical to a working one in every other log; here it reads 0. A
+// stream decoding garbage reads far above the source. tools/gamecube/
+// audio_census.py computes the same figure on the host from the same files,
+// so the two columns can be put side by side.
+static const uint32 gAudioTestSfx[] = {
+	0, 1, 11, 19, 33, 37, 43, 154, 291, 320, 321, 322, 323
+};
+
+static uint32
+gcRms(const int16 *s, uint32 count)
+{
+	if(count == 0)
+		return 0;
+	uint64 acc = 0;
+	for(uint32 i = 0; i < count; i++){
+		int32 v = s[i];
+		acc += (uint64)(v*v);
+	}
+	return (uint32)sqrt((double)(acc/count));
+}
+
+static char gTestBuf[8192];
+static uint32 gTestLen;
+
+static void
+gcTestLog(const char *fmt, ...)
+{
+	char line[160];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	GeckoLog(line);
+	// Buffered: one file write at the end. Opening dvd:/ per line put libfat
+	// in the middle of the very thing being measured.
+	uint32 n = (uint32)strlen(line);
+	if(gTestLen + n + 2 < sizeof(gTestBuf)){
+		memcpy(gTestBuf + gTestLen, line, n);
+		gTestLen += n;
+		gTestBuf[gTestLen++] = '\n';
+	}
+}
+
+static void
+gcTestFlush(void)
+{
+	DVD_FS_GUARD;
+	FILE *f = fopen("dvd:/audiotest.log", "w");
+	if(f){ fwrite(gTestBuf, 1, gTestLen, f); fclose(f); }
+}
+
+static void
+gcAudioSelfTest(void)
+{
+	{
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/audiotest.txt", "r");
+		if(f == nil)
+			return;
+		fclose(f);
+	}
+	gEffectsVolume = 127;
+	gEffectsFade = 127;
+	gMusicVolume = 127;
+	gMusicFade = 127;
+	gcTestLog("AUDIOTEST begin");
+
+	// --- streams first: the nine stations, then ambience and voice. Opening
+	// one proves nothing; the RMS of a decoded chunk is the evidence.
+	for(uint32 t = 0; t < 12 && t < ARRAY_SIZE(StreamedNameTable); t++){
+		char path[80];
+		gcTrackPath(t, path, sizeof(path));
+		if(!SampleManager.StartStreamedFile(t, 0, 0)){
+			gcTestLog("STREAM %u %s OPEN-FAILED", (unsigned)t, path);
+			continue;
+		}
+		GcStream *st = &gStreams[0];
+		uint32 rms = 0;
+		for(uint32 tries = 0; tries < 6 && rms == 0; tries++){
+			st->bufReady = FALSE;
+			gcStreamPump(st);
+			if(st->bufReady)
+				rms = gcRms((const int16*)st->buf[st->fill ^ 1],
+				    STREAM_CHUNK_BYTES/2);
+		}
+		gcTestLog("STREAM %u %s %uHz ch%u len=%u rms=%u%s",
+		    (unsigned)t, path, (unsigned)st->rate, (unsigned)st->channels,
+		    (unsigned)st->lenSamples, (unsigned)rms,
+		    rms == 0 ? "  SILENT" : "");
+		gcTestFlush();          // partial sweeps must still leave evidence
+		SampleManager.SetStreamedVolumeAndPan(127, 63, 0, 0);
+		usleep(1200*1000);
+		SampleManager.StopStreamedFile(0);
+	}
+
+	// --- bank effects across the rate and size range
+	for(uint32 i = 0; i < ARRAY_SIZE(gAudioTestSfx); i++){
+		uint32 sfx = gAudioTestSfx[i];
+		if(sfx >= gNumSamples){
+			gcTestLog("SFX %u OUT-OF-TABLE", (unsigned)sfx);
+			continue;
+		}
+		if(!SampleManager.InitialiseChannel(0, sfx, 0)){
+			gcTestLog("SFX %u INIT-FAILED", (unsigned)sfx);
+			continue;
+		}
+		GcChannel *c = &gChannels[0];
+		uint32 rms = gcRms((const int16*)c->pcm, c->pcmBytes/2);
+		gcTestLog("SFX %u src=%uB %uHz -> %uB conv=%d rms=%u",
+		    (unsigned)sfx, (unsigned)gSampleIndex[sfx].nSize,
+		    (unsigned)gSampleIndex[sfx].nFrequency,
+		    (unsigned)c->pcmBytes, (int)c->pcm48, (unsigned)rms);
+		SampleManager.SetChannelVolume(0, 127);
+		SampleManager.SetChannelPan(0, 63);
+		SampleManager.SetChannelLoopCount(0, 1);
+		gcTestFlush();
+		SampleManager.StartChannel(0);
+		usleep(450*1000);
+		SampleManager.StopChannel(0);
+	}
+
+	gcTestLog("AUDIOTEST end");
+	gcTestFlush();
+	extern void gcFatalPark(const char *tag, const char *msg);
+	gcFatalPark("AUDIOTEST", "sweep complete; see dvd:/audiotest.log");
+}
+
