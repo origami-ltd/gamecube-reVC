@@ -1791,26 +1791,25 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	AESND_SetVoiceFrequency(st->voice, (f32)st->rate);
 	AESND_SetVoiceVolume(st->voice, 255, 255);
 
-	// DECODE FIRST, ARM SECOND. AESND_SetVoiceStream(true) used to run before
-	// any buffer had been handed over, so for the gap between the two the DSP
-	// streamed whatever was in the chunk allocation - full-scale white noise,
-	// and worse if the first decode did not land at all, because then no
-	// buffer was ever set and it never stopped.
+	// Arm the voice for streaming BEFORE handing it a buffer - that is the
+	// order AESND's stream voices expect, and reversing it wedged the fourth
+	// stream of a sweep. The white noise this was chasing came from the chunk
+	// allocation being uninitialised, not from the ordering: the buffers are
+	// zeroed at allocation now, so the window between arming and the first
+	// chunk plays silence instead of whatever MEM1 held.
+	AESND_SetVoiceStream(st->voice, true);
 	gcStreamPump(st);
-	if(!st->bufReady){
-		// Nothing decoded: leave the voice silent rather than let it run on
-		// an empty buffer, and say so.
-		st->playing = FALSE;
+	if(st->bufReady){
+		AESND_SetVoiceBuffer(st->voice, st->buf[st->play], STREAM_CHUNK_BYTES);
+		st->play ^= 1;
+		st->bufReady = FALSE;
+		gcStreamPump(st);        // second chunk waits for the first callback
+	}else{
+		// Nothing decoded. Say so rather than let silence pass for success.
 		DVD_FS_GUARD;
 		FILE *al = fopen("dvd:/audio.log", "a");
 		if(al){ fprintf(al, "STRM PRIME-EMPTY s%d %s\n", (int)nStream, path); fclose(al); }
-		return FALSE;
 	}
-	AESND_SetVoiceBuffer(st->voice, st->buf[st->play], STREAM_CHUNK_BYTES);
-	st->play ^= 1;
-	st->bufReady = FALSE;
-	gcStreamPump(st);            // second chunk waits for the first callback
-	AESND_SetVoiceStream(st->voice, true);
 	AESND_SetVoiceStop(st->voice, false);
 	return TRUE;
 }
@@ -2120,8 +2119,9 @@ gcAudioSelfTest(void)
 		    rms == 0 ? "  SILENT" : "");
 		gcTestFlush();          // partial sweeps must still leave evidence
 		SampleManager.SetStreamedVolumeAndPan(127, 63, 0, 0);
-		usleep(1200*1000);
+		usleep(2000*1000);
 		SampleManager.StopStreamedFile(0);
+		usleep(1000*1000);   // gap: the host segments the dump on silence
 	}
 
 	// --- bank effects across the rate and size range
@@ -2146,8 +2146,9 @@ gcAudioSelfTest(void)
 		SampleManager.SetChannelLoopCount(0, 1);
 		gcTestFlush();
 		SampleManager.StartChannel(0);
-		usleep(450*1000);
+		usleep(2000*1000);
 		SampleManager.StopChannel(0);
+		usleep(1000*1000);
 	}
 
 	gcTestLog("AUDIOTEST end");
