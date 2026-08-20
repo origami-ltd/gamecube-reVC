@@ -90,6 +90,7 @@ struct GcChannel {
 	bool8    pcmOwned;   // pcm is this channel's own buffer (ped/talk copies);
 	                     // FALSE = pointer into the resident bank, never freed
 	uint32   pcmBytes;
+	uint32   allocBytes; // what memalign actually handed us
 	uint32   sample;     // which sfx is loaded
 	uint32   freq;
 	uint32   volume;     // 0..127 as the game supplies it
@@ -152,7 +153,14 @@ static GcBank gBanks[MAX_SFX_BANKS];
 enum { GC_DSP_RATE = (uint32)(54000000.0/1124.0 + 0.5) };
 // Ceiling on a converted channel buffer. Above it the sample plays native
 // (the DSP's stair-step is the lesser evil against a 24MB arena).
-enum { GC_CH_RESAMPLE_CAP = 96*1024 };
+// A converted buffer is ~2.2x the native sample. 512KB covers 99.9% of the
+// bank (measured over sfx.sdt); the handful above it play native.
+enum { GC_CH_RESAMPLE_CAP = 512*1024 };
+// ...but 29 channels must not each hold one, so conversions also draw on a
+// shared MEM1 budget. Past it a sound plays native rather than failing: the
+// DSP's stair-step is the graceful degradation, an allocation failure is not.
+enum { GC_CONV_BUDGET = 1536*1024 };
+static uint32 gConvBytes;
 
 static uint8 gEffectsVolume = 127, gMusicVolume = 127;
 static uint8 gEffectsFade = 127, gMusicFade = 127;
@@ -393,10 +401,13 @@ cSampleManager::Terminate(void)
 			AESND_FreeVoice(gChannels[i].voice);
 			gChannels[i].voice = nil;
 		}
-		if(gChannels[i].pcmOwned)
+		if(gChannels[i].pcmOwned){
+			gConvBytes -= gChannels[i].allocBytes;
 			free(gChannels[i].pcm);
+		}
 		gChannels[i].pcm = nil;
 		gChannels[i].pcmBytes = 0;
+		gChannels[i].allocBytes = 0;
 		gChannels[i].pcmOwned = FALSE;
 	}
 	// Streams too: a later Initialise re-runs AESND_Init and a held voice
@@ -731,15 +742,24 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 		// stays ahead of the write head and no scratch is needed. 64 bytes
 		// of slack covers the alignment skew.
 		bool8 resample = baseFreq < GC_DSP_RATE && outBytes <= GC_CH_RESAMPLE_CAP;
+		if(resample){
+			uint32 need = outBytes + 64;
+			if(need > c->allocBytes &&
+			   gConvBytes - c->allocBytes + need > GC_CONV_BUDGET)
+				resample = FALSE;      // pool is full; take the DSP's version
+		}
 		uint32 want = resample ? outBytes + 64 : readBytes;
 		if(want < readBytes)
 			want = readBytes;
 
-		if(!c->pcmOwned) { c->pcm = nil; c->pcmBytes = 0; }
-		if(c->pcmBytes < want){
+		if(!c->pcmOwned) { c->pcm = nil; c->pcmBytes = 0; c->allocBytes = 0; }
+		if(c->allocBytes < want){
+			gConvBytes -= c->allocBytes;
 			free(c->pcm);
 			c->pcm = memalign(32, want);
-			c->pcmBytes = c->pcm ? want : 0;
+			c->allocBytes = c->pcm ? want : 0;
+			gConvBytes += c->allocBytes;
+			c->pcmBytes = c->allocBytes;
 			c->pcmOwned = c->pcm != nil;
 		}
 		if(c->pcm == nil){
@@ -798,11 +818,14 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 			gcAudioDie("ped-sample-oversize", d);
 			return FALSE;
 		}
-		if(!c->pcmOwned) { c->pcm = nil; c->pcmBytes = 0; }
-		if(c->pcmBytes < bytes){
+		if(!c->pcmOwned) { c->pcm = nil; c->pcmBytes = 0; c->allocBytes = 0; }
+		if(c->allocBytes < bytes){
+			gConvBytes -= c->allocBytes;
 			free(c->pcm);
 			c->pcm = memalign(32, bytes);
-			c->pcmBytes = c->pcm ? bytes : 0;
+			c->allocBytes = c->pcm ? bytes : 0;
+			gConvBytes += c->allocBytes;
+			c->pcmBytes = c->allocBytes;
 			c->pcmOwned = c->pcm != nil;
 		}
 		if(c->pcm == nil){
@@ -1000,10 +1023,21 @@ cSampleManager::StopChannel(uint32 nChannel)
 {
 	if(nChannel >= ARRAY_SIZE(gChannels))
 		return;
-	if(gChannels[nChannel].voice)
-		AESND_SetVoiceStop(gChannels[nChannel].voice, true);
-	gChannels[nChannel].playing = FALSE;
-	gChannels[nChannel].used = FALSE;
+	GcChannel *c = &gChannels[nChannel];
+	if(c->voice)
+		AESND_SetVoiceStop(c->voice, true);
+	c->playing = FALSE;
+	c->used = FALSE;
+	// Hand a large buffer back to the pool. Small ones stay put: they are the
+	// common case and churning them would just fragment the arena.
+	if(c->pcmOwned && c->allocBytes > 64*1024){
+		gConvBytes -= c->allocBytes;
+		free(c->pcm);
+		c->pcm = nil;
+		c->pcmBytes = 0;
+		c->allocBytes = 0;
+		c->pcmOwned = FALSE;
+	}
 }
 
 // ------------------------------------------------------------------ volumes
