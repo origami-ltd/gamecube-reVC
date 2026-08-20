@@ -5,65 +5,81 @@ audio/ISO/droplets/menu; the goal session = artifacts/anim/streaming). They
 coordinated live via SendMessage; everything below is merged and current.
 The tree is ALL uncommitted; be surgical.
 
-## 08-20 evening — HEAP CORRUPTION ROOT-CAUSED AND KILLED — READ FIRST
+## 08-20 evening — READ FIRST. The tree is COMMITTED now; branches matter.
 
-Supersedes item 10 below and every corruption theory in this file.
+Nothing is uncommitted any more. Three branches:
+- **`gamecube` (current)** — the good state. Base is `floor-08-20` plus the
+  debug-HUD hang fix and the GameCube-legal audio backend.
+- **`floor-08-20`** — the user's named PISO: the 08-19/20 night work (small
+  FPS box, correct defaults, screen droplets, anim fix, menus, memcard)
+  with audio/streaming/CdStream/FileLoader held at `0f907fbb`. Boots and
+  plays in-world at 60fps.
+- **`wip-08-20`** — everything the day produced, including the discarded
+  MEM2 experiments. Cherry-pick from here, do not merge it wholesale.
+- Belt and braces: `/Users/ebellumat/revc-backup-0820-1730/worktree-full.tar.gz`.
 
-**ROOT CAUSE: libogc's `_sbrk_r` silently falls back to MEM2 when Arena1
-runs out.** MEM1 genuinely fills (the streaming budget overbooks it), the brk
-then JUMPS ~300MB to Arena2Lo — newlib's arena accounting reads ~302MB (every
-"impossible mallinfo" ever logged), the top chunk spans the unmapped
-0x8180-0x8FFF gap, and Arena2Lo is the SAME bump pointer gcBankAlloc (audio
-bank) owns, so audio and malloc overwrite each other. That one mechanism
-produced EVERY observed corpse: _calloc_r/__sflush_r invalid writes to 0xC
-(smashed free-list/`__sf`), binary junk blocks in audio.log (smashed stdio
-buffers), OV_EREAD at healthy margins, mallinfo garbage, the null objectList
-link (`null-syncCB obj=0xfffffff8` park), the GC-ISO hud.txd re-read pin
-(consumer parsing through corrupted state, DI bytes CRC-proven good).
+### THE RULE THIS DAY COST: MEM2 DOES NOT EXIST
 
-Hunt method that worked (keep for next time): `gcHeapGuardCheck(marker)` in
-gamecube.cpp — cheap mallinfo sanity check, first poisoned marker names the
-step; bracketed LoadingScreen → colstore-all → downtows.col → record 0 →
-stg-allocated → tiny window → disassembled `_sbrk_r` (802f0798) and saw the
-SYS_GetArena2Lo fallback with its own eyes. Markers still in tree
-(FileLoader.cpp/Streaming.cpp/CdStream_gamecube.cpp) — REMOVE at close.
+The GameCube has **24MB MEM1** and **16MB ARAM** (DMA-only, not addressable
+by CPU or GX). MEM2 is a **Wii-only** 64MB pool. The Wii dev target is a
+valid proxy for the GameCube ONLY while MEM2 stays untouched, because Wii
+MEM1 == GameCube MEM1. An earlier session put a 46MB sample bank in MEM2 and
+this session went further (textures, vertex packs, display lists) — all of it
+reverted. If a change needs MEM2, it is not a GameCube change. MEM2 may stand
+in for ARAM alone, capped at 16MB, DMA-discipline only (gcBankAlloc enforces
+the cap).
 
-**Fixes in tree (all uncommitted):**
-- gamecube.cpp: strong `_sbrk_r` override — Arena1-only, honest ENOMEM.
-  THE fix. Also mallopt(M_TRIM_THRESHOLD) disable (harmless belt).
-- gcFatalPark now powers off (SYS_ResetSystem) so a `-b` Dolphin closes
-  itself — user directive "dump the log and exit, don't park".
-- fs-guard sweep (older today): AHB heartbeat, cut.log, MMODE log,
-  screendroplets one-shots, ExportStats got DVD_FS_GUARD; watchdog hang.log
-  and gcFatalPark use new CdStreamFsTryLock (skip-when-busy).
-- sampman: ped slots + player talk + per-channel copies moved to MEM2
-  (HW_RVL) — kills the channel-pcm-alloc 205088B park and frees ~1-3MB MEM1.
-  DCFlushRange added for MEM2 PCM (hardware correctness).
-- CdStream_gamecube: ARAM cache gated OFF on HW_RVL (Dolphin-Wii ignores AR
-  DMA — a "working" cache would return garbage); AR_Init NULL-array bug
-  fixed both sides (300-entry arrays, was 16 vs 256 allocs = .bss overflow
-  on GC).
-- librw rwobjects/frame: sync() parks loudly with object identity on nil
-  syncCB (kept — cheap tripwire).
-- Streaming: HW_RVL reserve 1MB→3MB, budget re-measured at Init (XFBs move
-  the arena after boot measurement), probe floor 512K→2.5MB (UNTESTED, and
-  see below).
+### Audio, rebuilt to the user's spec and VERIFIED on console
 
-**STATE AT HANDOFF: corruption gone; boot now OOM-aborts HONESTLY at
-CPlayerPed ctor (heap used 17702K free 218K) during autostart save-load.**
-MEM1 truly doesn't fit the working set the old builds "ran" only because the
-overflow corrupted MEM2 instead of failing. NEXT: rebalance MEM1 honestly.
-A miami-vs-gamecube comparison workflow was running at session end — check
-its verdict; the original PC build hands streaming a 65MB floor and none of
-the port's probe/reserve machinery exists there, so the whole accounting
-stack is port-local and negotiable. Levers: streaming budget/probe floor
-(untested values in tree), MEM1 diet (630KB ped slots already moved),
-smaller working set at spawn.
+Directive: "tudo no bitrate nativo, mas só músicas 44,1 kHz stereo VORBIS."
+Measured source truth: radio `.adf` = 44100 Hz stereo 128kbps MP3; mission
+`.mp3` = 32000 Hz stereo 112kbps; ambience = 22050 mono; **voice `.wav` =
+IMA ADPCM, mono, mostly 22050 Hz, 512-byte blocks, 39MB for all 1120 lines**.
+Everything in the game is 32kHz or below, so the old 48kHz pipeline was
+inflating the game's own data — a 46MB bank against 14.3MB of source PCM.
 
-User rules added today (in memory too): close ALL Dolphin instances before
-opening another; Dolphin window opens on the MacBook built-in display
-(AppleScript move after launch); no timed background waits — tail logs live;
-on error: dump to log + auto-close Dolphin (done via -b + poweroff).
+What the backend does now (identical code on both targets):
+- SFX bank stored at **native rate** in audio memory, one contiguous staged
+  copy: `BANK ok 14692K` — fits ARAM's 16MB. The DSP does rate conversion.
+- Channels DMA their sample from audio memory into a MEM1 buffer at its own
+  size. No pointers into ARAM (impossible on GameCube), no 2.2x resample.
+- **Voice plays native IMA ADPCM** — no Vorbis, no Tremor decode state.
+  Decoder is bit-exact against ffmpeg (`tools/gamecube/test_adpcm.py`,
+  5 files, zero difference).
+- Music is the only thing that gets Vorbis, at its native 44.1kHz stereo.
+- Console evidence: `AHB ch=28/28` playing, `STRM ok dvd:/audio/intro4.wav`,
+  MEM1 free 2868K (it was 218K before the diet).
+
+Card state: the 1120 `.wav` are on the SD and the speech `.ogg` are gone.
+A re-encode at native rates is staged in `/Users/ebellumat/revc-audio-native`
+(`convert_audio.py --music-rate 44100 --radio-quality 4`); copy it onto the
+card with Dolphin CLOSED, then fsck.
+
+### The debug-HUD hang: fixed at the root
+
+Turning the STATS row to FPS/VERBOSE hung the game. `hang.log` named it —
+`phase=2dafterfade, gp rd=1 cmd=1` (GP idle, CPU spinning), no crash.log.
+Cause: `CFont::GetNumberLines` and `CFont::GetTextRect` wrap by resetting x
+and advancing y **without advancing the string**, so a word wider than the
+wrap box re-tests forever. `PrintString` already guarded this with `!first`;
+the two measuring passes did not, and they only run when a background box is
+on — which is what the HUD turns on, with a box ~24 units wide. Guard added
+to both (`tools/gamecube/test_font_wrap.py` proves it terminates). Also: the
+fps number now assumes 60fps until the first period is latched (a 1us period
+read as 1000000 fps) and is clamped, and the `2dafterfade` phase marker is
+closed so the next hang report names where the thread actually is.
+
+### Still open
+
+- **MEM1 is genuinely tight on a 24MB machine.** The audio diet bought
+  ~2.6MB. If allocation failures come back, the levers are the streaming
+  budget, the 1.3MB of frontend textures that are never freed
+  (Frontend.cpp UnloadTextures), and the ped slots — NOT texture quality
+  (user rule) and NOT MEM2.
+- The ISO is over the 1.46GB mini-DVD budget; the native re-encode should
+  help. Measure after the staging dir finishes.
+- The `2dafterfade` hang class may have other members now that the marker
+  is honest.
 
 ## 08-20 afternoon session (audio deep-dive) — READ FIRST, supersedes older audio notes
 
