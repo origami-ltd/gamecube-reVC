@@ -911,6 +911,14 @@ main(int, char *[])
 	ControlsManager.MakeControllerActionsBlank();
 	ControlsManager.InitDefaultControlConfiguration();
 
+	// Load the saved options. Every other skeleton does this (glfw.cpp:530,
+	// win.cpp) and this one never did: settings were written on every menu
+	// change and silently discarded at the next boot, so the goal - "the
+	// options are saved and the game loads them when it opens" - only ever
+	// had its write half. The file is gta_vc.set, which is the OPTIONS file
+	// and is separate from the story slots (GTAVCsf*.b).
+	FrontEndMenuManager.LoadSettings();
+
 	// ponytail: RsRwInitialize only reads this as displayID; the console has none.
 	if(RsEventHandler(rsRWINITIALIZE, nil) == rsEVENTERROR){
 		printf("FATAL: rsRWINITIALIZE failed\n");
@@ -1011,13 +1019,6 @@ main(int, char *[])
 			FrontEndMenuManager.m_bGameNotLoaded = true;
 			FrontEndMenuManager.m_bStartUpFrontEndRequested = true;
 			gGameState = GS_FRONTEND;
-#ifndef HW_RVL
-			// One-shot memory-card write proof: the full settings dump goes
-			// through mc:/ the moment the frontend exists. The artifact is a
-			// gta_vc.set file on card A — checkable from the host.
-			FrontEndMenuManager.SaveSettings();
-			printf("mc: settings save attempted\n");
-#endif
 			break;
 
 		case GS_FRONTEND:

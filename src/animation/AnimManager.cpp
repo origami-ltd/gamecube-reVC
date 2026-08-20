@@ -1523,7 +1523,20 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 
 		CAnimBlendSequence *seq = hier->sequences;
 		for(k = 0; k < hier->numSequences; k++, seq++){
-			// 32 = III-style, 44 = +boneTag, 48 = VC ped.ifp (+4 unknown).
+			// 32 = III-style, 44 = +boneTag at offset 40.
+			//
+			// 48 is NOT "44 plus four spare bytes": offset 40 there is a
+			// hierarchy TREE LINK, not a bone tag. Measured over the real
+			// ped.ifp (4322 chunks of 44, 709 of 48): in a 44-byte chunk
+			// offset 40 reads Root=0 Pelvis=1 Spine=2 Neck=4, the actual VC
+			// bone tags; in a 48-byte chunk it reads Root=4 Pelvis=5 Spine=6
+			// with a sibling index at offset 44. Reading it as a tag bound
+			// every one of those 709 sequences to the wrong bone - Root drove
+			// the Neck, and CAR_LB (the reverse-driving look-behind, a
+			// 48-byte anim that does animate thigh, calf and foot) twisted the
+			// player's legs. Stock reads the tag only at exactly 44 and lets
+			// the rest bind by NAME, which is what boneTag == -1 means in
+			// CAnimBlendAssociation::Init.
 			if(!reader.ReadHeader(cpan, "CPAN", dganEnd, cpanEnd) ||
 			   !reader.ReadHeader(anim, "ANIM", cpanEnd, animEnd) ||
 			   (anim.rawSize != 32 && anim.rawSize != 44 && anim.rawSize != 48) ||
@@ -1534,7 +1547,7 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 			if(numFrames < 0)
 				goto fail;
 			seq->SetName(buf);
-			if(anim.rawSize >= 44)
+			if(anim.rawSize == 44)
 				seq->SetBoneTag((int32)ReadLE32(buf+40));
 			if(numFrames == 0){
 				if(reader.position != cpanEnd)
