@@ -85,6 +85,7 @@ uint32 nNumMP3s;
 struct GcChannel {
 	AESNDPB *voice;
 	void    *pcm;        // sample data the voice reads from
+	bool8    pcm48;      // pcm holds 48kHz-converted data, so scale the freq
 	bool8    pcmOwned;   // pcm is this channel's own buffer (ped/talk copies);
 	                     // FALSE = pointer into the resident bank, never freed
 	uint32   pcmBytes;
@@ -134,6 +135,14 @@ struct GcBank {
 // byte-for-byte the size the game's own sfx.raw carries — no inflation.
 static uint32 gBankSampleAddr[SAMPLEBANK_PED_START];
 static GcBank gBanks[MAX_SFX_BANKS];
+
+// The DSP's own output rate. Anything handed to it below this is
+// resampled by sample-repeat inside the ucode, which aliases audibly, so
+// channels convert once on the way in instead.
+enum { GC_DSP_RATE = 48000 };
+// Ceiling on a converted channel buffer. Above it the sample plays native
+// (the DSP's stair-step is the lesser evil against a 24MB arena).
+enum { GC_CH_RESAMPLE_CAP = 96*1024 };
 
 static uint8 gEffectsVolume = 127, gMusicVolume = 127;
 static uint8 gEffectsFade = 127, gMusicFade = 127;
@@ -565,32 +574,85 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 			gcAudioDie("bank0-not-loaded", d);
 			return FALSE;
 		}
-		// SAME CODE ON BOTH TARGETS, and NO FORMAT INFLATION. The bank
-		// lives in audio memory — ARAM on GameCube, the MEM2 shim on the
-		// Wii dev target — which is DMA-only and NOT CPU-addressable, so
-		// the sample is DMA'd into a MEM1 channel buffer at its OWN rate
-		// and the DSP does the rate conversion, like every GameCube game.
+		// The bank holds the game's own PCM at its own rate (ARAM on the
+		// GameCube, the 16MB-capped MEM2 shim on the Wii dev target) - DMA
+		// only, never CPU-addressable, and never inflated. What DOES get
+		// converted is the copy this channel is about to play.
 		//
-		// The two revisions this replaces both stored audio in a form
-		// LARGER than the game's own data and that is what exhausted the
-		// budget: a 48kHz bank was 46MB against 14.3MB of source PCM (3.2x,
-		// and ARAM only holds 16MB — it never fit the ship target at all),
-		// and a per-channel 48kHz resample inflated every playing voice
-		// 2.2x in MEM1. Native rate costs exactly what the game's own
-		// sample costs, which is the only budget that exists.
+		// Why convert at all: AESND's ucode resamples by repeating samples,
+		// with no interpolation, so an 11kHz effect played at the DSP's
+		// 48kHz output gets aliasing images as loud as the real top octave.
+		// That is the "metallic" the user keeps hearing, and the GameCube is
+		// better than this. Interpolating once, here, into the channel's own
+		// MEM1 buffer costs a few dozen KB for the length of one sound and
+		// hands the DSP a 1:1 buffer with nothing left to alias. Storing the
+		// whole bank at 48kHz instead would be 46MB against 14.3MB of source
+		// - it never fit ARAM, which is the mistake this replaces.
+		uint32 rawBytes = gSampleIndex[nSfx].nSize;
+		uint32 baseFreq = gSampleIndex[nSfx].nFrequency ?
+		    gSampleIndex[nSfx].nFrequency : 22050;
+		uint32 inS = rawBytes/2;
+		uint32 outS = baseFreq < GC_DSP_RATE ?
+		    (uint32)((uint64)inS*GC_DSP_RATE/baseFreq) : inS;
+		uint32 outBytes = align32(outS*2);
+
+		// ARAM DMA needs a 32-byte aligned source, and sample offsets are
+		// arbitrary (the table is packed byte-for-byte: 0, 1400, 3918...).
+		// Read from the aligned address below the sample and skip the
+		// remainder. On the Wii shim this is a memcpy and the alignment is
+		// free, which is exactly why it went unnoticed there.
+		uint32 srcAddr = gBankSampleAddr[nSfx];
+		uint32 srcSkew = srcAddr & 31;
+		uint32 readBytes = align32(srcSkew + rawBytes);
+
+		// One buffer. The native data lands at the TAIL and the conversion
+		// runs forward into the front: for every output k the source index
+		// i0 satisfies (k - i0) <= (outS - inS), so the read head always
+		// stays ahead of the write head and no scratch is needed. 64 bytes
+		// of slack covers the alignment skew.
+		bool8 resample = baseFreq < GC_DSP_RATE && outBytes <= GC_CH_RESAMPLE_CAP;
+		uint32 want = resample ? outBytes + 64 : readBytes;
+		if(want < readBytes)
+			want = readBytes;
+
 		if(!c->pcmOwned) { c->pcm = nil; c->pcmBytes = 0; }
-		if(c->pcmBytes < bytes){
+		if(c->pcmBytes < want){
 			free(c->pcm);
-			c->pcm = memalign(32, bytes);
-			c->pcmBytes = c->pcm ? bytes : 0;
+			c->pcm = memalign(32, want);
+			c->pcmBytes = c->pcm ? want : 0;
 			c->pcmOwned = c->pcm != nil;
 		}
 		if(c->pcm == nil){
-			snprintf(d, sizeof(d), "ch=%u %uB", (unsigned)nChannel, (unsigned)bytes);
+			snprintf(d, sizeof(d), "ch=%u %uB", (unsigned)nChannel, (unsigned)want);
 			gcAudioDie("channel-pcm-alloc", d);
 			return FALSE;
 		}
-		gcBankRead(c->pcm, gBankSampleAddr[nSfx], bytes);
+
+		uint8 *base = (uint8*)c->pcm;
+		uint32 tail = align32(want - readBytes);
+		if(tail + readBytes > want)
+			tail = 0;
+		gcBankRead(base + tail, srcAddr - srcSkew, readBytes);
+		const int16 *sp = (const int16*)(base + tail + srcSkew);
+		if(resample && inS >= 2){
+			int16 *dst = (int16*)base;
+			uint32 step = (baseFreq << 16)/GC_DSP_RATE;   // 16.16, no FPU
+			uint32 pos = 0;
+			for(uint32 k = 0; k < outS; k++, pos += step){
+				uint32 i0 = pos >> 16;
+				if(i0 >= inS-1) i0 = inS-2;
+				int32 fr = (int32)(pos & 0xFFFF);
+				int32 a = sp[i0], b = sp[i0+1];
+				dst[k] = (int16)(a + (((b - a)*fr) >> 16));
+			}
+			c->pcmBytes = outS*2;
+			c->pcm48 = TRUE;
+		}else{
+			if(tail || srcSkew)
+				memmove(base, sp, rawBytes);
+			c->pcmBytes = align32(rawBytes);
+			c->pcm48 = FALSE;
+		}
 	}else{
 		// Ped comments and player talk are copied, not pointed to: their
 		// staging slots rotate and a pointed-at slot could be overwritten
@@ -628,6 +690,7 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 				return FALSE;
 			}
 			memcpy(c->pcm, gPedBuf + PED_BLOCKSIZE*slot, gSampleIndex[nSfx].nSize);
+		c->pcm48 = FALSE;
 		}
 	}
 
@@ -744,7 +807,14 @@ cSampleManager::StartChannel(uint32 nChannel)
 		DCFlushRange(c->pcm, c->pcmBytes);
 	gcApplyChannelVolume(c);
 	AESND_SetVoiceFormat(c->voice, VOICE_MONO16);
-	AESND_SetVoiceFrequency(c->voice, (f32)c->freq);
+	// A converted buffer is 48kHz, so the game's pitch request (engine revs
+	// and friends, expressed against the sample's own rate) scales onto it.
+	f32 voiceFreq = (f32)c->freq;
+	if(c->pcm48 && c->sample < SAMPLEBANK_PED_START &&
+	   gSampleIndex && gSampleIndex[c->sample].nFrequency)
+		voiceFreq = (f32)GC_DSP_RATE*(f32)c->freq /
+		            (f32)gSampleIndex[c->sample].nFrequency;
+	AESND_SetVoiceFrequency(c->voice, voiceFreq);
 	AESND_SetVoiceLoop(c->voice, c->loopCount != 1);
 	AESND_SetVoiceBuffer(c->voice, c->pcm, c->pcmBytes);
 	c->playing = TRUE;
