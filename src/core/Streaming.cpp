@@ -80,16 +80,6 @@ int32 CStreaming::ms_lastImageRead;
 int32 CStreaming::ms_imageSize;
 size_t CStreaming::ms_memoryAvailable;
 
-#ifdef GTA_OGC
-extern "C" unsigned int SYS_GetArena1Size(void);
-extern "C" void *SYS_GetArena1Lo(void);
-extern "C" void *SYS_GetArena1Hi(void);
-#ifdef HW_RVL
-extern "C" void *SYS_GetArena2Lo(void);
-extern "C" void *SYS_GetArena2Hi(void);
-#endif
-#endif
-
 int32 desiredNumVehiclesLoaded = 12;
 
 CEntity *pIslandLODmainlandEntity;
@@ -393,39 +383,9 @@ CStreaming::Init2(void)
 		// the bug and is not understood yet. It most likely means an allocation
 		// failure path is being reached silently rather than that 2MB is magic.
 		// Do not tune this again without first finding out why it is a cliff.
-		// 1MB, down from 2MB, at the user's explicit direction: buildings
-		// still LOD-blink in dense streets, and the extra 1MB of budget is
-		// what keeps their detail models resident. The warning above stands —
-		// the intro cutscene once froze at a 2MB reserve — so if a cutscene
-		// starts dying with ~600K free, this is the first suspect.
-#ifdef HW_RVL
-		// 3MB, up from the user-directed 1MB: that number only ever "worked"
-		// because libogc's sbrk silently spilled a full MEM1 into MEM2 and
-		// corrupted the heap (the 08-20 smash). With sbrk honest, player
-		// spawn needs ~1.5MB the streamer must not own.
-		size_t reserve = 3*MB;
-#else
-		// The disc build lives on MEM1 alone, and the 1MB reserve is a
-		// measured death: boot-time texture loads hit silent allocation
-		// failure and the streamer retries forever (hud.txd pin, checksum
-		// proved the IO correct; ov_open died at 441K free). The cliff the
-		// comment above warns about is real here — buy it headroom.
-		size_t reserve = 3*MB;
-#endif
-		// SELF-MEASURED, replacing the reserve-constant graveyard above:
-		// budget = what the heap REALLY has at this moment (free chunks +
-		// unsbrk'd arena) minus a spawn reserve. This runs after the
-		// frontend, generic textures, IDE defs and pools have taken their
-		// cut, so the number is honest by construction — no constant to
-		// re-tune every time the fixed base moves. The ledger charges real
-		// heap deltas (gResidentCost), so budget and ledger share units.
-		{
-			struct mallinfo smi = mallinfo();
-			size_t avail = (size_t)smi.fordblks +
-			    ((size_t)(uint8*)SYS_GetArena1Hi() - (size_t)(uint8*)SYS_GetArena1Lo());
-			_dwMemAvailPhys = avail;
-			ms_memoryAvailable = avail > reserve + 4*MB ? avail - reserve : 4*MB;
-		}
+		size_t reserve = 2*MB; // engine late allocs, render targets
+		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
+		    _dwMemAvailPhys - reserve : 4*MB;
 		desiredNumVehiclesLoaded = 12; // reconstructed console target
 		{
 			extern size_t gOgcHeapUsedAtInit;
@@ -998,20 +958,6 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 		if(!success){
 			debug("Failed to load %s\n", CModelInfo::GetModelInfo(streamId)->GetModelName());
-#ifdef GTA_OGC
-	{
-		extern void GeckoLog(const char *msg);
-		char fl[96];
-		snprintf(fl, sizeof(fl), "CVTFAIL %s", CModelInfo::GetModelInfo(streamId)->GetModelName());
-		GeckoLog(fl);
-		if(CdStreamFsTryLock()){
-			FILE *ff = fopen("dvd:/cvtfail.log", "a");
-			if(ff){ fprintf(ff, "%s\n", fl); fclose(ff); }
-			CdStreamFsUnlock();
-		}
-	}
-#endif
-
 			RemoveModel(streamId);
 			ReRequestModel(streamId);
 			RwStreamClose(stream, &mem);
@@ -1038,20 +984,6 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 		if(!success){
 			debug("Failed to load %s.txd\n", CTxdStore::GetTxdName(streamId - STREAM_OFFSET_TXD));
-#ifdef GTA_OGC
-	{
-		extern void GeckoLog(const char *msg);
-		char fl[96];
-		snprintf(fl, sizeof(fl), "CVTFAIL %s", CTxdStore::GetTxdName(streamId - STREAM_OFFSET_TXD));
-		GeckoLog(fl);
-		if(CdStreamFsTryLock()){
-			FILE *ff = fopen("dvd:/cvtfail.log", "a");
-			if(ff){ fprintf(ff, "%s\n", fl); fclose(ff); }
-			CdStreamFsUnlock();
-		}
-	}
-#endif
-
 			RemoveModel(streamId);
 			ReRequestModel(streamId);
 			RwStreamClose(stream, &mem);
@@ -1061,29 +993,8 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 		PUSH_MEMID(MEMID_STREAM_COLLISION);
 		bool success = CColStore::LoadCol(streamId-STREAM_OFFSET_COL, mem.start, mem.length);
 		POP_MEMID();
-#ifdef GTA_OGC
-		// colstore-all bracket: name the exact streamed col that smashes.
-		{
-			extern void gcHeapGuardCheck(const char *marker);
-			gcHeapGuardCheck(CColStore::GetColName(streamId - STREAM_OFFSET_COL));
-		}
-#endif
 		if(!success){
 			debug("Failed to load %s.col\n", CColStore::GetColName(streamId - STREAM_OFFSET_COL));
-#ifdef GTA_OGC
-	{
-		extern void GeckoLog(const char *msg);
-		char fl[96];
-		snprintf(fl, sizeof(fl), "CVTFAIL %s", CColStore::GetColName(streamId - STREAM_OFFSET_COL));
-		GeckoLog(fl);
-		if(CdStreamFsTryLock()){
-			FILE *ff = fopen("dvd:/cvtfail.log", "a");
-			if(ff){ fprintf(ff, "%s\n", fl); fclose(ff); }
-			CdStreamFsUnlock();
-		}
-	}
-#endif
-
 			RemoveModel(streamId);
 			ReRequestModel(streamId);
 			RwStreamClose(stream, &mem);
@@ -2859,21 +2770,6 @@ CStreaming::LoadAllRequestedModels(bool priority)
 	// All those "first" checks are because of variables aren't initialized in first pass.
 
 	while (true) {
-#ifdef GTA_OGC
-		// Heap-tight bail: during the initial fill nothing is evictable, so
-		// past this point every further conversion starves the spawn's own
-		// allocations (player ped OOM-abort at free=218K) or livelocks in
-		// soft-fail/re-request — the eternal loading screen. Leave the rest
-		// QUEUED: gameplay streaming, with eviction live, finishes the job
-		// and the world sharpens in the first seconds instead of never
-		// arriving. Priority requests are exempt.
-		if(!priority){
-			void *hb = malloc(1024*1024);
-			if(hb == nil)
-				break;
-			free(hb);
-		}
-#endif
 		for (int i=0; i<ARRAY_SIZE(ms_pStreamingBuffer); i++) {
 
 			// Channel has file to load
@@ -2994,15 +2890,6 @@ CStreaming::LoadAllRequestedModels(bool priority)
 	imgOffset = GetCdImageOffset(CdStreamGetLastPosn());
 
 	while(ms_endRequestedList.m_prev != &ms_startRequestedList && numRequests > 0){
-#ifdef GTA_OGC
-		// Same heap-tight bail as the channel variant above.
-		if(!priority){
-			void *hb = malloc(1024*1024);
-			if(hb == nil)
-				break;
-			free(hb);
-		}
-#endif
 		numRequests--;
 		streamId = GetNextFileOnCd(0, priority);
 		if(streamId == -1)
@@ -3645,42 +3532,6 @@ CStreaming::MakeSpaceFor(int32 size)
 	// ponytail: a fixed slice, not a ratio — the upgrade is real resident-byte
 	// accounting, at which point the budget itself becomes trustworthy.
 	want += 512*1024;
-	// The ledger drifts above the truth; the heap does not. With the ledger
-	// pinned at cap and 2.4MB genuinely free, every load evicted a visible
-	// model (43/s measured) that was re-requested next frame — the LOD
-	// dark/bright flicker while standing still, and the rainbow bands when a
-	// live texobj sampled a freed tiled buffer. Probe the heap for the block
-	// this load actually needs (plus margin) and skip eviction when it fits;
-	// the ledger loop below remains as the real-shortage fallback.
-	// A malloc probe, not mallinfo's fordblks: total-free says nothing about
-	// contiguity, and a fragmented heap that can't serve one large block
-	// would soft-fail the load and re-request it forever with eviction gated
-	// off — a streaming live-lock with the fs lock held.
-	{
-		// 2.5MB floor, up from 512K: with sbrk honest (no silent MEM2 spill)
-		// the heap must keep real headroom for the non-streaming spawns —
-		// player ped creation OOM-aborted at free=218K.
-		void *probe = malloc((size_t)want + 2560*1024);
-		if(probe){
-			free(probe);
-			return;
-		}
-		// Probe failed: the HEAP is out of room no matter what the ledger
-		// claims (its cd-size unit drifts ~1.5-1.85x under real bytes), and
-		// the ledger loop below won't evict while it believes there's
-		// budget. Evict on the heap's word until the block fits — the real
-		// heap is the authority, the ledger only a hint.
-		for(int tries = 0; tries < 64; tries++){
-			gStrEvict++;
-			if(!RemoveLeastUsedModel(STREAMFLAGS_20))
-				break;
-			void *p2 = malloc((size_t)want + 2560*1024);
-			if(p2){
-				free(p2);
-				return;
-			}
-		}
-	}
 #endif
 	while(ms_memoryUsed >= ms_memoryAvailable - want){
 		size_t before = ms_memoryUsed;

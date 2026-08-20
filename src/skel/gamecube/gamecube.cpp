@@ -63,104 +63,6 @@ const char *gPhase = "boot";
 static lwp_t watchdogThread = LWP_THREAD_NULL;
 static volatile bool watchdogStop;
 
-// Boot-smash bracketing. current_mallinfo.arena IS newlib's sbrked_mem
-// accumulator; the corruptor blasts it to ~300MB within the first ~50 frames.
-// Called from every LoadingScreen step (and anywhere else worth a marker),
-// the first caller that sees poison names the init step that did the deed.
-extern "C" { extern struct mallinfo __malloc_current_mallinfo; }
-void
-gcHeapGuardCheck(const char *marker)
-{
-	static bool hit;
-	if(hit)
-		return;
-	// arena alone trips LATE: it only goes insane on the next sbrk AFTER the
-	// top-chunk header is smashed. mallinfo() walks every free chunk and the
-	// top, so a smashed header shows up at the first marker after the write.
-	struct mallinfo gmi = mallinfo();
-	// Memory map: one line per marker where used moved >256K since the last
-	// line. One boot = the whole boot's consumption curve, the number the
-	// budget graveyard in Streaming.cpp never had.
-	{
-		static uint32 lastUsed;
-		uint32 used = (uint32)gmi.uordblks;
-		uint32 delta = used > lastUsed ? used - lastUsed : lastUsed - used;
-		// audio-* markers always log: they're the requested MEM1 audit and
-		// their deltas sit under the 256K noise gate.
-		if(delta > 256u*1024 ||
-		   (marker && marker[0]=='a' && marker[1]=='u' && marker[2]=='d')){
-			lastUsed = used;
-			if(CdStreamFsTryLock()){
-				FILE *mf = fopen("dvd:/memmap.log", "a");
-				if(mf){
-					fprintf(mf, "MEM %s used=%uK free=%uK\n",
-					    marker ? marker : "-", used/1024,
-					    (unsigned)((uint32)gmi.fordblks/1024));
-					fclose(mf);
-				}
-				CdStreamFsUnlock();
-			}
-		}
-	}
-	if((uint32)gmi.arena <= 20u*1024*1024 &&
-	   (uint32)gmi.fordblks <= 20u*1024*1024 &&
-	   (uint32)gmi.uordblks <= 20u*1024*1024 &&
-	   (uint32)gmi.keepcost <= 20u*1024*1024)
-		return;
-	hit = true;
-	char l[128];
-	snprintf(l, sizeof(l), "SMASH-AT %s arena=%uK ford=%uK uord=%uK keep=%uK",
-	    marker ? marker : "-",
-	    (unsigned)((uint32)gmi.arena/1024), (unsigned)((uint32)gmi.fordblks/1024),
-	    (unsigned)((uint32)gmi.uordblks/1024), (unsigned)((uint32)gmi.keepcost/1024));
-	GeckoLog(l);
-	if(CdStreamFsTryLock()){
-		FILE *f = fopen("dvd:/crash.log", "a");
-		if(f){ fprintf(f, "%s\n", l); fclose(f); }
-		CdStreamFsUnlock();
-	}
-}
-
-// ROOT CAUSE of the boot heap smash: libogc's _sbrk_r silently FALLS BACK TO
-// MEM2 when Arena1 runs out — the brk jumps ~300MB (the impossible
-// mallinfo.arena), newlib's top spans the unmapped 0x8180-0x8FFF gap, and
-// MEM2's Arena2Lo is the same bump pointer the audio bank owns, so the two
-// overwrite each other. This override keeps malloc in MEM1 and makes
-// exhaustion an honest nil instead of a corrupted heap.
-extern "C" void*
-_sbrk_r(struct _reent *r, ptrdiff_t incr)
-{
-	u32 level;
-	_CPU_ISR_Disable(level);
-	u8 *lo = (u8*)SYS_GetArena1Lo();
-	u8 *hi = (u8*)SYS_GetArena1Hi();
-	if(lo + incr <= hi && lo + incr >= (u8*)0x80003100){
-		SYS_SetArena1Lo(lo + incr);
-		_CPU_ISR_Restore(level);
-		return lo;
-	}
-	// NO MEM2 fallback: tried on 08-20 — newlib's dlmalloc treats the
-	// discontiguous brk as one span, mallinfo read 3.9GB free and the carve
-	// from the gap-top aborted the game mid-cutscene. MEM2 relief is done
-	// with a dedicated lwp_heap for texture buffers (gxraster) instead.
-	_CPU_ISR_Restore(level);
-	r->_errno = ENOMEM;
-	return (void*)-1;
-}
-
-void *gcLifeboat;
-void
-gcNewHandler(void)
-{
-	if(gcLifeboat){
-		free(gcLifeboat);
-		gcLifeboat = nil;
-		GeckoLog("LIFEBOAT released");
-		return;   // operator new retries
-	}
-	std::set_new_handler(nil);   // second failure: fail loud as before
-}
-
 static void*
 watchdogMain(void*)
 {
@@ -169,42 +71,6 @@ watchdogMain(void*)
 	bool reported = false;
 	while(!watchdogStop){
 		usleep(1000*1000);
-		// Re-arm the spawn lifeboat: released boats sink into the dust of
-		// small allocations within seconds; a re-armed one means the next
-		// OOM burst is also survivable. Quiet failure — tries again next
-		// second.
-		if(gcLifeboat == nil){
-			gcLifeboat = malloc(2560*1024);
-			if(gcLifeboat){
-				extern void gcNewHandler(void);
-				std::set_new_handler(gcNewHandler);
-				GeckoLog("LIFEBOAT re-armed");
-			}
-		}
-		// Heap-smash tripwire. mallinfo walks every chunk under the malloc
-		// lock; a corrupted chunk header makes its sums impossible (measured:
-		// "used 308266K" in a 16MB arena, twice, two builds). First trip
-		// stamps the second and the phase — the corruptor's time of death.
-		{
-			static bool tripped;
-			struct mallinfo wmi = mallinfo();
-			if(!tripped && ((uint32)wmi.uordblks > 20u*1024*1024 ||
-			                (uint32)wmi.fordblks > 20u*1024*1024)){
-				tripped = true;
-				char hl[96];
-				snprintf(hl, sizeof(hl),
-				    "HEAPSMASH t=%u phase=%s used=%uK free=%uK",
-				    (unsigned)gFrameTick, gPhase ? gPhase : "-",
-				    (unsigned)((uint32)wmi.uordblks/1024),
-				    (unsigned)((uint32)wmi.fordblks/1024));
-				GeckoLog(hl);
-				if(CdStreamFsTryLock()){
-					FILE *hf = fopen("dvd:/crash.log", "a");
-					if(hf){ fprintf(hf, "%s\n", hl); fclose(hf); }
-					CdStreamFsUnlock();
-				}
-			}
-		}
 		if(gFrameTick != last){
 			last = gFrameTick;
 			stuck = 0;
@@ -306,13 +172,10 @@ watchdogMain(void*)
 			    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
 			    gxWaitRetrace, gxLastPath ? gxLastPath : "-", gxCamW, gxCamH,
 			    rdIdle, cmdIdle, overhi, underlow, brkpt);
-			if(CdStreamFsTryLock()){
-				FILE *hf = fopen("dvd:/hang.log", "a");
-				if(hf){
-					fprintf(hf, "%s\n", line);
-					fclose(hf);
-				}
-				CdStreamFsUnlock();
+			FILE *hf = fopen("dvd:/hang.log", "a");
+			if(hf){
+				fprintf(hf, "%s\n", line);
+				fclose(hf);
 			}
 		}
 	}
@@ -512,17 +375,11 @@ gcFatalPark(const char *tag, const char *msg)
 	// wait briefly; if it never comes, skip the file. The maroon screen and
 	// gecko carry the report either way, and writing through contended
 	// libfat is how heap corruption starts — a poor way to report one.
-	bool fsLocked = false;
-	for(int i = 0; i < 200 && !(fsLocked = CdStreamFsTryLock() != 0); i++)
-		usleep(1000);
-	if(fsLocked){
-		FILE *f = fopen("dvd:/crash.log", "a");
-		if(f){
-			fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
-			    tag, __DATE__, __TIME__, msg, heap, stack);
-			fclose(f);
-		}
-		CdStreamFsUnlock();
+	FILE *f = fopen("dvd:/crash.log", "a");
+	if(f){
+		fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
+		    tag, __DATE__, __TIME__, msg, heap, stack);
+		fclose(f);
 	}
 
 	u32 level;
@@ -948,28 +805,6 @@ main(int, char *[])
 	SYS_STDIO_Report(TRUE);
 	gcInstallPanicHandler();
 
-	// Spawn lifeboat: during the save-load refill nothing is evictable, so
-	// the player-creation `new`s can meet a heap ground to dust. Hold 1.5MB
-	// from boot; the new_handler releases it on the first failed `new` and
-	// the allocation retries into the freed block. Second failure surfaces
-	// as the normal fail-loud abort. std::set_new_handler is the stdlib's
-	// own emergency-pool hook — no call-site knowledge needed.
-	{
-		extern void *gcLifeboat;
-		extern void gcNewHandler(void);
-		gcLifeboat = malloc(2560*1024);
-		std::set_new_handler(gcNewHandler);
-	}
-
-	// ROOT CAUSE of the boot heap smash (08-20): newlib's free() runs
-	// malloc_trim past a 128K top and trims via sbrk(-X) — but libogc's sbrk
-	// is a bump pointer that was never meant to run backwards, and trim's
-	// resync path then recomputes arena = sbrk(0)-sbrk_base as ~302MB and
-	// hands out blocks overlapping late .bss (__sf, current_mallinfo,
-	// temp_cwd — every observed victim). The streaming probe-gate
-	// (malloc big + free immediately, MakeSpaceFor) fires exactly that
-	// pattern constantly. Trim buys nothing on a console: disable it.
-	mallopt(M_TRIM_THRESHOLD, 0x7fffffff);
 
 	psInitConsole();
 	PAD_Init();

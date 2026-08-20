@@ -80,10 +80,6 @@ extern bool flushStream[MAX_CDCHANNELS];
 extern "C" {
 void CdStreamFsLock(void);
 void CdStreamFsUnlock(void);
-/* 1 = lock taken (pair with CdStreamFsUnlock), 0 = busy — skip the fs op.
-   For writers that must not block (watchdog) or must not race a live
-   worker at death (gcFatalPark). */
-int CdStreamFsTryLock(void);
 }
 struct CdStreamFsGuard {
 	CdStreamFsGuard(void) { CdStreamFsLock(); }

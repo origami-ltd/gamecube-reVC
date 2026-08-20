@@ -20,9 +20,6 @@
 #include "Weather.h"
 #include "DMAudio.h"
 #include "GenericGameStorage.h"
-#ifdef GTA_OGC
-#include "CdStream.h"
-#endif
 
 #ifdef GTA_PS2
 #include <libcdvd.h>
@@ -357,29 +354,7 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 #endif
 
 			break;
-		case MUSICMODE_GAME:
-#ifdef GTA_OGC
-			// The frontend's deferred teardown now runs during cutscenes
-			// (CGame::Process no longer skips FrontEndMenuManager.Process),
-			// and its ChangeMusicMode(MUSICMODE_GAME) landed mid-intro:
-			// Service completed the stale switch, stopped the preloaded
-			// cutscene track and started city/water ambience over the scene.
-			// A preloaded-or-playing cutscene track (m_nPlayingTrack set by
-			// PreloadCutSceneMusic, cleared by StopCutSceneMusic) marks the
-			// window where GAME must not preempt; the legit teardown in
-			// FinishCutscene stops the music first, so it passes.
-			if (m_nMusicMode == MUSICMODE_CUTSCENE && m_nPlayingTrack != NO_TRACK) {
-				DVD_FS_GUARD;
-				FILE *al = fopen("dvd:/audio.log", "a");
-				if (al) {
-					fprintf(al, "MMODE game-during-cutscene blocked ra=%p\n",
-					    __builtin_return_address(0));
-					fclose(al);
-				}
-				return;
-			}
-#endif
-			m_nUpcomingMusicMode = MUSICMODE_GAME; break;
+		case MUSICMODE_GAME: m_nUpcomingMusicMode = MUSICMODE_GAME; break;
 		case MUSICMODE_CUTSCENE:
 			m_nUpcomingMusicMode = MUSICMODE_CUTSCENE;
 			if (SampleManager.IsStreamPlaying()) {

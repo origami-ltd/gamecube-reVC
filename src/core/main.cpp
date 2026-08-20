@@ -775,12 +775,6 @@ LoadingScreen(const char *str1, const char *str2, const char *splashscreen)
 		    splashscreen ? splashscreen : "-");
 		BootLog(line);
 	}
-	// The boot-time heap smash lands between two of these calls; the first
-	// check that sees a poisoned arena names the init step that did it.
-	{
-		extern void gcHeapGuardCheck(const char *marker);
-		gcHeapGuardCheck(str2 ? str2 : (str1 ? str1 : "loadingscreen"));
-	}
 #endif
 
 #ifdef DISABLE_LOADING_SCREEN
