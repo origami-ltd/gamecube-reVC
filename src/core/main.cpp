@@ -1709,7 +1709,10 @@ Render2dStuffAfterFade(void)
 		// (Idle entry to Idle entry, already latched in gxSnapFrame), and
 		// hold the worst period of the last 5s so a hitch cannot scroll past
 		// between glances. A 266ms frame now reads "3 f266.0 max266".
-		unsigned per = gxSnapFrame ? gxSnapFrame : 1;
+		// Assume 60fps until the first period is latched: a 1us "period"
+		// reads as 1000000 fps, which is both nonsense and far too wide for
+		// the snug HUD box.
+		unsigned per = gxSnapFrame ? gxSnapFrame : 16667;
 		static unsigned worstUs;
 		static uint32 worstAt;
 		uint32 nowMs = CTimer::GetTimeInMillisecondsPauseMode();
@@ -1749,9 +1752,9 @@ Render2dStuffAfterFade(void)
 		    (unsigned)(mi.fordblks>>10), (unsigned)mi.ordblks,
 		    gxStreamUs/1000, arPct);
 		}else
-			sprintf(fpsA, "%u", 1000000u/per);
+			sprintf(fpsA, "%u", Min(1000000u/per, 999u));
 #else
-		sprintf(fpsA, "%u", 1000000u/per);
+		sprintf(fpsA, "%u", Min(1000000u/per, 999u));
 #endif
 		gxTileUs = 0; gxTexBuilds = 0;
 		gxMeshCount = 0;
@@ -2422,6 +2425,7 @@ Idle(void *arg)
 		unsigned long long t0 = gettime();
 	gPhase = "2dafterfade";
 		Render2dStuffAfterFade();
+		gPhase = "after-2dafterfade";   // closed, or every hang reads as this
 		gxAfterUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 	}
 #else

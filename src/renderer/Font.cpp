@@ -1033,7 +1033,15 @@ CFont::GetNumberLines(float xstart, float ystart, wchar *s)
 			f -= SCREEN_SCALE_X(21.0f * 2.0f);
 #endif
 
-		if(x + GetStringWidth(s) > f){
+		// A word wider than the wrap box would wrap forever: this branch
+		// advances y and n but NOT s, so an unfittable word re-tests the
+		// same condition every iteration and the game hangs with the GP
+		// idle and no crash. PrintString already guards this with !first;
+		// these two measuring passes did not, and the debug HUD hit it
+		// because its background box is only ~24 units wide. Only wrap when
+		// the line already holds something.
+		if(x + GetStringWidth(s) > f &&
+		   x > ((Details.centre || Details.rightJustify) ? 0.0f : xstart)){
 #ifdef MORE_LANGUAGES
 			if (IsJapanese())
 			{
@@ -1115,7 +1123,9 @@ CFont::GetTextRect(CRect *rect, float xstart, float ystart, wchar *s)
 		float xEnd = (Details.centre ? Details.centreSize : Details.wrapX);
 #endif
 		while(*s){
-			if(x + GetStringWidth(s) > xEnd){
+			// Same unfittable-word hang as GetNumberLines above.
+			if(x + GetStringWidth(s) > xEnd &&
+			   x > ((Details.centre || Details.rightJustify) ? 0.0f : xstart)){
 				// reached end of line
 				if(x > maxlength)
 					maxlength = x;
