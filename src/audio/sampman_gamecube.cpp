@@ -1407,6 +1407,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	if(nStream >= MAX_STREAMS)
 		return FALSE;
 	GcStream *st = &gStreams[nStream];
+	u64 tOpen = gettime();
 	StopStreamedFile(nStream);
 	// Spans the fopen, ov_open_callbacks (which reads headers) and the priming
 	// pump. The lock is recursive, so the nested guards inside are free.
@@ -1437,9 +1438,11 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	}
 	{
 		struct mallinfo smi = mallinfo();
+		unsigned openMs = (unsigned)ticks_to_millisecs(gettime() - tOpen);
 		FILE *al = fopen("dvd:/audio.log", "a");
-		if(al){ fprintf(al, "STRM ok s%d %s pos=%u free=%uK\n", (int)nStream,
-		    path, (unsigned)nPos, (unsigned)smi.fordblks/1024); fclose(al); }
+		if(al){ fprintf(al, "STRM ok s%d %s pos=%u free=%uK open=%ums\n",
+		    (int)nStream, path, (unsigned)nPos,
+		    (unsigned)smi.fordblks/1024, openMs); fclose(al); }
 	}
 	// stdio buffering for this stream must not depend on the allocator: at
 	// 441K free the fread inside ov_open failed its buffer malloc and the
@@ -1506,8 +1509,15 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 		ogg_int64_t want = (ogg_int64_t)nPos*(st->rate/1000);
 		if(st->lenSamples)
 			want %= (ogg_int64_t)st->lenSamples;
-		if(ov_pcm_seek(&st->vf, want) == 0)
-			st->posSamples = (uint32)want;
+		// PAGE seek, not sample-accurate seek. ov_pcm_seek bisects the file
+		// and then decodes forward to land on the exact sample; over a 70MB
+		// station on SD that was measured at up to 148ms inside one frame -
+		// the largest single number in the whole profile and the stutter the
+		// user reported. Radio is wall-clock synced to within a page (a few
+		// tens of ms), which nobody can hear, and the page seek skips the
+		// decode-forward entirely.
+		if(ov_pcm_seek_page(&st->vf, want) == 0)
+			st->posSamples = (uint32)ov_pcm_tell(&st->vf);
 	}
 	}
 	st->fill = 0;
