@@ -5,81 +5,104 @@ audio/ISO/droplets/menu; the goal session = artifacts/anim/streaming). They
 coordinated live via SendMessage; everything below is merged and current.
 The tree is ALL uncommitted; be surgical.
 
-## 08-20 evening — READ FIRST. The tree is COMMITTED now; branches matter.
+## 08-20 night — current state, all committed. READ FIRST.
 
-Nothing is uncommitted any more. Three branches:
-- **`gamecube` (current)** — the good state. Base is `floor-08-20` plus the
-  debug-HUD hang fix and the GameCube-legal audio backend.
-- **`floor-08-20`** — the user's named PISO: the 08-19/20 night work (small
-  FPS box, correct defaults, screen droplets, anim fix, menus, memcard)
-  with audio/streaming/CdStream/FileLoader held at `0f907fbb`. Boots and
-  plays in-world at 60fps.
-- **`wip-08-20`** — everything the day produced, including the discarded
-  MEM2 experiments. Cherry-pick from here, do not merge it wholesale.
-- Belt and braces: `/Users/ebellumat/revc-backup-0820-1730/worktree-full.tar.gz`.
+Branches: `gamecube` (current, good), `floor-08-20` (the user's named PISO),
+`wip-08-20` (everything the day produced incl. the discarded MEM2
+experiments - cherry-pick only). Tarball:
+/Users/ebellumat/revc-backup-0820-1730/worktree-full.tar.gz
 
 ### THE RULE THIS DAY COST: MEM2 DOES NOT EXIST
 
-The GameCube has **24MB MEM1** and **16MB ARAM** (DMA-only, not addressable
-by CPU or GX). MEM2 is a **Wii-only** 64MB pool. The Wii dev target is a
-valid proxy for the GameCube ONLY while MEM2 stays untouched, because Wii
-MEM1 == GameCube MEM1. An earlier session put a 46MB sample bank in MEM2 and
-this session went further (textures, vertex packs, display lists) — all of it
-reverted. If a change needs MEM2, it is not a GameCube change. MEM2 may stand
-in for ARAM alone, capped at 16MB, DMA-discipline only (gcBankAlloc enforces
-the cap).
+GameCube = 24MB MEM1 + 16MB ARAM (DMA-only, not CPU/GX addressable). MEM2 is
+Wii-only. The Wii dev target is a valid proxy ONLY while MEM2 is untouched,
+because Wii MEM1 == GameCube MEM1. MEM2 may stand in for ARAM alone, capped
+at 16MB, DMA discipline only (gcBankAlloc enforces it). Everything else that
+went to MEM2 this day was reverted.
 
-### Audio, rebuilt to the user's spec and VERIFIED on console
+### Root causes found and fixed, each with its evidence
 
-Directive: "tudo no bitrate nativo, mas só músicas 44,1 kHz stereo VORBIS."
-Measured source truth: radio `.adf` = 44100 Hz stereo 128kbps MP3; mission
-`.mp3` = 32000 Hz stereo 112kbps; ambience = 22050 mono; **voice `.wav` =
-IMA ADPCM, mono, mostly 22050 Hz, 512-byte blocks, 39MB for all 1120 lines**.
-Everything in the game is 32kHz or below, so the old 48kHz pipeline was
-inflating the game's own data — a 46MB bank against 14.3MB of source PCM.
+1. **Stutter (goal item 1) - MEASURED before/after.** Not the codec: the
+   radio's `ov_pcm_seek` bisects a 70MB station and then decodes forward to
+   an exact sample. Over 278 beats of live play the audio column peaked at
+   **148.2ms** and the worst frame at **71.9ms**. `ov_pcm_seek_page` does the
+   same job to within a page (inaudible on radio). After, over 261 beats:
+   audio max **12.4ms**, worst frame max **21.6ms**, and stream opens are now
+   logged directly (`open=Nms` in audio.log) at 0-8ms.
+2. **Echo / "mono desynchronised between both ears".** AUDIO_REFLECTIONS
+   spawns delayed copies on purpose; they are meant to be panned apart and
+   attenuated. In ProcessActiveQueues' start path `k = (j + m_nChannelOffset)
+   % m_nActiveSamples`, the sound is started on **k** but volume and pan were
+   computed into and applied to **j**. Measured with a bounded StartChannel
+   log: 300/300 starts carried the default pan and 166 were the same sample
+   twice within 300ms. Only builds without EXTERNAL_3D_SOUND compile that
+   branch, which is why the PC never saw it. AudioManager.cpp, four `j`->`k`.
+3. **Metallic quality.** AESND's ucode resamples by repeating samples. Each
+   channel is now interpolated once, on the way in, to the DSP's own rate -
+   and that rate is `DSP_DEFAULT_FREQ` = 54MHz/1124 = **48042.7Hz** on
+   GameCube, not a flat 48000, so the ucode's resampler runs at ratio 1.0 and
+   never engages. 48kHz 16-bit stereo is the hardware ceiling. The old 48kHz
+   *bank* (46MB against 14.3MB of source) never fit ARAM and is gone.
+   `tools/gamecube/test_resample.py` proves the in-place conversion is safe
+   for every rate in the game's own sfx.sdt and within 1 LSB of float.
+4. **Legs twist when reversing (goal item 2).** Not the blend layer - that
+   fix targets compressed anims and ANIM_COMPRESSION is off. The port had
+   widened the IFP bone-tag read from stock's `== 44` to `>= 44`. In the real
+   ped.ifp, 4322 ANIM chunks are 44 bytes and 709 are 48, and offset 40 means
+   different things: at 44 it is the bone tag (Root=0 Pelvis=1 Neck=4), at 48
+   it is a hierarchy tree link (Root=4 Pelvis=5, sibling at offset 44).
+   Reading the link as a tag bound all 709 to the wrong bone - Root drove the
+   Neck - and CAR_LB, the reverse look-behind, is a 48-byte anim that
+   animates thigh, calf and foot. AnimManager.cpp back to `== 44`.
+5. **Options never loaded (goal item 3).** glfw and win both call
+   `FrontEndMenuManager.LoadSettings()` at startup; the GameCube skeleton
+   never did, so settings were written on every menu change and discarded at
+   the next boot. Wired at the same point. The options file is `gta_vc.set`
+   (1783 bytes on the card, volumes 49/49), separate from the story slots
+   `GTAVCsf*.b`. NOTE: the older handoff claim that memcard was "PROVEN BOTH
+   DIRECTIONS" was wrong - `mc:` is still rejected by
+   crossplatform.cpp's path normaliser, so the proven round trip is the dev
+   target's SD. The GC memory card needs `mc:` past `GameCubePath.h` plus a
+   `chdir_r` in carddev.c, and is gated behind the GC-mode render crash.
+6. **Debug HUD hang.** `CFont::GetNumberLines` and `GetTextRect` wrap by
+   resetting x and advancing y WITHOUT advancing the string, so a word wider
+   than the wrap box spins forever. PrintString already guarded this with
+   `!first`; the two measuring passes did not, and they only run when a
+   background box is on - which the HUD turns on, with a ~24-unit box. The
+   user's hang.log named it: `phase=2dafterfade, gp rd=1 cmd=1`.
+   `tools/gamecube/test_font_wrap.py` covers it.
+7. **Voice is native.** Mission speech ships as the game's own IMA ADPCM
+   .wav (39MB, mono, mostly 22050Hz, 512-byte blocks) - no Vorbis, no Tremor
+   decode state. Decoder is bit-exact vs ffmpeg
+   (`tools/gamecube/test_adpcm.py`). One bug worth remembering: a block
+   decodes to 2034 bytes and the stream chunk is 16128, which do not divide,
+   and zero-filling the remainder punched ~43ms of silence into every 323ms
+   of dialogue. The leftover is carried across chunks now.
 
-What the backend does now (identical code on both targets):
-- SFX bank stored at **native rate** in audio memory, one contiguous staged
-  copy: `BANK ok 14692K` — fits ARAM's 16MB. The DSP does rate conversion.
-- Channels DMA their sample from audio memory into a MEM1 buffer at its own
-  size. No pointers into ARAM (impossible on GameCube), no 2.2x resample.
-- **Voice plays native IMA ADPCM** — no Vorbis, no Tremor decode state.
-  Decoder is bit-exact against ffmpeg (`tools/gamecube/test_adpcm.py`,
-  5 files, zero difference).
-- Music is the only thing that gets Vorbis, at its native 44.1kHz stereo.
-- Console evidence: `AHB ch=28/28` playing, `STRM ok dvd:/audio/intro4.wav`,
-  MEM1 free 2868K (it was 218K before the diet).
+### Audio architecture, to the user's spec
 
-Card state: the 1120 `.wav` are on the SD and the speech `.ogg` are gone.
-A re-encode at native rates is staged in `/Users/ebellumat/revc-audio-native`
-(`convert_audio.py --music-rate 44100 --radio-quality 4`); copy it onto the
-card with Dolphin CLOSED, then fsck.
+Music (radio) is the ONLY thing that gets Vorbis, at its own native 44.1kHz
+stereo (measured from the .adf: 44100/2ch/128kbps). Mission .mp3 transcodes
+at its source rate (32000 stereo), ambience at 22050 mono, voice ships
+native ADPCM, SFX stay native in ARAM. A staged conversion is in
+`/Users/ebellumat/revc-audio-native` (convert_audio.py --music-rate 44100
+--radio-quality 4); copy onto the card with Dolphin CLOSED, then fsck.
 
-### The debug-HUD hang: fixed at the root
+### Open
 
-Turning the STATS row to FPS/VERBOSE hung the game. `hang.log` named it —
-`phase=2dafterfade, gp rd=1 cmd=1` (GP idle, CPU spinning), no crash.log.
-Cause: `CFont::GetNumberLines` and `CFont::GetTextRect` wrap by resetting x
-and advancing y **without advancing the string**, so a word wider than the
-wrap box re-tests forever. `PrintString` already guarded this with `!first`;
-the two measuring passes did not, and they only run when a background box is
-on — which is what the HUD turns on, with a box ~24 units wide. Guard added
-to both (`tools/gamecube/test_font_wrap.py` proves it terminates). Also: the
-fps number now assumes 60fps until the first period is latched (a 1us period
-read as 1000000 fps) and is clamped, and the `2dafterfade` phase marker is
-closed so the next hang report names where the thread actually is.
-
-### Still open
-
-- **MEM1 is genuinely tight on a 24MB machine.** The audio diet bought
-  ~2.6MB. If allocation failures come back, the levers are the streaming
-  budget, the 1.3MB of frontend textures that are never freed
-  (Frontend.cpp UnloadTextures), and the ped slots — NOT texture quality
-  (user rule) and NOT MEM2.
-- The ISO is over the 1.46GB mini-DVD budget; the native re-encode should
-  help. Measure after the staging dir finishes.
-- The `2dafterfade` hang class may have other members now that the marker
-  is honest.
+- TEMP diagnostic to remove at bring-up close: the bounded StartChannel log
+  (`dvd:/chan.log`) in sampman_gamecube.cpp. It samples the FIRST 300 starts,
+  which are frontend/intro and legitimately 2D (pan 63); to check positional
+  pan, make it skip the first few hundred and sample in-world.
+- MEM1 remains tight on a 24MB machine. Levers if allocation failures return:
+  streaming budget, the 1.3MB of frontend textures never freed
+  (Frontend.cpp UnloadTextures), ped slots. NOT texture quality (user rule),
+  NOT MEM2.
+- Two findings from an audit, verified in code but not yet acted on:
+  `AR_Init(nil, 0)` at CdStream_gamecube.cpp:71 (the sampman side already has
+  the 300-entry array; whoever initialises first wins) and the write-buffering
+  block sitting in `myfread` instead of `myfwrite` in FileMgr.cpp.
+- ISO budget vs the 1.46GB mini-DVD: re-measure after the native re-encode.
 
 ## 08-20 afternoon session (audio deep-dive) — READ FIRST, supersedes older audio notes
 
