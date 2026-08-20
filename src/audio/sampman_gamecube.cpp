@@ -705,10 +705,21 @@ gcApplyChannelVolume(GcChannel *c)
 {
 	if(c->voice == nil)
 		return;
+	// The OAL backend is the reference: SetVolume does
+	// SetGain(vol / MAX_VOLUME), i.e. a plain 0..1 gain applied equally to
+	// both ears, and it ignores pan entirely. Match that at full scale
+	// (AESND takes 0..255 a side), and let pan only ATTENUATE the far side.
+	// The previous formula multiplied by 4 and clamped, so anything off
+	// centre ran up to twice as loud as the game asked for and clipped -
+	// the "volumes todos loucos" and the deafening menu.
 	uint32 vol = c->volume*gEffectsVolume/127;
 	vol = vol*gEffectsFade/127;
+	if(vol > 127) vol = 127;
+	uint32 base = vol*255/127;
 	uint32 pan = c->pan > 127 ? 127 : c->pan;
-	uint32 l32 = vol*(127-pan)*4/127, r32 = vol*pan*4/127;
+	uint32 lf = 127 - pan, rf = pan;      // 0..127 each, 63/64 at centre
+	uint32 l32 = lf >= 63 ? base : base*lf/63;
+	uint32 r32 = rf >= 63 ? base : base*rf/63;
 	AESND_SetVoiceVolume(c->voice, (u16)(l32 > 255 ? 255 : l32),
 	                               (u16)(r32 > 255 ? 255 : r32));
 }
@@ -727,24 +738,13 @@ cSampleManager::StartChannel(uint32 nChannel)
 		return;
 	}
 
-	// The game's volume and pan are 0..127; AESND takes 0..255 per side.
-	// The old straight linear split halved a centered sound (-6dB vs the OAL
-	// backend, which pans without losing energy) — half the measured "whole
-	// game is quiet". Sum-preserving split: centre = full on both sides,
-	// hard pan = full on one, clamped.
-	uint32 vol = c->volume*gEffectsVolume/127;
-	vol = vol*gEffectsFade/127;
-	uint32 pan = c->pan > 127 ? 127 : c->pan;
-	uint32 l32 = vol*(127-pan)*4/127, r32 = vol*pan*4/127;
-	u16 left  = (u16)(l32 > 255 ? 255 : l32);
-	u16 right = (u16)(r32 > 255 ? 255 : r32);
-
+	// Volume and pan live in one place now (gcApplyChannelVolume), so a
+	// fade that arrives mid-sound reaches the voice too.
 	if(c->pcmOwned)
 		DCFlushRange(c->pcm, c->pcmBytes);
-	f32 voiceFreq = (f32)c->freq;
+	gcApplyChannelVolume(c);
 	AESND_SetVoiceFormat(c->voice, VOICE_MONO16);
-	AESND_SetVoiceFrequency(c->voice, voiceFreq);
-	AESND_SetVoiceVolume(c->voice, left, right);
+	AESND_SetVoiceFrequency(c->voice, (f32)c->freq);
 	AESND_SetVoiceLoop(c->voice, c->loopCount != 1);
 	AESND_SetVoiceBuffer(c->voice, c->pcm, c->pcmBytes);
 	c->playing = TRUE;
@@ -858,6 +858,8 @@ struct GcStream {
 	uint32   rate;          // the file's own sample rate; the voice follows it
 	uint32   channels;      // 1 or 2, from the file as well
 	bool8    adpcm;         // native IMA ADPCM .wav (voice) rather than Vorbis
+	uint8    adpcmSpill[4224];  // decoded samples that did not fit the last chunk
+	uint32   adpcmSpillBytes;
 	uint16   blockAlign;    // ADPCM block size in bytes
 	uint32   dataBytes;     // ADPCM payload length
 	bool8    playing;
@@ -1043,23 +1045,45 @@ gcWavDecode(GcStream *st, uint8 *dst)
 		}
 		done = (uint32)got;
 	}else{
+		// A block decodes to 1017 samples (2034 bytes) and the chunk is
+		// 16128, so blocks do NOT divide the chunk: stopping at the last
+		// whole block and zero-filling the remainder punched ~43ms of
+		// silence into every 323ms of speech. Carry the overflow instead.
 		uint8 blk[1024];
+		int16 tmp[2100];
 		uint32 ba = st->blockAlign > sizeof(blk) ? (uint32)sizeof(blk) : st->blockAlign;
-		uint32 need = gcAdpcmBlockSamples(ba)*2;
-		while(done + need <= STREAM_CHUNK_BYTES){
+		if(st->adpcmSpillBytes){
+			uint32 n = st->adpcmSpillBytes > STREAM_CHUNK_BYTES ?
+			    STREAM_CHUNK_BYTES : st->adpcmSpillBytes;
+			memcpy(dst, st->adpcmSpill, n);
+			done += n;
+			st->adpcmSpillBytes -= n;
+			if(st->adpcmSpillBytes)
+				memmove(st->adpcmSpill, st->adpcmSpill + n, st->adpcmSpillBytes);
+		}
+		while(done < STREAM_CHUNK_BYTES){
 			if(fread(blk, 1, ba, st->file) != ba)
 				break;
 			int32 pred = (int16)((uint16)blk[0] | ((uint16)blk[1] << 8));
 			int32 idx = blk[2];
 			if(idx > 88) idx = 88;
-			int16 *out = (int16*)(dst + done);
 			uint32 n = 0;
-			out[n++] = (int16)pred;
-			for(uint32 i = 4; i < ba; i++){
-				out[n++] = gcImaNibble(blk[i] & 15, &pred, &idx);
-				out[n++] = gcImaNibble(blk[i] >> 4, &pred, &idx);
+			tmp[n++] = (int16)pred;
+			for(uint32 i = 4; i < ba && n + 2 <= ARRAY_SIZE(tmp); i++){
+				tmp[n++] = gcImaNibble(blk[i] & 15, &pred, &idx);
+				tmp[n++] = gcImaNibble(blk[i] >> 4, &pred, &idx);
 			}
-			done += n*2;
+			uint32 bytes = n*2;
+			uint32 fit = STREAM_CHUNK_BYTES - done;
+			if(bytes <= fit){
+				memcpy(dst + done, tmp, bytes);
+				done += bytes;
+			}else{
+				memcpy(dst + done, tmp, fit);
+				st->adpcmSpillBytes = bytes - fit;
+				memcpy(st->adpcmSpill, (uint8*)tmp + fit, st->adpcmSpillBytes);
+				done = STREAM_CHUNK_BYTES;
+			}
 		}
 	}
 	if(done < STREAM_CHUNK_BYTES)
@@ -1270,12 +1294,9 @@ bool8
 cSampleManager::LoadMissionAudio(uint8 nSlot, uint32 nSample)
 {
 	if(gPlayerTalkData == nil){
-#ifdef HW_RVL
-		// MEM2, like every other audio buffer: MEM1 is the streaming arena.
-		gPlayerTalkData = (uint8*)gcBankAlloc(align32(PED_BLOCKSIZE));
-#else
+		// MEM1 on both targets: this buffer is memcpy'd by the CPU, and on a
+		// GameCube audio memory is ARAM, which the CPU cannot address.
 		gPlayerTalkData = (uint8*)memalign(32, PED_BLOCKSIZE);
-#endif
 		if(gPlayerTalkData == nil)
 			return FALSE;
 	}
@@ -1491,6 +1512,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	}
 	st->fill = 0;
 	st->play = 0;
+	st->adpcmSpillBytes = 0;   // no carry from the previous line
 	st->bufReady = FALSE;
 	st->starved = 0;
 	st->paused = FALSE;
@@ -1706,9 +1728,13 @@ cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffect
 		return;
 	uint32 vol = nVolume*(nEffectFlag ? gEffectsVolume : gMusicVolume)/127;
 	vol = vol*(nEffectFlag ? gEffectsFade : gMusicFade)/127;
+	if(vol > 127) vol = 127;
+	uint32 base = vol*255/127;
 	uint32 pan = nPan > 127 ? 127 : nPan;
-	// Sum-preserving pan, same as StartChannel: no -6dB at centre.
-	uint32 l32 = vol*(127-pan)*4/127, r32 = vol*pan*4/127;
+	// Same model as the channels: full scale at centre, pan attenuates only.
+	uint32 lf = 127 - pan, rf = pan;
+	uint32 l32 = lf >= 63 ? base : base*lf/63;
+	uint32 r32 = rf >= 63 ? base : base*rf/63;
 	AESND_SetVoiceVolume(st->voice,
 	    (u16)(l32 > 255 ? 255 : l32), (u16)(r32 > 255 ? 255 : r32));
 }
