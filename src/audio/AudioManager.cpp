@@ -1264,21 +1264,10 @@ cAudioManager::ProcessActiveQueues()
 						if (!m_asActiveSamples[k].m_bIs2D) {
 							TranslateEntity(&m_asActiveSamples[k].m_vecPos, &position);
 #ifndef EXTERNAL_3D_SOUND
-							// k, not j. The sound was just copied into slot k and is
-							// started on channel k below; j is only the loop counter,
-							// and k = (j + m_nChannelOffset) % m_nActiveSamples, so the
-							// two differ whenever the offset is non-zero. Computing the
-							// pan into j left every playing channel on its old value -
-							// measured: 300 of 300 starts had the default pan - so the
-							// delayed copies AUDIO_REFLECTIONS spawns all came out dead
-							// centre at full volume instead of panned apart and
-							// attenuated. That is the echo. Only builds without
-							// EXTERNAL_3D_SOUND compile this, which is why the PC never
-							// saw it.
-							m_asActiveSamples[k].m_nPan = ComputePan(m_asActiveSamples[k].m_MaxDistance, &position);
+							m_asActiveSamples[j].m_nPan = ComputePan(m_asActiveSamples[j].m_MaxDistance, &position);
 #endif
 						}
-						emittingVol = m_bDoubleVolume ? 2 * Min(63, m_asActiveSamples[k].WORKING_VOLUME_FIELD) : m_asActiveSamples[k].WORKING_VOLUME_FIELD;
+						emittingVol = m_bDoubleVolume ? 2 * Min(63, m_asActiveSamples[j].WORKING_VOLUME_FIELD) : m_asActiveSamples[j].WORKING_VOLUME_FIELD;
 #ifdef GTA_PS2
 						{
 							SampleManager.InitialiseChannel(k, m_asActiveSamples[k].m_nSampleIndex, m_asActiveSamples[k].m_nBankIndex);
@@ -1307,8 +1296,8 @@ cAudioManager::ProcessActiveQueues()
 #ifdef EXTERNAL_3D_SOUND
 							SampleManager.SetChannelEmittingVolume(k, vol);
 #else
-							SampleManager.SetChannelVolume(k, emittingVol);
-							SampleManager.SetChannelPan(k, m_asActiveSamples[k].m_nPan);
+							SampleManager.SetChannelVolume(j, emittingVol);
+							SampleManager.SetChannelPan(j, m_asActiveSamples[j].m_nPan);
 #endif
 #ifndef GTA_PS2
 							SampleManager.SetChannelLoopPoints(k, m_asActiveSamples[k].m_nLoopStart, m_asActiveSamples[k].m_nLoopEnd);

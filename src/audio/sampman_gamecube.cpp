@@ -40,6 +40,7 @@
 #include <ogc/cache.h>
 #include <ogc/lwp_watchdog.h>
 #include <malloc.h>
+#include <math.h>
 #include <tremor/ivorbisfile.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -92,7 +93,10 @@ struct GcChannel {
 	uint32   sample;     // which sfx is loaded
 	uint32   freq;
 	uint32   volume;     // 0..127 as the game supplies it
-	uint32   pan;        // 0..127, 63 centre
+	uint32   pan;        // 0..127, 63 centre (2D fallback)
+	f32      posX, posY, posZ;   // camera-space position, from the game
+	f32      distMax, distMin;   // rolloff window, from the game
+	bool8    has3D;              // a position was given for this play
 	uint32   loopCount;
 	bool8    used;
 	volatile bool8 playing;   // cleared by the AESND callback when the buffer ends
@@ -265,6 +269,67 @@ gcBankRead(void *dst, uint32 src, uint32 n)
 static void gcStreamsShutdown(void);   // defined with the stream machinery
 static void gcLoadTrackLengths(void);  // same
 
+
+// ---------------------------------------------------------- conformance test
+//
+// Armed by dvd:/audiotest.txt. Plays a fixed list of bank samples, one at a
+// time with silence between them, straight through the sample manager - no
+// AudioManager, no reflections, no positioning - and then parks. With
+// Dolphin's DumpAudio on, the resulting *_dspdump.wav contains nothing but
+// this sequence, so it can be compared against the same samples decoded on a
+// host. That comparison is the only honest answer to "does it sound right":
+// tools/gamecube/audio_compare.py lines the two up and reports the error.
+//
+// The indices span the rate range the game actually ships (8000 to 26513Hz),
+// which is where the DSP's sample-repeat resampler used to do its damage.
+static const uint32 gAudioTestSfx[] = { 0, 1, 11, 19 };
+
+void
+gcAudioSelfTest(void)
+{
+	{
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/audiotest.txt", "r");
+		if(f == nil)
+			return;
+		fclose(f);
+	}
+	gEffectsVolume = 127;
+	gEffectsFade = 127;
+	GeckoLog("AUDIOTEST start");
+	{
+		DVD_FS_GUARD;
+		FILE *l = fopen("dvd:/audiotest.log", "w");
+		if(l){
+			fprintf(l, "# sfx size freq order=play, 0.5s lead-in, 1.5s each, 0.5s gap\n");
+			for(uint32 i = 0; i < ARRAY_SIZE(gAudioTestSfx); i++){
+				uint32 s = gAudioTestSfx[i];
+				fprintf(l, "%u %u %u\n", (unsigned)s,
+				    (unsigned)gSampleIndex[s].nSize,
+				    (unsigned)gSampleIndex[s].nFrequency);
+			}
+			fclose(l);
+		}
+	}
+	usleep(500*1000);                 // clean lead-in in the dump
+	for(uint32 i = 0; i < ARRAY_SIZE(gAudioTestSfx); i++){
+		uint32 sfx = gAudioTestSfx[i];
+		if(SampleManager.InitialiseChannel(0, sfx, 0)){
+			SampleManager.SetChannelVolume(0, 127);
+			SampleManager.SetChannelPan(0, 63);
+			SampleManager.SetChannelLoopCount(0, 1);
+			SampleManager.SetChannelFrequency(0, gSampleIndex[sfx].nFrequency);
+			SampleManager.StartChannel(0);
+		}
+		usleep(1500*1000);
+		SampleManager.StopChannel(0);
+		usleep(500*1000);
+	}
+	GeckoLog("AUDIOTEST done");
+	extern void gcFatalPark(const char *tag, const char *msg);
+	gcFatalPark("AUDIOTEST", "sequence played; dump is ready");
+}
+
 bool8
 cSampleManager::Initialise(void)
 {
@@ -314,6 +379,7 @@ cSampleManager::Initialise(void)
 	gcLoadTrackLengths();
 
 	_bSampmanInitialised = TRUE;
+	gcAudioSelfTest();          // no-op unless dvd:/audiotest.txt is present
 	return TRUE;
 }
 
@@ -547,6 +613,54 @@ cSampleManager::GetSampleLoopEndOffset(uint32 nSample)
 
 // ----------------------------------------------------------------- channels
 
+// Reconstruction filter for the per-play conversion.
+//
+// Linear interpolation was not enough: measured against the same sample
+// decoded on a host, an 8kHz effect still carried 4.4x the reference's
+// energy above its own Nyquist. Linear only attenuates the spectral images
+// an upsample creates (a triangular kernel, sinc-squared rolloff) - it does
+// not remove them, and what is left is audible as the metallic edge.
+//
+// A windowed sinc does remove them. 8 taps over 64 sub-phases: 2KB of table,
+// built once, and one 8-term dot product per output sample - a few hundred
+// microseconds for a typical effect, paid on the play that needs it.
+enum { GC_FIR_TAPS = 8, GC_FIR_PHASES = 64 };
+static f32 gFirTable[GC_FIR_PHASES][GC_FIR_TAPS];
+static bool8 gFirReady;
+
+static void
+gcBuildFir(void)
+{
+	if(gFirReady)
+		return;
+	for(int32 ph = 0; ph < GC_FIR_PHASES; ph++){
+		f32 frac = (f32)ph/(f32)GC_FIR_PHASES;
+		f32 sum = 0.0f;
+		for(int32 t = 0; t < GC_FIR_TAPS; t++){
+			// Distance from this tap to the point being reconstructed.
+			f32 x = (f32)(t - (GC_FIR_TAPS/2 - 1)) - frac;
+			f32 s;
+			if(x > -1e-6f && x < 1e-6f)
+				s = 1.0f;
+			else{
+				f32 pix = (f32)M_PI*x;
+				s = sinf(pix)/pix;
+			}
+			// Blackman window over the tap span keeps the stopband down
+			// without ringing the transients every gunshot is made of.
+			f32 w = 0.42f - 0.5f*cosf((f32)(2.0*M_PI)*((f32)t + 0.5f)/(f32)GC_FIR_TAPS)
+			      + 0.08f*cosf((f32)(4.0*M_PI)*((f32)t + 0.5f)/(f32)GC_FIR_TAPS);
+			gFirTable[ph][t] = s*w;
+			sum += s*w;
+		}
+		// Unity gain at DC for every phase, so the level never wobbles.
+		if(sum > 0.0001f || sum < -0.0001f)
+			for(int32 t = 0; t < GC_FIR_TAPS; t++)
+				gFirTable[ph][t] /= sum;
+	}
+	gFirReady = TRUE;
+}
+
 bool8
 cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 {
@@ -642,14 +756,24 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 		const int16 *sp = (const int16*)(base + tail + srcSkew);
 		if(resample && inS >= 2){
 			int16 *dst = (int16*)base;
-			uint32 step = (baseFreq << 16)/GC_DSP_RATE;   // 16.16, no FPU
+			uint32 step = (baseFreq << 16)/GC_DSP_RATE;   // 16.16 source cursor
 			uint32 pos = 0;
+			gcBuildFir();
 			for(uint32 k = 0; k < outS; k++, pos += step){
-				uint32 i0 = pos >> 16;
-				if(i0 >= inS-1) i0 = inS-2;
-				int32 fr = (int32)(pos & 0xFFFF);
-				int32 a = sp[i0], b = sp[i0+1];
-				dst[k] = (int16)(a + (((b - a)*fr) >> 16));
+				int32 i0 = (int32)(pos >> 16);
+				uint32 ph = (pos >> 10) & (GC_FIR_PHASES-1);
+				const f32 *tap = gFirTable[ph];
+				f32 acc = 0.0f;
+				for(int32 t = 0; t < GC_FIR_TAPS; t++){
+					int32 si = i0 + t - (GC_FIR_TAPS/2 - 1);
+					if(si < 0) si = 0;
+					else if(si >= (int32)inS) si = (int32)inS - 1;
+					acc += tap[t]*(f32)sp[si];
+				}
+				int32 v = (int32)(acc + (acc >= 0.0f ? 0.5f : -0.5f));
+				if(v > 32767) v = 32767;
+				else if(v < -32768) v = -32768;
+				dst[k] = (int16)v;
 			}
 			c->pcmBytes = outS*2;
 			c->pcm48 = TRUE;
@@ -711,6 +835,7 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 	// SetChannelPan is centred there. Here the field defaulted to 0, which
 	// this backend reads as hard left: mono came out of one speaker.
 	c->pan = 63;
+	c->has3D = FALSE;    // until the game gives this play a position
 	c->used = TRUE;
 	return TRUE;
 }
@@ -789,6 +914,26 @@ gcApplyChannelVolume(GcChannel *c)
 	if(vol > 127) vol = 127;
 	uint32 base = vol*255/127;
 	uint32 pan = c->pan > 127 ? 127 : c->pan;
+
+	// Distance and placement, matching what the PC backend gets from OpenAL:
+	// AL_INVERSE_DISTANCE_CLAMPED with a rolloff of 1, reference distance =
+	// the min the game passes, clamped at the max. The position is already in
+	// camera space, so +X is to the right and the azimuth IS the pan.
+	if(c->has3D && c->distMax > 0.0f){
+		f32 ref = c->distMin > 0.01f ? c->distMin : 0.01f;
+		f32 dist = sqrtf(c->posX*c->posX + c->posY*c->posY + c->posZ*c->posZ);
+		f32 clamped = dist < ref ? ref : (dist > c->distMax ? c->distMax : dist);
+		f32 gain = ref/(ref + (clamped - ref));
+		uint32 g = (uint32)(base*gain + 0.5f);
+		base = g > 255 ? 255 : g;
+		if(dist > 0.01f){
+			f32 s = c->posX/dist;              // -1 hard left .. +1 hard right
+			if(s < -1.0f) s = -1.0f;
+			else if(s > 1.0f) s = 1.0f;
+			int32 p = (int32)(63.5f + s*63.5f);
+			pan = (uint32)(p < 0 ? 0 : (p > 127 ? 127 : p));
+		}
+	}
 	uint32 lf = 127 - pan, rf = pan;      // 0..127 each, 63/64 at centre
 	uint32 l32 = lf >= 63 ? base : base*lf/63;
 	uint32 r32 = rf >= 63 ? base : base*rf/63;
@@ -1461,16 +1606,34 @@ cSampleManager::SetChannelReverbFlag(uint32 nChannel, bool8 nReverbFlag)
 	;
 }
 
+// The game hands every sound a CAMERA-SPACE position and a rolloff window,
+// and this backend used to throw both away - the two functions below were
+// empty. That is why nothing had distance attenuation or stereo placement:
+// AudioManager deliberately does not call SetChannelPan when
+// EXTERNAL_3D_SOUND is defined (which it is here), because positioning is
+// the backend's job. Reflections showed it worst - AUDIO_REFLECTIONS spawns
+// a copy at 0.5625x volume a few frames late, and with the position dropped
+// it landed dead centre on top of the original at -5dB instead of the PC's
+// -17dB out to one side, which is a slapback echo rather than a room.
 void
 cSampleManager::SetChannel3DPosition(uint32 nChannel, float fX, float fY, float fZ)
 {
-	;
+	if(nChannel >= ARRAY_SIZE(gChannels))
+		return;
+	GcChannel *c = &gChannels[nChannel];
+	c->posX = fX;
+	c->posY = fY;
+	c->posZ = fZ;
+	c->has3D = TRUE;
 }
 
 void
 cSampleManager::SetChannel3DDistances(uint32 nChannel, float fMax, float fMin)
 {
-	;
+	if(nChannel >= ARRAY_SIZE(gChannels))
+		return;
+	gChannels[nChannel].distMax = fMax;
+	gChannels[nChannel].distMin = fMin;
 }
 
 // Cutscene speech arrives through this pair: MusicManager preloads the track
