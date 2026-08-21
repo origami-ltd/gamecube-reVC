@@ -1513,6 +1513,13 @@ gcStreamPump(GcStream *st)
 // as playing while its position sat frozen at the primed 16128 samples and
 // never advanced, so no callback ever came, no audio came out, and the
 // mission-audio state machine wrote the line off and moved to the next one.
+// TRUE while PreloadStreamedFile is opening a line: it must prime the
+// buffers but not hand one to the voice. Arming twice - once at preload and
+// again at start - advanced the play pointer past the first chunk, so every
+// preloaded line began 8064 samples in. The user heard it exactly: all the
+// intro audio playing from the middle onwards, never whole.
+static bool8 gStreamPreloading;
+
 static void
 gcStreamArm(GcStream *st, uint8 nStream)
 {
@@ -1770,8 +1777,12 @@ gcStreamTrace(const char *what, uint8 nStream)
 void
 cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 {
-	if(StartStreamedFile(nFile, 0, nStream)){
-		// Hold it: opened and primed, voice silent until the scene asks.
+	gStreamPreloading = TRUE;
+	bool8 ok = StartStreamedFile(nFile, 0, nStream);
+	gStreamPreloading = FALSE;
+	if(ok){
+		// Held: opened and primed, voice silent and still holding chunk one,
+		// until the scene asks for it.
 		GcStream *st = &gStreams[nStream];
 		st->paused = TRUE;
 		if(st->voice)
@@ -1958,7 +1969,11 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	// allocation being uninitialised, not from the ordering: the buffers are
 	// zeroed at allocation now, so the window between arming and the first
 	// chunk plays silence instead of whatever MEM1 held.
-	gcStreamArm(st, nStream);
+	if(gStreamPreloading){
+		// Prime only: one chunk decoded and held, nothing handed over.
+		gcStreamPump(st);
+	}else
+		gcStreamArm(st, nStream);
 	if(!st->bufReady && st->posSamples == 0){
 		// Nothing decoded. Say so rather than let silence pass for success.
 		DVD_FS_GUARD;
