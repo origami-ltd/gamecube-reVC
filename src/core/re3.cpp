@@ -199,15 +199,15 @@ CustomFrontendOptionsPopulate(void)
 		FrontendOptionAddSelect("FED_WLM", 0, 0, MENUALIGN_LEFT, off_on, 2, (int8*)&CustomPipes::LightmapEnable, false, nil, "Graphics", "NeoLightMaps");
 		FrontendOptionAddSelect("FED_RGL", 0, 0, MENUALIGN_LEFT, off_on, 2, (int8*)&CustomPipes::GlossEnable, false, nil, "Graphics", "NeoRoadGloss");
 #ifdef GTA_OGC
-		{
-			// RESOLUTION: EFB height, applied at the NEXT boot (the video
-			// mode is committed before the menu exists). 480P, 528P
-			// supersampled to the 480 output, and the 720p row that names
-			// Dolphin's internal-resolution scaler as the thing actually
-			// rendering higher — the GP tops out at 640x528.
-			static const char *resNames[] = { "FED_R48", "FED_R52", "FED_R72" };
-			FrontendOptionAddSelect("FED_RES", 0, 0, MENUALIGN_LEFT, resNames, ARRAY_SIZE(resNames), (int8*)&rw::gx::gxEfbResPref, false, nil, "Graphics", "EfbHeight");
-		}
+		// No RESOLUTION row. It persisted a preference and changed nothing:
+		// the GameCube's EFB-to-XFB copy can only scale UP (that is what
+		// DispCopyYScale is for, interlace doubling), so 528p could not be
+		// brought down to the 480 output - it rendered a solid magenta frame -
+		// and 720p is impossible on a GP that tops out at 640x528. The row
+		// only ever named Dolphin's own internal-resolution scaler. If a real
+		// path appears (PAL 576 output, or an EFB-to-texture resample drawn
+		// back before the display copy) it can come back; gxEfbResPref and the
+		// Graphics/EfbHeight key still exist for it.
 #endif
 #else
 		FrontendOptionSetCursor(MENUPAGE_DISPLAY_SETTINGS, -3, false);

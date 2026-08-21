@@ -1775,8 +1775,19 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 		// user reported. Radio is wall-clock synced to within a page (a few
 		// tens of ms), which nobody can hear, and the page seek skips the
 		// decode-forward entirely.
-		if(ov_pcm_seek_page(&st->vf, want) == 0)
+		if(ov_pcm_seek_page(&st->vf, want) == 0){
 			st->posSamples = (uint32)ov_pcm_tell(&st->vf);
+			// THROW THE FIRST BLOCK AWAY. Vorbis reconstructs every block from
+			// the overlapped half of the one before it, and a raw page seek
+			// lands mid-stream with that half missing - so the first decode
+			// after one is a burst of noise, not audio. That burst is the white
+			// noise in the menu: the frontend plays the tuned station and starts
+			// it at a wall-clock position, so every restart played it, while the
+			// radio-select screen sounded clean because it starts from zero.
+			// One discarded chunk (84ms) costs nothing and the decoder is fully
+			// primed by the next one.
+			gcStreamDecode(st, st->buf[0]);
+		}
 	}
 	}
 	st->fill = 0;

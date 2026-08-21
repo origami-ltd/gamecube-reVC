@@ -160,7 +160,7 @@ def main(argv):
     left, right, rate = read_dump(dump)
     print(f"      {len(left)} frames at {rate}Hz, {len(left)/rate:.1f}s")
 
-    indices = [0, 1, 11, 19]                    # must match gAudioTestSfx
+    indices = [320, 321, 322, 323, 0, 11]       # menu blips first
     worst = 0.0
     for idx in indices:
         ref, ref_rate = reference(idx)
