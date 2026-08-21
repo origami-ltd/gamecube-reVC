@@ -603,9 +603,14 @@ psInstallFileSystem(void)
 		}
 		// The disc is the real GameCube medium (the asset set fits a 1.46GB
 		// mini-DVD). Probed after SD so the dev card still wins when present.
-		// ponytail: on real hardware with an EMPTY drive this probe blocks
-		// forever (startup() and isInserted() both block); if that setup ever
-		// matters, gate it on DVD_GetCoverStatus first.
+		//
+		// GameCube ONLY. This code's own comment has always warned that on real
+		// hardware with an empty drive the probe blocks forever - startup() and
+		// isInserted() both block - and a Wii booted from the Homebrew Channel
+		// reaches it whenever the SD and USB probes come up empty, with no disc
+		// in the drive and no reason to want one. Failing the mount and saying
+		// so beats hanging with a black screen.
+#ifndef HW_RVL
 		if(!fileSystemReady){
 			printf("mount: probing DVD (ISO9660)...\n");
 			{
@@ -621,8 +626,12 @@ psInstallFileSystem(void)
 				;
 			}
 		}
-		if(!fileSystemReady)
+#endif
+		if(!fileSystemReady){
+			printf("mount: no storage found. Put the game files in the ROOT of\n");
+			printf("       the SD card or a USB drive, formatted FAT32.\n");
 			return FALSE;
+		}
 	}
 	if(chdir("dvd:/") == 0){
 		// RESOLUTION pref: read for the menu row's sake only. The 528-line
