@@ -160,8 +160,21 @@ enum { GC_CH_RESAMPLE_CAP = 512*1024 };
 // ...but 29 channels must not each hold one, so conversions also draw on a
 // shared MEM1 budget. Past it a sound plays native rather than failing: the
 // DSP's stair-step is the graceful degradation, an allocation failure is not.
-enum { GC_CONV_BUDGET = 1536*1024 };
+enum { GC_CONV_BUDGET = 2048*1024 };
+// Anything bigger than this goes back to the pool the moment its sound is
+// done. Measured before this existed: 1051 of 1338 sounds could not be
+// converted because the pool was full of buffers belonging to sounds that
+// had already finished, so 79% of the game went through the DSP's
+// sample-repeat resampler - which is the robotic timbre, and in the menu it
+// is loud enough to read as noise.
+enum { GC_CONV_RECLAIM = 32*1024 };
 static uint32 gConvBytes;
+// How the conversion budget is actually doing, reported by the heartbeat.
+// A sound that cannot be converted plays through the DSP's sample-repeat
+// resampler, which measured 47x to 185x the reference's energy above the
+// source's Nyquist - that is the robotic timbre, so the fallback count is
+// the number that says how much of it is left.
+static uint32 gConvOk, gConvFallback, gConvPeak;
 
 static uint8 gEffectsVolume = 127, gMusicVolume = 127;
 static uint8 gEffectsFade = 127, gMusicFade = 127;
@@ -739,11 +752,15 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 			}
 			c->pcmBytes = outS*2;
 			c->pcm48 = TRUE;
+			gConvOk++;
+			if(gConvBytes > gConvPeak) gConvPeak = gConvBytes;
 		}else{
 			if(tail || srcSkew)
 				memmove(base, sp, rawBytes);
 			c->pcmBytes = align32(rawBytes);
 			c->pcm48 = FALSE;
+			if(baseFreq < GC_DSP_RATE)
+				gConvFallback++;   // this one will alias, and we know it
 		}
 	}else{
 		// Ped comments and player talk are copied, not pointed to: their
@@ -972,7 +989,7 @@ cSampleManager::StopChannel(uint32 nChannel)
 	c->used = FALSE;
 	// Hand a large buffer back to the pool. Small ones stay put: they are the
 	// common case and churning them would just fragment the arena.
-	if(c->pcmOwned && c->allocBytes > 64*1024){
+	if(c->pcmOwned && c->allocBytes > GC_CONV_RECLAIM){
 		gConvBytes -= c->allocBytes;
 		free(c->pcm);
 		c->pcm = nil;
@@ -1451,9 +1468,24 @@ cSampleManager::Service(void)
 	// Volume and pan can change while a sound is already playing - the pause
 	// menu drops the effects fade to zero, and without this refresh every
 	// effect that was already running kept blaring behind the menu.
-	for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++)
-		if(gChannels[i].playing)
-			gcApplyChannelVolume(&gChannels[i]);
+	for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++){
+		GcChannel *c = &gChannels[i];
+		if(c->playing){
+			gcApplyChannelVolume(c);
+			continue;
+		}
+		// Finished, and nobody asked for it to stop: the voice callback
+		// cleared 'playing'. Give its buffer back so the next sound can be
+		// converted instead of falling through to the DSP's resampler.
+		if(!c->used && c->pcmOwned && c->allocBytes > GC_CONV_RECLAIM){
+			gConvBytes -= c->allocBytes;
+			free(c->pcm);
+			c->pcm = nil;
+			c->pcmBytes = 0;
+			c->allocBytes = 0;
+			c->pcmOwned = FALSE;
+		}
+	}
 	for(int32 i = 0; i < MAX_STREAMS; i++)
 		gcStreamPump(&gStreams[i]);
 	gxAudioUs = (unsigned)ticks_to_microsecs(gettime() - t0);
@@ -1483,9 +1515,12 @@ cSampleManager::Service(void)
 			DVD_FS_GUARD;
 			FILE *al = fopen("dvd:/audio.log", "a");
 			if(al){
-				fprintf(al, "AHB ch=%d/%d%s vol=%u/%u\n",
+				fprintf(al, "AHB ch=%d/%d%s vol=%u/%u conv=%u/%u pool=%uK/%uK\n",
 				    playing, used, sline,
-				    (unsigned)gEffectsVolume, (unsigned)gMusicVolume);
+				    (unsigned)gEffectsVolume, (unsigned)gMusicVolume,
+				    (unsigned)gConvOk, (unsigned)(gConvOk + gConvFallback),
+				    (unsigned)(gConvPeak/1024),
+				    (unsigned)(GC_CONV_BUDGET/1024));
 				fclose(al);
 			}
 		}
