@@ -183,6 +183,35 @@ static uint32 gConvBytes;
 // the number that says how much of it is left.
 static uint32 gConvOk, gConvFallback, gConvPeak;
 
+// Routine logging goes to the card ONLY when dvd:/autolog.txt exists.
+//
+// On Dolphin the card is a file on an SSD and these writes are free. On a
+// real Wii they are not: every line is a FAT directory walk, a write and a
+// flush on slow media, holding the same lock the streamer needs, against a
+// log file that only grows. The user's hang.log showed the main thread stuck
+// on ONE frame for about two minutes with the GP idle - blocked on I/O, not
+// crashed - and this is the most likely thing blocking it. main.cpp has had
+// the same gate (gLogToSd) for its own logs for a while; the audio backend
+// was still writing unconditionally.
+static bool8
+gcCardLogEnabled(void)
+{
+	extern bool gLogToSd;
+	return gLogToSd ? TRUE : FALSE;
+}
+
+// The menu highlight is a 1.14-second stereo pair authored at 8.1kHz. Rapid
+// navigation overlaps many copies; converting every voice separately costs
+// about 220KB per move and used to fill the 2MB pool after ten moves. The PCM
+// is immutable, so all voices can read one converted left/right pair.
+struct GcSharedPcm {
+	void   *pcm;
+	uint32 bytes;
+	uint32 allocBytes;
+	uint32 freq;
+};
+static GcSharedPcm gHighlightPcm[2];
+
 static uint8 gEffectsVolume = 127, gMusicVolume = 127;
 static uint8 gEffectsFade = 127, gMusicFade = 127;
 
@@ -372,6 +401,13 @@ cSampleManager::Terminate(void)
 		gChannels[i].allocBytes = 0;
 		gChannels[i].pcmOwned = FALSE;
 	}
+	for(uint32 i = 0; i < ARRAY_SIZE(gHighlightPcm); i++){
+		if(gHighlightPcm[i].pcm){
+			gConvBytes -= gHighlightPcm[i].allocBytes;
+			free(gHighlightPcm[i].pcm);
+		}
+		memset(&gHighlightPcm[i], 0, sizeof(gHighlightPcm[i]));
+	}
 	// Streams too: a later Initialise re-runs AESND_Init and a held voice
 	// pointer from this life would dangle.
 	gcStreamsShutdown();
@@ -477,7 +513,7 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 			snprintf(bl, sizeof(bl), "BANK %s %uK aram addr=%08x\n",
 			    addr ? "ok" : "FAIL", (unsigned)(bytes/1024), (unsigned)addr);
 #endif
-			FILE *al = fopen("dvd:/audio.log", "a");
+			FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
 			if(al){ fputs(bl, al); fclose(al); }
 		}
 		if(addr == 0){
@@ -690,6 +726,19 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 	uint32 srcAddr = 0;
 	const uint8 *memSrc = nil;
 	char d[64];
+	GcSharedPcm *shared = nSfx == SFX_FE_HIGHLIGHT_LEFT ?
+	    &gHighlightPcm[0] : nSfx == SFX_FE_HIGHLIGHT_RIGHT ?
+	    &gHighlightPcm[1] : nil;
+
+	if(shared && shared->pcm && shared->freq == targetFreq){
+		gcDiscardChannelPcm(c);
+		c->pcm = shared->pcm;
+		c->pcmBytes = shared->bytes;
+		c->pcm48 = TRUE;
+		c->pcmFreq = targetFreq;
+		gConvOk++;
+		return TRUE;
+	}
 
 	if(nSfx < SAMPLEBANK_PED_START){
 		srcAddr = gBankSampleAddr[nSfx];
@@ -773,6 +822,15 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 		c->pcmFreq = targetFreq;
 		gConvOk++;
 		if(gConvBytes > gConvPeak) gConvPeak = gConvBytes;
+		if(shared && shared->pcm == nil){
+			shared->pcm = c->pcm;
+			shared->bytes = c->pcmBytes;
+			shared->allocBytes = c->allocBytes;
+			shared->freq = targetFreq;
+			DCFlushRange(shared->pcm, shared->bytes);
+			c->pcmOwned = FALSE; // cache owns it; voices only borrow it
+			c->allocBytes = 0;
+		}
 	}else{
 		if(tail || srcSkew)
 			memmove(base, sp, rawBytes);
@@ -1027,13 +1085,15 @@ cSampleManager::StartChannel(uint32 nChannel)
 	AESND_SetVoiceBuffer(c->voice, bufStart, bufBytes);
 	// TEMP diagnostic (remove at bring-up close): what actually starts, so a
 	// doubled sound shows up as the same sfx twice instead of being argued
-	// about. Bounded, card only.
+	// about. Keep this focused on radio/frontend samples: an all-channel trace
+	// was exhausted by vehicle release sounds before the menu was opened.
 	{
-		static int32 left = 300;
-		if(left > 0){
+		static int32 left = 200;
+		if(left > 0 && c->sample >= SFX_RADIO_CLICK &&
+		   c->sample <= SFX_FE_NOISE_BURST_3){
 			left--;
 			DVD_FS_GUARD;
-			FILE *sl = fopen("dvd:/chan.log", "a");
+			FILE *sl = gcCardLogEnabled() ? fopen("dvd:/chan.log", "a") : nil;
 			if(sl){
 				fprintf(sl, "CH %u sfx=%u b=%u f=%u v%u p%u l%u c48=%d t=%u\n",
 				    (unsigned)nChannel, (unsigned)c->sample,
@@ -1690,7 +1750,7 @@ cSampleManager::Service(void)
 			// visible half; the smashed heap (_calloc_r/__sflush_r deaths at
 			// 0xC) was the other.
 			DVD_FS_GUARD;
-			FILE *al = fopen("dvd:/audio.log", "a");
+			FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
 			if(al){
 				fprintf(al, "AHB ch=%d/%d%s vol=%u/%u conv=%u/%u pool=%uK/%uK/%uK\n",
 				    playing, used, sline,
@@ -1858,7 +1918,7 @@ gcStreamTrace(const char *what, uint8 nStream)
 		return;
 	GcStream *st = &gStreams[nStream];
 	DVD_FS_GUARD;
-	FILE *f = fopen("dvd:/audio.log", "a");
+	FILE *f = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
 	if(f){
 		fprintf(f, "MA s%u %-10s play=%d paused=%d file=%d rate=%u pos=%u/%u cb=%u starve=%u eof=%d t=%u\n",
 		    (unsigned)nStream, what, (int)st->playing, (int)st->paused,
@@ -1943,7 +2003,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	if(st->file == nil){
 		// A silent FALSE here is a silent GAME: cutscene speech and radio
 		// both die invisibly on a bad path. Card, not Gecko — Gecko drops it.
-		FILE *al = fopen("dvd:/audio.log", "a");
+		FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
 		if(al){ fprintf(al, "STRM OPEN-FAIL s%d %s\n", (int)nStream, path); fclose(al); }
 		gcAudioDie("stream-open", path);
 		return FALSE;
@@ -1951,7 +2011,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	{
 		struct mallinfo smi = mallinfo();
 		unsigned openMs = (unsigned)ticks_to_millisecs(gettime() - tOpen);
-		FILE *al = fopen("dvd:/audio.log", "a");
+		FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
 		if(al){ fprintf(al, "STRM ok s%d %s pos=%u free=%uK open=%ums\n",
 		    (int)nStream, path, (unsigned)nPos,
 		    (unsigned)smi.fordblks/1024, openMs); fclose(al); }
@@ -2077,7 +2137,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	if(!st->bufReady && st->posSamples == 0){
 		// Nothing decoded. Say so rather than let silence pass for success.
 		DVD_FS_GUARD;
-		FILE *al = fopen("dvd:/audio.log", "a");
+		FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
 		if(al){ fprintf(al, "STRM PRIME-EMPTY s%d %s\n", (int)nStream, path); fclose(al); }
 	}
 	return TRUE;
