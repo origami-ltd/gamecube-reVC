@@ -100,6 +100,8 @@ struct GcChannel {
 	f32      distMax, distMin;   // rolloff window, from the game
 	bool8    has3D;              // a position was given for this play
 	uint32   loopCount;
+	uint32   loopStart;  // in source samples; the engine sustain lives here
+	int32    loopEnd;    // -1 = to the end of the sample
 	bool8    used;
 	volatile bool8 playing;   // cleared by the AESND callback when the buffer ends
 };
@@ -859,9 +861,12 @@ cSampleManager::SetChannelLoopCount(uint32 nChannel, uint32 nLoopCount)
 void
 cSampleManager::SetChannelLoopPoints(uint32 nChannel, uint32 nLoopStart, int32 nLoopEnd)
 {
-	(void)nChannel; (void)nLoopStart; (void)nLoopEnd;
-	// AESND loops whole buffers only. Sub-buffer loop points would need the
-	// sample trimmed to them at DMA time; left until something audibly needs it.
+	if(nChannel >= ARRAY_SIZE(gChannels))
+		return;
+	// The game passes byte offsets; the OAL backend divides by the sample
+	// size for the same reason (DIGITALBITS/8).
+	gChannels[nChannel].loopStart = nLoopStart/2;
+	gChannels[nChannel].loopEnd = nLoopEnd < 0 ? -1 : nLoopEnd/2;
 }
 
 bool8
@@ -951,8 +956,42 @@ cSampleManager::StartChannel(uint32 nChannel)
 		voiceFreq = GC_DSP_RATE_F*(f32)c->freq /
 		            (f32)gSampleIndex[c->sample].nFrequency;
 	AESND_SetVoiceFrequency(c->voice, voiceFreq);
-	AESND_SetVoiceLoop(c->voice, c->loopCount != 1);
-	AESND_SetVoiceBuffer(c->voice, c->pcm, c->pcmBytes);
+	bool8 looping = c->loopCount != 1;
+	AESND_SetVoiceLoop(c->voice, looping);
+
+	// AESND loops whole buffers, so a sub-buffer loop is expressed by handing
+	// it only that part of the buffer. Without this the bike engine looped its
+	// attack along with its sustain and restarted from the top every cycle -
+	// the user heard it as the engine never looping at all.
+	uint8 *bufStart = (uint8*)c->pcm;
+	uint32 bufBytes = c->pcmBytes;
+	if(looping && (c->loopStart > 0 || c->loopEnd > 0)){
+		uint32 s = c->loopStart;
+		uint32 e = c->loopEnd > 0 ? (uint32)c->loopEnd : 0;
+		// The buffer may have been converted to the DSP's rate, so the loop
+		// points - which the game gives against the sample's own rate - move
+		// with it.
+		if(c->pcm48 && c->sample < SAMPLEBANK_PED_START &&
+		   gSampleIndex && gSampleIndex[c->sample].nFrequency){
+			uint32 f = gSampleIndex[c->sample].nFrequency;
+			s = (uint32)((uint64)s*GC_DSP_RATE/f);
+			if(e) e = (uint32)((uint64)e*GC_DSP_RATE/f);
+		}
+		uint32 total = c->pcmBytes/2;
+		if(e == 0 || e > total) e = total;
+		if(s < e){
+			bufStart = (uint8*)c->pcm + (align32(s*2) & ~31u);
+			uint32 span = (e - s)*2;
+			uint32 avail = c->pcmBytes - (uint32)(bufStart - (uint8*)c->pcm);
+			bufBytes = span > avail ? avail : span;
+			bufBytes &= ~31u;          // AESND wants a 32-byte multiple
+			if(bufBytes == 0){
+				bufStart = (uint8*)c->pcm;
+				bufBytes = c->pcmBytes;
+			}
+		}
+	}
+	AESND_SetVoiceBuffer(c->voice, bufStart, bufBytes);
 	// TEMP diagnostic (remove at bring-up close): what actually starts, so a
 	// doubled sound shows up as the same sfx twice instead of being argued
 	// about. Bounded, card only.
@@ -1665,11 +1704,38 @@ cSampleManager::SetChannel3DDistances(uint32 nChannel, float fMax, float fMin)
 // Cutscene speech arrives through this pair: MusicManager preloads the track
 // while the scene sets up, then releases it on the first frame. Open-paused is
 // exactly that.
+// TEMP (remove at bring-up close): the mission-audio slots, 1 and 2, are
+// where cutscene speech lives, and the game gives a stream 30 frames to
+// report itself playing before it writes the line off as finished and moves
+// to the next one. This records every transition on those slots so the
+// reason a line is skipped is a log line rather than an argument.
+static void
+gcStreamTrace(const char *what, uint8 nStream)
+{
+	if(nStream == 0 || nStream >= MAX_STREAMS)
+		return;                       // slot 0 is music, not speech
+	static int32 left = 120;
+	if(left-- <= 0)
+		return;
+	GcStream *st = &gStreams[nStream];
+	DVD_FS_GUARD;
+	FILE *f = fopen("dvd:/audio.log", "a");
+	if(f){
+		fprintf(f, "MA s%u %-10s play=%d paused=%d file=%d rate=%u pos=%u/%u t=%u\n",
+		    (unsigned)nStream, what, (int)st->playing, (int)st->paused,
+		    st->file != nil, (unsigned)st->rate,
+		    (unsigned)st->posSamples, (unsigned)st->lenSamples,
+		    (unsigned)ticks_to_millisecs(gettime()));
+		fclose(f);
+	}
+}
+
 void
 cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 {
 	if(StartStreamedFile(nFile, 0, nStream))
 		PauseStream(TRUE, nStream);
+	gcStreamTrace("preload", nStream);
 }
 
 void
@@ -1687,6 +1753,7 @@ void
 cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 {
 	PauseStream(FALSE, nStream);
+	gcStreamTrace("start", nStream);
 }
 
 bool8
@@ -1902,6 +1969,15 @@ cSampleManager::GetStreamedFileLength(uint8 nStream)
 bool8
 cSampleManager::IsStreamPlaying(uint8 nStream)
 {
+	// One trace of the first few answers on a speech slot: this is the reply
+	// the mission-audio state machine acts on.
+	if(nStream != 0 && nStream < MAX_STREAMS){
+		static int32 seen[MAX_STREAMS];
+		if(seen[nStream] < 6){
+			seen[nStream]++;
+			gcStreamTrace("isplaying?", nStream);
+		}
+	}
 	// OAL parity: a paused stream reads as NOT playing (CStream::IsPlaying
 	// returns false under m_bPaused). MusicManager's mode-change handshake
 	// depends on it — reading TRUE here made Service stop a preloaded
