@@ -176,6 +176,109 @@ static uint8  gCurrentPedSlot;
 static uint8 *gPlayerTalkData;
 static uint32 gPlayerTalkSfx = 0xFFFFFFFF;
 
+static inline uint32
+align32(uint32 v)
+{
+	return (v + 31) & ~31u;
+}
+
+// ------------------------------------------------------- packed sample bank
+//
+// sfx.raw is 340MB of raw PCM against a 1.46GB disc, so the samples ship
+// packed: tools/gamecube/pack_sfx.py encodes each one to Vorbis and keeps
+// whichever is smaller, because a Vorbis stream carries three header packets
+// however short the payload - a 1400-byte effect encodes to 3817 bytes,
+// while the long ped speech that makes up the bulk comes out 4x to 7x
+// smaller. sfx.idx records which is which. If the pack is absent the old
+// sfx.raw path still works, so a card that has not been rebuilt still boots.
+struct GcSfxEntry {
+	uint32 offset;
+	uint32 size;
+	uint32 flags;      // 1 = Vorbis, 0 = raw little-endian PCM
+};
+enum { GC_SFX_VORBIS = 1 };
+static GcSfxEntry *gSfxPak;
+
+// Tremor reading out of a memory buffer: the payload is already in RAM and
+// seeking a file per sample at boot would be a thousand disc trips.
+struct GcMemSrc { const uint8 *data; uint32 size; uint32 pos; };
+
+static size_t
+gcMemRead(void *ptr, size_t size, size_t nmemb, void *src)
+{
+	GcMemSrc *m = (GcMemSrc*)src;
+	uint32 want = (uint32)(size*nmemb);
+	if(want > m->size - m->pos)
+		want = m->size - m->pos;
+	memcpy(ptr, m->data + m->pos, want);
+	m->pos += want;
+	return size ? want/size : 0;
+}
+
+static int
+gcMemSeek(void *src, ogg_int64_t off, int whence)
+{
+	GcMemSrc *m = (GcMemSrc*)src;
+	ogg_int64_t at = whence == SEEK_CUR ? (ogg_int64_t)m->pos + off :
+	                 whence == SEEK_END ? (ogg_int64_t)m->size + off : off;
+	if(at < 0 || at > (ogg_int64_t)m->size)
+		return -1;
+	m->pos = (uint32)at;
+	return 0;
+}
+
+static int gcMemClose(void *) { return 0; }
+static long gcMemTell(void *src) { return (long)((GcMemSrc*)src)->pos; }
+static ov_callbacks gcMemCallbacks = {
+	gcMemRead, gcMemSeek, gcMemClose, gcMemTell
+};
+
+// Decode one packed sample into dst as host-endian (big-endian) 16-bit PCM,
+// which is what the DSP reads. Returns bytes produced, 0 on failure.
+static uint32
+gcDecodeSample(const uint8 *payload, uint32 payloadBytes, uint32 flags,
+               uint8 *dst, uint32 dstCap)
+{
+	if(!(flags & GC_SFX_VORBIS)){
+		// Raw PCM, little-endian on disc like sfx.raw itself.
+		uint32 n = payloadBytes > dstCap ? dstCap : payloadBytes;
+		for(uint32 b = 0; b + 1 < n; b += 2){
+			dst[b]   = payload[b+1];
+			dst[b+1] = payload[b];
+		}
+		return n & ~1u;
+	}
+	GcMemSrc src = { payload, payloadBytes, 0 };
+	OggVorbis_File vf;
+	if(ov_open_callbacks(&src, &vf, nil, 0, gcMemCallbacks) < 0)
+		return 0;
+	uint32 done = 0;
+	for(;;){
+		int bitstream = 0;
+		long got = ov_read(&vf, (char*)dst + done, (int)(dstCap - done), &bitstream);
+		if(got <= 0)
+			break;
+		done += (uint32)got;
+		if(done >= dstCap)
+			break;
+	}
+	ov_clear(&vf);
+	return done;
+}
+
+// Pull one sample's payload off the disc. The caller owns both buffers.
+static bool8
+gcReadPayload(FILE *pak, uint32 nSfx, uint8 *payload, uint32 payloadCap)
+{
+	if(gSfxPak == nil || pak == nil)
+		return FALSE;
+	GcSfxEntry *e = &gSfxPak[nSfx];
+	if(e->size == 0 || e->size > payloadCap)
+		return FALSE;
+	return fseek(pak, (long)e->offset, SEEK_SET) == 0 &&
+	       fread(payload, 1, e->size, pak) == e->size;
+}
+
 // One read shared by ped comments and player talk: sample bytes from
 // sfx.raw into dst, byteswapped to the DSP's big-endian.
 static bool8
@@ -189,12 +292,36 @@ gcReadSample(uint32 nSfx, uint8 *dst)
 		return FALSE;
 	}
 	DVD_FS_GUARD;
+	uint32 size = gSampleIndex[nSfx].nSize;
+
+	// Packed bank: read the payload and decode it (Vorbis or raw) straight
+	// into the caller's slot.
+	if(gSfxPak){
+		FILE *pk = fopen("dvd:/audio/sfx.pak", "rb");
+		if(pk){
+			uint32 payBytes = gSfxPak[nSfx].size;
+			uint8 *pay = (uint8*)memalign(32, align32(payBytes ? payBytes : 32));
+			bool8 got = pay && gcReadPayload(pk, nSfx, pay, payBytes);
+			fclose(pk);
+			if(got){
+				uint32 n = gcDecodeSample(pay, payBytes, gSfxPak[nSfx].flags,
+				    dst, PED_BLOCKSIZE);
+				free(pay);
+				if(n)
+					return TRUE;
+			}else
+				free(pay);
+		}
+		snprintf(d, sizeof(d), "sfx=%u", (unsigned)nSfx);
+		gcAudioDie("pak-sample-read", d);
+		return FALSE;
+	}
+
 	FILE *f = fopen("dvd:/audio/sfx.raw", "rb");
 	if(f == nil){
 		gcAudioDie("sfx.raw-open", nil);
 		return FALSE;
 	}
-	uint32 size = gSampleIndex[nSfx].nSize;
 	bool8 ok = fseek(f, (long)gSampleIndex[nSfx].nOffset, SEEK_SET) == 0 &&
 	    fread(dst, 1, size, f) == size;
 	fclose(f);
@@ -207,12 +334,6 @@ gcReadSample(uint32 nSfx, uint8 *dst)
 			uint8 t = dst[b]; dst[b] = dst[b+1]; dst[b+1] = t;
 		}
 	return ok;
-}
-
-static inline uint32
-align32(uint32 v)
-{
-	return (v + 31) & ~31u;
 }
 
 // The bank lives in audio memory: ARAM on the GameCube, MEM2 standing in on
@@ -397,6 +518,31 @@ cSampleManager::InitialiseSampleBanks(void)
 			w[j] = __builtin_bswap32(w[j]);
 	}
 
+	// The packed bank's index, if the card carries one. Absent is fine: the
+	// sfx.raw paths below stay as the fallback.
+	{
+		FILE *ix = fopen("dvd:/audio/sfx.idx", "rb");
+		if(ix){
+			fseek(ix, 0, SEEK_END);
+			long ilen = ftell(ix);
+			fseek(ix, 0, SEEK_SET);
+			uint32 n = (uint32)(ilen/sizeof(GcSfxEntry));
+			if(n >= gNumSamples){
+				gSfxPak = (GcSfxEntry*)malloc(gNumSamples*sizeof(GcSfxEntry));
+				if(gSfxPak &&
+				   fread(gSfxPak, sizeof(GcSfxEntry), gNumSamples, ix) != gNumSamples){
+					free(gSfxPak);
+					gSfxPak = nil;
+				}
+				// The index ships big-endian, so it needs no swap here.
+			}
+			fclose(ix);
+		}
+		char il[64];
+		snprintf(il, sizeof(il), "SFXPAK %s", gSfxPak ? "loaded" : "absent (raw fallback)");
+		GeckoLog(il);
+	}
+
 	BankStartOffset[SFX_BANK_0] = 0;
 	return TRUE;
 }
@@ -468,9 +614,58 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 
 	DVD_FS_GUARD;
 
+	// PACKED BANK: decode each sample into audio memory at the address its
+	// original file offset gives it, so the ARAM layout is exactly what it was
+	// when this streamed raw PCM - only the source changed. Falls back to
+	// sfx.raw whenever the card has no pack.
+	if(gSfxPak){
+		uint32 maxDec = 0, maxPay = 0;
+		for(uint32 i = first; i < last; i++){
+			if(gSampleIndex[i].nSize > maxDec) maxDec = gSampleIndex[i].nSize;
+			if(gSfxPak[i].size > maxPay)      maxPay = gSfxPak[i].size;
+		}
+		uint8 *dec = (uint8*)memalign(32, align32(maxDec ? maxDec : 32));
+		uint8 *pay = (uint8*)memalign(32, align32(maxPay ? maxPay : 32));
+		FILE *pk = fopen("dvd:/audio/sfx.pak", "rb");
+		if(dec == nil || pay == nil || pk == nil){
+			free(dec); free(pay);
+			if(pk) fclose(pk);
+			GeckoLog("audio: sfx.pak open/alloc failed");
+			return FALSE;
+		}
+		uint32 madeVorbis = 0;
+		for(uint32 i = first; i < last; i++){
+			uint32 want = gSampleIndex[i].nSize;
+			if(want == 0)
+				continue;
+			if(!gcReadPayload(pk, i, pay, gSfxPak[i].size))
+				continue;
+			uint32 n = gcDecodeSample(pay, gSfxPak[i].size, gSfxPak[i].flags,
+			    dec, align32(maxDec));
+			if(n == 0)
+				continue;
+			if(gSfxPak[i].flags & GC_SFX_VORBIS)
+				madeVorbis++;
+			// A short decode leaves the tail as whatever the buffer held;
+			// silence it rather than DMA garbage into the bank.
+			if(n < align32(want))
+				memset(dec + n, 0, align32(want) - n);
+			gcBankWrite(addr + (gSampleIndex[i].nOffset - byteStart),
+			    dec, align32(want));
+		}
+		fclose(pk);
+		free(dec);
+		free(pay);
+		{
+			char bl[80];
+			snprintf(bl, sizeof(bl), "BANKPAK %u samples, %u vorbis",
+			    (unsigned)(last - first), (unsigned)madeVorbis);
+			GeckoLog(bl);
+		}
+	}else{
 	// ONE PATH, BOTH TARGETS: stream the bank's contiguous run of sfx.raw
 	// through a small staging buffer into audio memory, byteswapping as it
-	// goes. The staging buffer is one transfer, not the whole bank — the
+	// goes. The staging buffer is one transfer, not the whole bank - the
 	// entire point of ARAM is that 14.3MB never has to sit in MEM1.
 	enum { STAGE = 64*1024 };
 	uint8 *stage = (uint8*)memalign(32, STAGE);
@@ -483,9 +678,6 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 		size_t got = fread(stage, 1, chunk, raw);
 		if(got == 0)
 			break;
-		// sfx.raw is the PC file: 16-bit little-endian PCM. The DSP reads
-		// big-endian; unswapped it plays as metallic noise (user-confirmed).
-		// One swap here at load covers every later per-sample DMA.
 		for(uint32 b = 0; b + 1 < (uint32)got; b += 2){
 			uint8 t = stage[b]; stage[b] = stage[b+1]; stage[b+1] = t;
 		}
@@ -494,6 +686,7 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 	}
 	fclose(raw);
 	free(stage);
+	}
 
 	// The run is contiguous, so a sample's address is its file offset
 	// rebased onto the bank.
