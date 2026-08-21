@@ -48,11 +48,17 @@
 
 void GeckoLog(const char *msg);
 
-// Fail-loud audio (user directive): any sound that cannot be served crashes
-// the game on the spot, with the reason on the card first. A silent miss
-// hides in a play session; a red screen with "FATAL-AUDIO" does not.
-// Single switch — comment out to ship.
-#define AUDIO_FAIL_LOUD
+// Fail-loud audio: any sound that cannot be served stops the game on the
+// spot, with the reason on the card first. That was the right trade while
+// hunting the mute - a silent miss hides in a play session, a park screen
+// naming the failure does not.
+//
+// OFF for shipping and for real hardware. On a Wii it turned a missing sound
+// into a dead console at the end of a load, which tells the player nothing
+// and costs them the session. Audio that cannot be served is now a line on
+// the gecko and silence in that one channel; the game keeps running.
+// Re-enable it when hunting an audio bug, not otherwise.
+//#define AUDIO_FAIL_LOUD
 
 #ifdef AUDIO_FAIL_LOUD
 static void
@@ -73,7 +79,16 @@ gcAudioDie(const char *what, const char *detail)
 	gcFatalPark("FATAL-AUDIO", line);
 }
 #else
-#define gcAudioDie(what, detail) ((void)0)
+// Quiet, but not silent: the reason still goes out over the gecko, which
+// costs nothing and touches no filesystem. Losing the diagnostic entirely
+// was the other half of the old trade and it is not worth keeping.
+static void
+gcAudioDie(const char *what, const char *detail)
+{
+	char line[200];
+	snprintf(line, sizeof(line), "audio-miss %s %s", what, detail ? detail : "");
+	GeckoLog(line);
+}
 #endif
 
 cSampleManager SampleManager;
