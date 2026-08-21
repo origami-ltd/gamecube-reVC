@@ -40,6 +40,19 @@ struct myFILE
 #define NUMFILES 20
 static myFILE myfiles[NUMFILES];
 
+// myfopen reports failure as 0 - no free slot, or the file simply is not there.
+// Slot 0 is never handed out, so its FILE* is permanently nil and every wrapper
+// below would dereference it. The PC original's callers test the handle against
+// -1, which is the wrong sentinel and lets 0 straight through; a single missing
+// file then became a nil fseek deep inside newlib (_fseeko_r, invalid read at
+// 0x6c) instead of the graceful "file not found" branch the caller had written.
+// One check here covers all fifty-odd call sites.
+static bool
+myfvalid(int fd)
+{
+	return fd > 0 && fd < NUMFILES && myfiles[fd].file != nil;
+}
+
 
 #if !defined(_WIN32)
 #include <dirent.h>
@@ -131,7 +144,8 @@ myfclose(int fd)
 	DVD_FS_GUARD;
 #endif
 	int ret;
-	assert(fd < NUMFILES);
+	if(!myfvalid(fd))
+		return EOF;
 	if(myfiles[fd].file){
 #ifdef GTA_OGC
 		// One transaction for the whole file.
@@ -154,6 +168,8 @@ static int
 myfgetc(int fd)
 {
 	int c;
+	if(!myfvalid(fd))
+		return EOF;
 	c = fgetc(myfiles[fd].file);
 	if(myfiles[fd].isText && c == 015){
 		/* translate CRLF to LF */
@@ -169,6 +185,8 @@ myfgetc(int fd)
 static int
 myfputc(int c, int fd)
 {
+	if(!myfvalid(fd))
+		return EOF;
 	/* translate LF to CRLF */
 	if(myfiles[fd].isText && c == 012)
 		fputc(015, myfiles[fd].file);
@@ -201,6 +219,8 @@ myfgets(char *buf, int len, int fd)
 static size_t
 myfread(void *buf, size_t elt, size_t n, int fd)
 {
+	if(!myfvalid(fd))
+		return 0;
 #ifdef GTA_OGC
 	DVD_FS_GUARD;
 #endif
@@ -243,6 +263,8 @@ myfread(void *buf, size_t elt, size_t n, int fd)
 static size_t
 myfwrite(void *buf, size_t elt, size_t n, int fd)
 {
+	if(!myfvalid(fd))
+		return 0;
 #ifdef GTA_OGC
 	DVD_FS_GUARD;
 #endif
@@ -267,6 +289,8 @@ myfwrite(void *buf, size_t elt, size_t n, int fd)
 static int
 myfseek(int fd, long offset, int whence)
 {
+	if(!myfvalid(fd))
+		return -1;
 #ifdef GTA_OGC
 	// A seek on a buffered writer would need the buffer to model file
 	// position; flush and fall back instead. Nothing on the write paths seeks,
@@ -288,12 +312,16 @@ myfseek(int fd, long offset, int whence)
 static long
 myftell(int fd)
 {
+	if(!myfvalid(fd))
+		return -1;
 	return ftell(myfiles[fd].file);
 }
 
 static int
 myfeof(int fd)
 {
+	if(!myfvalid(fd))
+		return 1;	// an unopened file is at its end, not readable forever
 	return feof(myfiles[fd].file);
 //	return ferror(myfiles[fd].file);
 }

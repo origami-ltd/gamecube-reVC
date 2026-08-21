@@ -189,7 +189,9 @@ ValidateVersion()
 	int32 file = CFileMgr::OpenFile("models\\coll\\peds.col", "rb");
 	char buff[128];
 
-	if ( file != -1 )
+	// OpenFile reports failure as 0, not -1 - the -1 here is inherited from the
+	// PC original and let a missing peds.col through into a nil seek.
+	if ( file )
 	{
 		CFileMgr::Seek(file, 100, SEEK_SET);
 		
@@ -210,8 +212,15 @@ ValidateVersion()
 		}
 	}
 
-	LoadingScreen("Invalid version", NULL, NULL);
-	
+	// Name what went wrong. This path parks the console forever, and "Invalid
+	// version" on its own sends you looking at the build when the real answer
+	// is usually an asset that never made it onto the card.
+	LoadingScreen("Invalid version",
+	    file ? "models/coll/peds.col unreadable" : "models/coll/peds.col MISSING",
+	    NULL);
+	if ( file )
+		CFileMgr::CloseFile(file);
+
 	while(true)
 	{
 		;
