@@ -7,6 +7,9 @@
 #include "Game.h"
 #include "Timer.h"
 #include "Frontend.h"
+#include "Camera.h"
+#include "DMAudio.h"
+#include "GenericGameStorage.h"
 #include "ControllerConfig.h"
 #include "FileMgr.h"
 #include "CdStream.h"
@@ -1038,12 +1041,33 @@ main(int, char *[])
 			LoadingScreen(nil, nil, "loadsc0");
 			FrontEndMenuManager.m_bGameNotLoaded = true;
 			FrontEndMenuManager.m_bStartUpFrontEndRequested = true;
+			// CMenuManager::Process refuses to do anything while the camera
+			// reports a fade in progress, and on a cold boot nothing can ever
+			// end that fade: DoFade only reaches ProcessFade inside
+			// if(StillToFadeOut), which only a save load sets, and it returns
+			// outright while the timer is paused. A fade left standing by the
+			// loading screen is therefore permanent, and the menu never opens.
+			// Hand the frontend a clean fade instead of trusting the state it
+			// inherits. Fade() with a zero timeout resolves fully in the one
+			// ProcessFade below, so this is exact, not a nudge.
+			TheCamera.SetFadeColour(0, 0, 0);
+			TheCamera.Fade(0.0f, FADE_IN);
+			TheCamera.ProcessFade();
 			gGameState = GS_FRONTEND;
 			break;
 
 		case GS_FRONTEND:
 			RsEventHandler(rsFRONTENDIDLE, nil);
-			if(!FrontEndMenuManager.m_bMenuActive || FrontEndMenuManager.m_bWantToLoad)
+			// m_bMenuActive is still false on the first iteration - Process()
+			// has to run once to raise it. Leaving on "not active" alone means
+			// any frame where Process() bails early (see the fade above) drops
+			// the frontend entirely and boots into the game with the menu
+			// never opened, which is exactly what the hang dump showed:
+			// state=9 GS_PLAYING_GAME, menu=0, running under an opaque splash.
+			// The pending request is the signal that the menu is still owed a
+			// chance; SwitchMenuOnAndOff clears it once it has acted.
+			if((!FrontEndMenuManager.m_bMenuActive && !FrontEndMenuManager.m_bStartUpFrontEndRequested)
+			    || FrontEndMenuManager.m_bWantToLoad)
 				gGameState = GS_INIT_PLAYING_GAME;
 			break;
 
@@ -1057,6 +1081,40 @@ main(int, char *[])
 
 		case GS_PLAYING_GAME:
 			RsEventHandler(rsIDLE, (void *)TRUE);
+			// Service the restart request. Idle() returns before ANY rendering
+			// while one is pending (main.cpp, right after DMAudio.Service) and
+			// expects the platform's game loop to act on it - win.cpp,
+			// glfw.cpp and sdl2.cpp all do, and this skeleton never did.
+			//
+			// DoSettingsBeforeStartingAGame raises m_bWantToRestart the moment
+			// you choose Start New Game, so from that frame on the loop ran
+			// audio, script and cutscenes but presented nothing: the screen
+			// kept whatever was last drawn - the loading splash - while the
+			// game played underneath it, which is exactly how this was
+			// reported. dvd:/autostart.txt hid it completely by jumping
+			// straight to GS_INIT_PLAYING_GAME, so the frontend never ran and
+			// the flag was never raised. That is why it reproduced on other
+			// people's cards and never on the one card that had the file.
+			if(FrontEndMenuManager.m_bWantToRestart || b_FoundRecentSavedGameWantToLoad){
+				if(b_FoundRecentSavedGameWantToLoad){
+					FrontEndMenuManager.m_bWantToRestart = true;
+					FrontEndMenuManager.m_bWantToLoad = true;
+				}
+				printf("restart requested: reinitialising game\n");
+				CPad::ResetCheats();
+				CPad::StopPadsShaking();
+				DMAudio.ChangeMusicMode(MUSICMODE_DISABLE);
+				CGame::ShutDownForRestart();
+				CTimer::Stop();
+				if(!CGame::InitialiseWhenRestarting()){
+					printf("FATAL: InitialiseWhenRestarting failed\n");
+					RsGlobal.quit = TRUE;
+					break;
+				}
+				DMAudio.ChangeMusicMode(MUSICMODE_GAME);
+				FrontEndMenuManager.m_bWantToRestart = false;
+				b_FoundRecentSavedGameWantToLoad = false;
+			}
 			break;
 		}
 
