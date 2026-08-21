@@ -1140,6 +1140,7 @@ struct GcStream {
 	int32    fill;          // which buffer the pump decodes into next
 	int32    play;          // which buffer the callback hands over next
 	volatile bool8 bufReady; // buf[play] holds a full decoded chunk
+	volatile bool8 eof;      // decoder is dry; the DSP still has chunks to play
 	volatile uint32 starved; // callback fired with nothing ready
 	volatile uint32 cbCount; // stream callbacks seen, cadence diagnostics
 	FILE    *file;
@@ -1177,6 +1178,11 @@ gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 		AESND_SetVoiceBuffer(pb, st->buf[st->play], STREAM_CHUNK_BYTES);
 		st->play ^= 1;
 		st->bufReady = FALSE;
+	}else if(st->eof){
+		// Everything decoded has now been handed over and played. This is the
+		// real end of the sound.
+		st->playing = FALSE;
+		AESND_SetVoiceStop(pb, true);
 	}else
 		st->starved++;
 }
@@ -1465,7 +1471,7 @@ gcStreamDecode(GcStream *st, uint8 *dst)
 static void
 gcStreamPump(GcStream *st)
 {
-	if(!st->playing || st->paused || st->bufReady || st->voice == nil)
+	if(!st->playing || st->paused || st->bufReady || st->eof || st->voice == nil)
 		return;
 	uint8 *dst = st->buf[st->fill];
 	if(dst == nil)
@@ -1475,8 +1481,13 @@ gcStreamPump(GcStream *st)
 	DVD_FS_GUARD;
 	uint32 got = gcStreamDecode(st, dst);
 	if(got == 0){
-		st->playing = FALSE;
-		AESND_SetVoiceStop(st->voice, true);
+		// The DECODER is dry, which is not the same as the SOUND being over:
+		// priming decodes two chunks before a line starts, and a short line of
+		// speech can be shorter than that, so stopping the voice here cut off
+		// audio that had been decoded but not yet played - heard as a click
+		// where the line should have been. Mark it and let the callback finish
+		// what it already has; it stops the voice when it runs out.
+		st->eof = TRUE;
 		// EOF at 90%+ of the samples is a track ending; EOF before that is a
 		// truncated or unreadable file — the "cutscene speech died mid-scene"
 		// class. Loud, with position and length on record.
@@ -1492,6 +1503,32 @@ gcStreamPump(GcStream *st)
 	DCFlushRange(dst, STREAM_CHUNK_BYTES);
 	st->fill ^= 1;
 	st->bufReady = TRUE;
+}
+
+// Hand the voice its stream and first chunk, and let it run.
+//
+// This has to be repeatable. A preloaded line is opened and primed and then
+// held; resuming it used to be AESND_SetVoiceStop(voice, false) alone, and
+// that does not re-arm a stream voice - traced on the intro, the slot read
+// as playing while its position sat frozen at the primed 16128 samples and
+// never advanced, so no callback ever came, no audio came out, and the
+// mission-audio state machine wrote the line off and moved to the next one.
+static void
+gcStreamArm(GcStream *st, uint8 nStream)
+{
+	(void)nStream;
+	if(st->voice == nil)
+		return;
+	AESND_SetVoiceStream(st->voice, true);
+	if(!st->bufReady)
+		gcStreamPump(st);
+	if(st->bufReady){
+		AESND_SetVoiceBuffer(st->voice, st->buf[st->play], STREAM_CHUNK_BYTES);
+		st->play ^= 1;
+		st->bufReady = FALSE;
+		gcStreamPump(st);        // the next chunk waits for the first callback
+	}
+	AESND_SetVoiceStop(st->voice, false);
 }
 
 void
@@ -1733,8 +1770,13 @@ gcStreamTrace(const char *what, uint8 nStream)
 void
 cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 {
-	if(StartStreamedFile(nFile, 0, nStream))
-		PauseStream(TRUE, nStream);
+	if(StartStreamedFile(nFile, 0, nStream)){
+		// Hold it: opened and primed, voice silent until the scene asks.
+		GcStream *st = &gStreams[nStream];
+		st->paused = TRUE;
+		if(st->voice)
+			AESND_SetVoiceStop(st->voice, true);
+	}
 	gcStreamTrace("preload", nStream);
 }
 
@@ -1752,7 +1794,12 @@ cSampleManager::PauseStream(bool8 nPauseFlag, uint8 nStream)
 void
 cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 {
-	PauseStream(FALSE, nStream);
+	if(nStream >= MAX_STREAMS)
+		return;
+	GcStream *st = &gStreams[nStream];
+	st->paused = FALSE;
+	// Re-arm rather than merely un-stop: see gcStreamArm.
+	gcStreamArm(st, nStream);
 	gcStreamTrace("start", nStream);
 }
 
@@ -1896,6 +1943,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	st->play = 0;
 	st->adpcmSpillBytes = 0;   // no carry from the previous line
 	st->bufReady = FALSE;
+	st->eof = FALSE;
 	st->starved = 0;
 	st->paused = FALSE;
 	st->playing = TRUE;
@@ -1910,20 +1958,13 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	// allocation being uninitialised, not from the ordering: the buffers are
 	// zeroed at allocation now, so the window between arming and the first
 	// chunk plays silence instead of whatever MEM1 held.
-	AESND_SetVoiceStream(st->voice, true);
-	gcStreamPump(st);
-	if(st->bufReady){
-		AESND_SetVoiceBuffer(st->voice, st->buf[st->play], STREAM_CHUNK_BYTES);
-		st->play ^= 1;
-		st->bufReady = FALSE;
-		gcStreamPump(st);        // second chunk waits for the first callback
-	}else{
+	gcStreamArm(st, nStream);
+	if(!st->bufReady && st->posSamples == 0){
 		// Nothing decoded. Say so rather than let silence pass for success.
 		DVD_FS_GUARD;
 		FILE *al = fopen("dvd:/audio.log", "a");
 		if(al){ fprintf(al, "STRM PRIME-EMPTY s%d %s\n", (int)nStream, path); fclose(al); }
 	}
-	AESND_SetVoiceStop(st->voice, false);
 	return TRUE;
 }
 
