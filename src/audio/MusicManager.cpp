@@ -22,6 +22,7 @@
 #include "GenericGameStorage.h"
 #ifdef GTA_OGC
 #include "CdStream.h"
+#include "Frontend.h"
 #endif
 
 #ifdef GTA_PS2
@@ -359,6 +360,21 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 			break;
 		case MUSICMODE_GAME:
 #ifdef GTA_OGC
+			// CCutsceneMgr::Update still finishes a cutscene while the user-pause
+			// menu is active. Its GAME request must not overwrite FRONTEND and
+			// start the car radio behind that menu. Closing the menu flips
+			// m_bMenuActive before UnloadTextures makes the legitimate GAME
+			// request, so resume remains unchanged.
+			if (FrontEndMenuManager.m_bMenuActive) {
+				DVD_FS_GUARD;
+				FILE *al = fopen("dvd:/audio.log", "a");
+				if (al) {
+					fprintf(al, "MMODE game-during-menu blocked ra=%p\n",
+					    __builtin_return_address(0));
+					fclose(al);
+				}
+				return;
+			}
 			// The frontend's deferred teardown now runs during cutscenes
 			// (CGame::Process no longer skips FrontEndMenuManager.Process),
 			// and its ChangeMusicMode(MUSICMODE_GAME) landed mid-intro:
@@ -1548,4 +1564,3 @@ cMusicManager::DisplayRadioStationName()
 	CFont::PrintString(SCREEN_WIDTH / 2, SCREEN_SCALE_Y(22.0f), pCurrentStation);
 	CFont::DrawFonts();
 }
-

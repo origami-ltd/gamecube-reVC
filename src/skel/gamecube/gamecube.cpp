@@ -397,11 +397,15 @@ gcFatalPark(const char *tag, const char *msg)
 		snprintf(line, sizeof(line), "reVC %s\n%s%s\nSTACK:%s", tag, msg, heap, stack);
 		GeckoLog(line);
 	}
-	// Dump delivered (crash.log + gecko + this screen). Power off so a
-	// batch-mode (-b) Dolphin closes itself instead of parking forever —
-	// user directive: the log and the exit, not the museum piece.
-	_CPU_ISR_Restore(level);
-	SYS_ResetSystem(SYS_POWEROFF, 0, 0);
+	// PARK, and never power off.
+	//
+	// This used to call SYS_ResetSystem(SYS_POWEROFF) so a batch-mode Dolphin
+	// would close itself instead of sitting on the screen forever. On a real
+	// Wii that turns the console OFF - the user watched it happen at the end
+	// of a load - and it takes the one thing worth having with it: this screen
+	// names the failure, and nobody can read it after the power goes. The
+	// dump is already in crash.log by now either way, but the screen is what
+	// gets read first.
 	for(;;)
 		;
 }

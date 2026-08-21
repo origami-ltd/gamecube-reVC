@@ -200,17 +200,18 @@ gcCardLogEnabled(void)
 	return gLogToSd ? TRUE : FALSE;
 }
 
-// The menu highlight is a 1.14-second stereo pair authored at 8.1kHz. Rapid
-// navigation overlaps many copies; converting every voice separately costs
-// about 220KB per move and used to fill the 2MB pool after ten moves. The PCM
-// is immutable, so all voices can read one converted left/right pair.
+// Frontend stereo pairs are unexpectedly long (the highlight alone is 1.14s
+// at 8.1kHz). Rapid navigation overlaps many copies; converting every voice
+// separately used to fill the 2MB pool after ten moves. The PCM is immutable,
+// so concurrent voices share one conversion per frontend sample. Service
+// releases it as soon as the last borrowing voice stops.
 struct GcSharedPcm {
 	void   *pcm;
 	uint32 bytes;
 	uint32 allocBytes;
 	uint32 freq;
 };
-static GcSharedPcm gHighlightPcm[2];
+static GcSharedPcm gFrontendPcm[SFX_FE_ERROR_RIGHT - SFX_INFO_LEFT + 1];
 
 static uint8 gEffectsVolume = 127, gMusicVolume = 127;
 static uint8 gEffectsFade = 127, gMusicFade = 127;
@@ -401,12 +402,12 @@ cSampleManager::Terminate(void)
 		gChannels[i].allocBytes = 0;
 		gChannels[i].pcmOwned = FALSE;
 	}
-	for(uint32 i = 0; i < ARRAY_SIZE(gHighlightPcm); i++){
-		if(gHighlightPcm[i].pcm){
-			gConvBytes -= gHighlightPcm[i].allocBytes;
-			free(gHighlightPcm[i].pcm);
+	for(uint32 i = 0; i < ARRAY_SIZE(gFrontendPcm); i++){
+		if(gFrontendPcm[i].pcm){
+			gConvBytes -= gFrontendPcm[i].allocBytes;
+			free(gFrontendPcm[i].pcm);
 		}
-		memset(&gHighlightPcm[i], 0, sizeof(gHighlightPcm[i]));
+		memset(&gFrontendPcm[i], 0, sizeof(gFrontendPcm[i]));
 	}
 	// Streams too: a later Initialise re-runs AESND_Init and a held voice
 	// pointer from this life would dangle.
@@ -685,6 +686,34 @@ gcDiscardChannelPcm(GcChannel *c)
 	c->pcmFreq = 0;
 }
 
+static void
+gcReleaseIdleFrontendPcm(void)
+{
+	for(uint32 i = 0; i < ARRAY_SIZE(gFrontendPcm); i++){
+		GcSharedPcm *shared = &gFrontendPcm[i];
+		if(shared->pcm == nil)
+			continue;
+		bool8 active = FALSE;
+		for(uint32 ch = 0; ch < ARRAY_SIZE(gChannels); ch++)
+			if(gChannels[ch].playing && gChannels[ch].pcm == shared->pcm){
+				active = TRUE;
+				break;
+			}
+		if(active)
+			continue;
+		for(uint32 ch = 0; ch < ARRAY_SIZE(gChannels); ch++)
+			if(gChannels[ch].pcm == shared->pcm){
+				gChannels[ch].pcm = nil;
+				gChannels[ch].pcmBytes = 0;
+				gChannels[ch].pcm48 = FALSE;
+				gChannels[ch].pcmFreq = 0;
+			}
+		gConvBytes -= shared->allocBytes;
+		free(shared->pcm);
+		memset(shared, 0, sizeof(*shared));
+	}
+}
+
 // A stopped voice cannot read its buffer again. Evict those cached copies
 // before accepting AESND's metallic native-rate fallback.
 static void
@@ -726,9 +755,8 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 	uint32 srcAddr = 0;
 	const uint8 *memSrc = nil;
 	char d[64];
-	GcSharedPcm *shared = nSfx == SFX_FE_HIGHLIGHT_LEFT ?
-	    &gHighlightPcm[0] : nSfx == SFX_FE_HIGHLIGHT_RIGHT ?
-	    &gHighlightPcm[1] : nil;
+	GcSharedPcm *shared = nSfx >= SFX_INFO_LEFT && nSfx <= SFX_FE_ERROR_RIGHT ?
+	    &gFrontendPcm[nSfx - SFX_INFO_LEFT] : nil;
 
 	if(shared && shared->pcm && shared->freq == targetFreq){
 		gcDiscardChannelPcm(c);
@@ -1723,6 +1751,7 @@ cSampleManager::Service(void)
 		if(c->pcmOwned && c->allocBytes > GC_CONV_RECLAIM)
 			gcDiscardChannelPcm(c);
 	}
+	gcReleaseIdleFrontendPcm();
 	for(int32 i = 0; i < MAX_STREAMS; i++)
 		gcStreamPump(&gStreams[i]);
 	gxAudioUs = (unsigned)ticks_to_microsecs(gettime() - t0);

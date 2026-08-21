@@ -111,15 +111,17 @@ def main():
             assert abs(out / dsp - n / f) <= 1 / dsp
     print("ok: requested pitch is baked into a 1:1 DSP-rate buffer")
 
-    # The 8.1kHz menu-highlight pair is 18,496 bytes per side. Ten rapid
-    # moves overlap twenty voices: private conversions exceed the 2MB pool,
-    # while one immutable L/R pair remains comfortably bounded.
+    # The menu highlight (8.1kHz, 18,496 bytes/side) and select sound
+    # (10.5kHz, 32,096 bytes/side) are long stereo pairs. Rapid input makes
+    # private conversions exceed the 2MB pool; shared L/R PCM stays bounded.
     budget = 2 * 1024 * 1024
     for dsp in DSPS:
-        one = align32((18496 // 2) * dsp // 8100 * 2) + 64
-        assert 10 * 2 * one > budget
-        assert 2 * one < budget // 8
-    print("ok: shared menu-highlight PCM stays bounded under rapid navigation")
+        highlight = align32((18496 // 2) * dsp // 8100 * 2) + 64
+        select = align32((32096 // 2) * dsp // 10500 * 2) + 64
+        assert 10 * 2 * highlight > budget
+        assert 8 * 2 * select > budget
+        assert 2 * (highlight + select) < budget // 2
+    print("ok: shared frontend PCM stays bounded under rapid navigation")
 
     for dsp in DSPS:
         for rate in (22050, 32000, 44100):
