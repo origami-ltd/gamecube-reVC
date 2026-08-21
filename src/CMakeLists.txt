@@ -40,7 +40,9 @@ if(NOT NINTENDO_OGC)
     target_link_libraries(${EXECUTABLE} PRIVATE Threads::Threads)
 else()
     target_link_libraries(${EXECUTABLE} PRIVATE fat iso9660)
-    target_link_options(${EXECUTABLE} PRIVATE -Wl,--gc-sections)
+    target_link_options(${EXECUTABLE} PRIVATE
+        -Wl,--gc-sections
+        -Wl,--wrap=__eabi)
     # The game never throws and never uses typeid or dynamic_cast, but the
     # build was paying for both anyway: __EH_FRAME_BEGIN__ measured 339KB, the
     # second largest object in the whole image behind ThePaths, and the section

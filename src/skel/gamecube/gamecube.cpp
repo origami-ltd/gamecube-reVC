@@ -13,6 +13,10 @@
 #include "ControllerConfig.h"
 #include "FileMgr.h"
 #include "CdStream.h"
+#include "PlayerPed.h"
+#include "PlayerInfo.h"
+#include "Pools.h"
+#include "CarCtrl.h"
 #ifdef EXTENDED_PIPELINES
 #include "custompipes.h"
 #endif
@@ -51,6 +55,22 @@ extern bool32 gxLightmapEnable;
 extern float gxLightmapBlend;
 } }
 
+// libogc enables external interrupts before the compiler-generated __eabi
+// call runs the C++ global constructors. A normal homebrew loader leaves the
+// hardware quiescent, but a disc apploader can hand us a pending interrupt;
+// servicing it halfway through the constructor table produced a nested ISI
+// before main() could install diagnostics. The linker wraps only __eabi, so
+// normal interrupt delivery resumes before the first user statement.
+extern "C" void __real___eabi(void);
+extern "C" void
+__wrap___eabi(void)
+{
+	u32 level;
+	_CPU_ISR_Disable(level);
+	__real___eabi();
+	_CPU_ISR_Restore(level);
+}
+
 long _dwOperatingSystemVersion = OS_WINXP;
 size_t _dwMemAvailPhys;
 RwUInt32 gGameState;
@@ -66,6 +86,120 @@ volatile uint32 gFrameTick;
 const char *gPhase = "boot";
 static lwp_t watchdogThread = LWP_THREAD_NULL;
 static volatile bool watchdogStop;
+static bool autoCarTestEnabled;
+static CVehicle *autoCarTestVehicle;
+static CVector autoCarProgressPos;
+static uint32 autoCarProgressTime;
+static uint8 autoCarRecoveryCount;
+
+// dvd:/autocar.txt is a test-only world-streaming driver.  Once normal
+// gameplay is live it puts Tommy in a real traffic car (or hands his current
+// car to the traffic AI), then lets the road graph drive at maximum cruise
+// speed.  This exercises vehicle gameplay and keeps crossing streaming cells
+// without pretending that holding the walk stick against a wall is a map
+// traversal test.
+static void
+autoCarTestTick(void)
+{
+	// The intro cutscene is still active around 125s. Entering its traffic car
+	// there made the cutscene reset the vehicle halfway through the test. Wait
+	// until normal world gameplay has settled.
+	if(!autoCarTestEnabled || CTimer::GetTimeInMillisecondsPauseMode() < 180000)
+		return;
+	uint32 now = CTimer::GetTimeInMillisecondsPauseMode();
+
+	CPlayerPed *player = FindPlayerPed();
+	if(player == nil)
+		return;
+
+	CVehicle *car = player->bInVehicle ? player->m_pMyVehicle : nil;
+	if(car == nil){
+		float best = 2500.0f;
+		for(int i = 0; i < CPools::GetVehiclePool()->GetSize(); i++){
+			CVehicle *candidate = CPools::GetVehiclePool()->GetSlot(i);
+			if(candidate == nil || !candidate->IsCar() || candidate->IsBike() ||
+			   candidate->pDriver == nil || candidate->m_fHealth <= 0.0f)
+				continue;
+			bool seat = false;
+			for(int s = 0; s < candidate->m_nNumMaxPassengers; s++)
+				seat |= candidate->pPassengers[s] == nil;
+			if(!seat)
+				continue;
+			float d = (candidate->GetPosition() - player->GetPosition()).MagnitudeSqr();
+			if(d < best){
+				best = d;
+				car = candidate;
+			}
+		}
+		if(car == nil)
+			return;
+
+		player->SetObjective(OBJECTIVE_ENTER_CAR_AS_PASSENGER, car);
+		player->WarpPedIntoCar(car);
+	}
+
+	if(car != autoCarTestVehicle){
+		autoCarTestVehicle = car;
+		CCarCtrl::JoinCarWithRoadSystem(car);
+		car->AutoPilot.m_nCarMission = MISSION_CRUISE;
+		car->AutoPilot.m_nTempAction = TEMPACT_NONE;
+		car->AutoPilot.m_nDrivingStyle = DRIVINGSTYLE_PLOUGH_THROUGH;
+		car->AutoPilot.m_nAntiReverseTimer = CTimer::GetTimeInMilliseconds();
+		car->SetStatus(STATUS_PHYSICS);
+		autoCarProgressPos = car->GetPosition();
+		autoCarProgressTime = now;
+		autoCarRecoveryCount = 0;
+	}
+	// Keep the regular traffic AI and only raise its target speed. Crucially,
+	// do not clear m_nTempAction or reset m_nAntiReverseTimer every frame: that
+	// was cancelling the AI's own reverse manoeuvre and pinning the first car
+	// against a wall.
+	car->AutoPilot.m_nCruiseSpeed = 60;
+	car->AutoPilot.m_fMaxTrafficSpeed = 60.0f;
+	car->bEngineOn = true;
+
+	// A physical traffic car can still wedge. Let its normal mission steering
+	// perform a bounded reverse, then rebuild its road-node route if two such
+	// attempts made no 25m progress. Both are existing CarAI actions; the test
+	// never teleports or writes a position.
+	if((car->GetPosition() - autoCarProgressPos).Magnitude2D() >= 25.0f){
+		autoCarProgressPos = car->GetPosition();
+		autoCarProgressTime = now;
+		autoCarRecoveryCount = 0;
+	}else if(now - autoCarProgressTime >= 10000){
+		autoCarProgressTime = now;
+		autoCarProgressPos = car->GetPosition();
+		if(autoCarRecoveryCount++ < 2){
+			car->AutoPilot.m_nTempAction = TEMPACT_REVERSE;
+			car->AutoPilot.m_nTimeTempAction = CTimer::GetTimeInMilliseconds() + 1500;
+		}else{
+			CCarCtrl::JoinCarWithRoadSystem(car);
+			car->AutoPilot.m_nTempAction = TEMPACT_GOFORWARD;
+			car->AutoPilot.m_nTimeTempAction = CTimer::GetTimeInMilliseconds() + 1500;
+			autoCarRecoveryCount = 0;
+		}
+	}
+
+	static uint32 lastLog;
+	if(now - lastLog > 5000){
+		lastLog = now;
+		char line[192];
+		snprintf(line, sizeof(line),
+		    "AUTOCAR t=%u x=%.1f y=%.1f speed=%.2f mission=%d temp=%d status=%d nodes=%d>%d",
+		    (unsigned)now, car->GetPosition().x, car->GetPosition().y,
+		    car->m_vecMoveSpeed.Magnitude(), (int)car->AutoPilot.m_nCarMission,
+		    (int)car->AutoPilot.m_nTempAction, (int)car->GetStatus(),
+		    car->AutoPilot.m_nCurrentRouteNode,
+		    car->AutoPilot.m_nNextRouteNode);
+		GeckoLog(line);
+		// The emulated Gecko is intentionally best-effort and Dolphin can drop
+		// the line. This test runs from a writable Wii SD, so preserve the
+		// traversal proof (position + speed) beside the streaming heartbeats.
+		DVD_FS_GUARD;
+		FILE *log = fopen("dvd:/autocar.log", "a");
+		if(log){ fprintf(log, "%s\n", line); fclose(log); }
+	}
+}
 
 static void*
 watchdogMain(void*)
@@ -176,10 +310,13 @@ watchdogMain(void*)
 			    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
 			    gxWaitRetrace, gxLastPath ? gxLastPath : "-", gxCamW, gxCamH,
 			    rdIdle, cmdIdle, overhi, underlow, brkpt);
-			FILE *hf = fopen("dvd:/hang.log", "a");
-			if(hf){
-				fprintf(hf, "%s\n", line);
-				fclose(hf);
+			if(CdStreamFsTryLock()){
+				FILE *hf = fopen("dvd:/hang.log", "a");
+				if(hf){
+					fprintf(hf, "%s\n", line);
+					fclose(hf);
+				}
+				CdStreamFsUnlock();
 			}
 		}
 	}
@@ -294,10 +431,14 @@ gcPanic(unsigned exid, PPCContext *ctx)
 	_CPU_ISR_Disable(level);
 	(void)level;
 
+	// Tuxedo exception IDs are sparse and start at one. Keeping this table
+	// indexed by the raw ID matters: the old compact table reported ISI (4)
+	// as "Interrupt", sending diagnosis toward the wrong hardware subsystem.
 	static const char *const names[] = {
-		"Reset", "MachineCheck", "DSI", "ISI", "Interrupt", "Alignment",
-		"Program", "FPU", "Decrementer", "Syscall", "Trace", "Performance",
-		"IABR"
+		"Unknown", "Reset", "MachineCheck", "DSI", "ISI", "Interrupt",
+		"Alignment", "Program", "FPU", "Decrementer", "Unknown", "Unknown",
+		"Syscall", "Trace", "Unknown", "Performance", "Unknown", "Unknown",
+		"Unknown", "IABR"
 	};
 
 	GX_AbortFrame();
@@ -379,11 +520,14 @@ gcFatalPark(const char *tag, const char *msg)
 	// wait briefly; if it never comes, skip the file. The maroon screen and
 	// gecko carry the report either way, and writing through contended
 	// libfat is how heap corruption starts — a poor way to report one.
-	FILE *f = fopen("dvd:/crash.log", "a");
-	if(f){
-		fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
-		    tag, __DATE__, __TIME__, msg, heap, stack);
-		fclose(f);
+	if(CdStreamFsTryLock()){
+		FILE *f = fopen("dvd:/crash.log", "a");
+		if(f){
+			fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
+			    tag, __DATE__, __TIME__, msg, heap, stack);
+			fclose(f);
+		}
+		CdStreamFsUnlock();
 	}
 
 	u32 level;
@@ -846,25 +990,9 @@ main(int, char *[])
 	}
 
 	if(!psInstallFileSystem()){
-		printf("FATAL: no filesystem (SD Gecko slot A/B or DVD)\n");
-		psHalt();
+		gcFatalPark("FILESYSTEM", "SD/USB/DVD mount failed\n");
 	}
 	printf("reVC GameCube: filesystem mounted (%s)\n", fileSystemIsFat ? "SD" : "DVD");
-#ifndef HW_RVL
-	// Memory-card write proof, one-shot, before any game code runs: a real
-	// CARD file through the mc:/ devoptab. The artifact is an mcprobe GCI on
-	// card A, checkable from the host even when the disc bring-up stalls
-	// later. Removed once a full settings save is demonstrable in-game.
-	if(GcCardMountDevice()){
-		FILE *mf = fopen("mc:/mcprobe.bin", "wb");
-		if(mf){
-			fputs("reVC mc probe", mf);
-			fclose(mf);
-			printf("mc: probe written\n");
-		}else
-			printf("mc: probe open FAILED\n");
-	}
-#endif
 	gcFlushCrashLog();
 
 	// Boot self-check: the game opens assets with Windows-style backslash
@@ -873,7 +1001,7 @@ main(int, char *[])
 	// the card as well as the console, since emulator logs are not reliable.
 	{
 		DVD_FS_GUARD;
-		FILE *log = fopen("dvd:/revc_boot.log", "w");
+		FILE *log = fileSystemIsFat ? fopen("dvd:/revc_boot.log", "w") : nil;
 		#define SELFTEST_LOG(...) do { \
 			printf(__VA_ARGS__); \
 			if(log) fprintf(log, __VA_ARGS__); \
@@ -918,17 +1046,12 @@ main(int, char *[])
 		#undef SELFTEST_LOG
 		if(log) fclose(log);
 
-		// Report only. The game owns the boot flow from here; DoRWStuff now
-		// tolerates a nil camera, so a bad read surfaces as the game's own
-		// loading/version screen instead of a pre-boot halt.
 		if(!ok)
-			printf("WARN: assets not readable yet; continuing to game boot\n");
+			gcFatalPark("ASSETS", "models/coll/peds.col is not readable\n");
 	}
 
 	if(RsEventHandler(rsINITIALIZE, nil) == rsEVENTERROR){
-		printf("FATAL: rsINITIALIZE failed\n");
-		psTerminate();
-		psHalt();
+		gcFatalPark("INITIALIZE", "rsINITIALIZE failed\n");
 	}
 
 	ControlsManager.MakeControllerActionsBlank();
@@ -944,10 +1067,7 @@ main(int, char *[])
 
 	// ponytail: RsRwInitialize only reads this as displayID; the console has none.
 	if(RsEventHandler(rsRWINITIALIZE, nil) == rsEVENTERROR){
-		printf("FATAL: rsRWINITIALIZE failed\n");
-		RsEventHandler(rsTERMINATE, nil);
-		psTerminate();
-		psHalt();
+		gcFatalPark("RENDERWARE", "rsRWINITIALIZE failed\n");
 	}
 
 	{
@@ -964,7 +1084,8 @@ main(int, char *[])
 
 	// Lowest priority: it must never take time from the game, and it only has
 	// to run when the game has stopped running.
-	LWP_CreateThread(&watchdogThread, watchdogMain, nil, nil, 16*1024, 127);
+	if(LWP_CreateThread(&watchdogThread, watchdogMain, nil, nil, 16*1024, 127) != 0)
+		gcFatalPark("WATCHDOG", "thread creation failed\n");
 
 	while(SYS_MainLoop() && !RsGlobal.quit){
 		// Named, because it sits between the frame's last marker and "loop":
@@ -1020,10 +1141,11 @@ main(int, char *[])
 			printf("GS_INIT_ONCE: CGame::InitialiseOnceAfterRW\n");
 			LoadingScreen(nil, nil, "loadsc0");
 			if(!CGame::InitialiseOnceAfterRW()){
-				printf("FATAL: InitialiseOnceAfterRW failed\n");
-				RsGlobal.quit = TRUE;
-				break;
+				gcFatalPark("GAME-INIT", "InitialiseOnceAfterRW failed\n");
 			}
+			if(!CPad::ValidateGameCubeCheats())
+				gcFatalPark("CHEATS", "54-code dispatcher self-test failed\n");
+			printf("CHEATS: 54/54 dispatcher self-test passed\n");
 			// Debug: dvd:/autostart.txt skips the frontend so crashes in world
 			// load reproduce with no controller input.
 			DVD_FS_GUARD;
@@ -1034,6 +1156,12 @@ main(int, char *[])
 				gGameState = GS_INIT_PLAYING_GAME;
 			}else
 				gGameState = GS_INIT_FRONTEND;
+			FILE *ac = fopen("dvd:/autocar.txt", "r");
+			if(ac){
+				fclose(ac);
+				autoCarTestEnabled = true;
+				printf("autocar.txt: traffic-AI traversal enabled\n");
+			}
 			break;
 		}
 
@@ -1081,6 +1209,7 @@ main(int, char *[])
 
 		case GS_PLAYING_GAME:
 			RsEventHandler(rsIDLE, (void *)TRUE);
+			autoCarTestTick();
 			// Service the restart request. Idle() returns before ANY rendering
 			// while one is pending (main.cpp, right after DMAudio.Service) and
 			// expects the platform's game loop to act on it - win.cpp,
@@ -1107,9 +1236,7 @@ main(int, char *[])
 				CGame::ShutDownForRestart();
 				CTimer::Stop();
 				if(!CGame::InitialiseWhenRestarting()){
-					printf("FATAL: InitialiseWhenRestarting failed\n");
-					RsGlobal.quit = TRUE;
-					break;
+					gcFatalPark("GAME-RESTART", "InitialiseWhenRestarting failed\n");
 				}
 				DMAudio.ChangeMusicMode(MUSICMODE_GAME);
 				FrontEndMenuManager.m_bWantToRestart = false;

@@ -492,31 +492,16 @@ void DestroyRimLightPipes(void) {}
 void
 CustomPipeInit(void)
 {
-#if defined(GTA_OGC) && !defined(HW_RVL)
-	// Breadcrumbs over the memory card — the only debug channel on this
-	// target. The GC-ISO boot spins forever somewhere in this block.
-	#define NEO_CRUMB(tag) do{ FILE *df_ = fopen("mc:/diag.bin", "wb"); \
-		if(df_){ fprintf(df_, "neo:%s", tag); fclose(df_); } }while(0)
-#else
-	#define NEO_CRUMB(tag) do{}while(0)
-#endif
-	NEO_CRUMB("opening");
 	RwStream *stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, "neo/neo.txd");
 	RwUInt32 size;
 	if(stream == nil)
 		printf("Error: couldn't open 'neo/neo.txd'\n");
 	else{
-		NEO_CRUMB("open-ok");
 		if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil)){
-			NEO_CRUMB("chunk-found");
 			neoTxd = RwTexDictionaryGtaStreamRead(stream, size);
-			NEO_CRUMB(neoTxd ? "dict-read-ok" : "dict-read-nil");
-		}else
-			NEO_CRUMB("chunk-missing");
+		}
 		RwStreamClose(stream, nil);
-		NEO_CRUMB("closed");
 	}
-	#undef NEO_CRUMB
 
 	EnvMapInit();
 

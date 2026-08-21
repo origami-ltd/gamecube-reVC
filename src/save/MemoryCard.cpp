@@ -379,6 +379,9 @@ CMemoryCard::LoadSavedGame(void)
 	ReadDataFromBufferPointer(buf, CClock::ms_nGameClockHours);
 	ReadDataFromBufferPointer(buf, CClock::ms_nGameClockMinutes);
 	ReadDataFromBufferPointer(buf, CPad::GetPad(0)->Mode);
+#ifdef GTA_OGC
+	CPad::GetPad(0)->SetMode(CPad::GetPad(0)->Mode);
+#endif
 	ReadDataFromBufferPointer(buf, CTimer::m_snTimeInMilliseconds);
 	ReadDataFromBufferPointer(buf, CTimer::ms_fTimeScale);
 	ReadDataFromBufferPointer(buf, CTimer::ms_fTimeStep);
@@ -403,6 +406,9 @@ CMemoryCard::LoadSavedGame(void)
 	ReadDataFromBufferPointer(buf, CMenuManager::m_PrefsLanguage);
 	ReadDataFromBufferPointer(buf, CMenuManager::m_PrefsUseWideScreen);
 	ReadDataFromBufferPointer(buf, CPad::GetPad(0)->Mode);
+#ifdef GTA_OGC
+	CPad::GetPad(0)->SetMode(CPad::GetPad(0)->Mode);
+#endif
 #ifdef PS2
 	ReadDataFromBufferPointer(buf, BlurOn);
 #else

@@ -79,6 +79,7 @@ extern bool flushStream[MAX_CDCHANNELS];
 // not doing so cost.
 extern "C" {
 void CdStreamFsLock(void);
+bool CdStreamFsTryLock(void);
 void CdStreamFsUnlock(void);
 }
 struct CdStreamFsGuard {

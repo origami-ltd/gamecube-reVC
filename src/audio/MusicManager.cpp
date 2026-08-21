@@ -365,16 +365,8 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 			// start the car radio behind that menu. Closing the menu flips
 			// m_bMenuActive before UnloadTextures makes the legitimate GAME
 			// request, so resume remains unchanged.
-			if (FrontEndMenuManager.m_bMenuActive) {
-				DVD_FS_GUARD;
-				FILE *al = fopen("dvd:/audio.log", "a");
-				if (al) {
-					fprintf(al, "MMODE game-during-menu blocked ra=%p\n",
-					    __builtin_return_address(0));
-					fclose(al);
-				}
+			if (FrontEndMenuManager.m_bMenuActive)
 				return;
-			}
 			// The frontend's deferred teardown now runs during cutscenes
 			// (CGame::Process no longer skips FrontEndMenuManager.Process),
 			// and its ChangeMusicMode(MUSICMODE_GAME) landed mid-intro:
@@ -384,16 +376,8 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 			// PreloadCutSceneMusic, cleared by StopCutSceneMusic) marks the
 			// window where GAME must not preempt; the legit teardown in
 			// FinishCutscene stops the music first, so it passes.
-			if (m_nMusicMode == MUSICMODE_CUTSCENE && m_nPlayingTrack != NO_TRACK) {
-				DVD_FS_GUARD;
-				FILE *al = fopen("dvd:/audio.log", "a");
-				if (al) {
-					fprintf(al, "MMODE game-during-cutscene blocked ra=%p\n",
-					    __builtin_return_address(0));
-					fclose(al);
-				}
+			if (m_nMusicMode == MUSICMODE_CUTSCENE && m_nPlayingTrack != NO_TRACK)
 				return;
-			}
 #endif
 			m_nUpcomingMusicMode = MUSICMODE_GAME; break;
 		case MUSICMODE_CUTSCENE:
@@ -644,6 +628,17 @@ cMusicManager::ServiceGameMode()
 					}
 				}
 #endif
+#ifdef GTA_OGC
+				int8 radioStep = CPad::GetPad(0)->GetDPadRightJustDown() ? 1 :
+				    CPad::GetPad(0)->GetDPadLeftJustDown() ? -1 : 0;
+				if (radioStep && vehicle) {
+					if (!UsesPoliceRadio(vehicle) && !UsesTaxiRadio(vehicle)) {
+						gNumRetunePresses += radioStep;
+						gRetuneCounter = RETUNE_TIME;
+						RadioStaticCounter = 0;
+					}
+				}
+#else
 				if (CPad::GetPad(0)->ChangeStationJustDown() && vehicle) {
 					if (!UsesPoliceRadio(vehicle) && !UsesTaxiRadio(vehicle)) {
 						gNumRetunePresses++;
@@ -671,6 +666,7 @@ cMusicManager::ServiceGameMode()
 						}
 					}
 				}
+#endif
 #endif
 			}
 		}

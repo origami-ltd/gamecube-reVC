@@ -98,7 +98,7 @@
 	#define INVERT_PAD_SELECTOR
 #endif
 
-#ifdef GAMEPAD_MENU
+#if defined(GAMEPAD_MENU) && !defined(GTA_OGC)
 	#define SELECT_CONTROLLER_TYPE  MENUACTION_CFO_SELECT, "FEC_TYP", { new CCFOSelect((int8*)&FrontEndMenuManager.m_PrefsControllerType, "Controller", "Type", controllerTypes, ARRAY_SIZE(controllerTypes), false, ControllerTypeAfterChange) }, 0, 0, MENUALIGN_LEFT,
 #else
 	#define SELECT_CONTROLLER_TYPE

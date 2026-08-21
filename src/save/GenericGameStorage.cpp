@@ -318,6 +318,9 @@ GenericLoad()
 	ReadDataFromBufferPointer(buf, CClock::ms_nGameClockMinutes);
 	currPad = CPad::GetPad(0);
 	ReadDataFromBufferPointer(buf, currPad->Mode);
+#ifdef GTA_OGC
+	currPad->SetMode(currPad->Mode);
+#endif
 	ReadDataFromBufferPointer(buf, CTimer::m_snTimeInMilliseconds);
 	ReadDataFromBufferPointer(buf, CTimer::ms_fTimeScale);
 	ReadDataFromBufferPointer(buf, CTimer::ms_fTimeStep);

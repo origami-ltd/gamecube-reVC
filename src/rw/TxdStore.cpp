@@ -151,9 +151,22 @@ CTxdStore::LoadTxd(int slot, const char *filename)
 #ifdef GTA_PC
 	_rwD3D8TexDictionaryEnableRasterFormatConversion(true);
 #endif
+	#ifdef GTA_OGC
+	// A missing/corrupt disc entry used to retry forever, producing a black
+	// screen with the CPU parked in the DVD worker.  Disc errors must fail
+	// loudly and name the asset instead of impersonating a renderer hang.
+	stream = nil;
+	for(int attempt = 0; attempt < 3 && stream == nil; attempt++)
+		stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, filename);
+	if(stream == nil){
+		extern void gcFatalPark(const char *tag, const char *msg);
+		gcFatalPark("TXD-OPEN", filename);
+	}
+	#else
 	do
 		stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, filename);
 	while(stream == nil);
+	#endif
 	ret = LoadTxd(slot, stream);
 	RwStreamClose(stream, nil);
 	return ret;

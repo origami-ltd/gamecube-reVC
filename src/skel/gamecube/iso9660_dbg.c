@@ -33,32 +33,6 @@
 
 #define FLAG_DIR 2
 
-// TEMP PROBE: op ring fingerprinting the hud.txd pin caller -> mc:/diag2.bin
-typedef struct { u32 n; char kind; u32 sector; u32 off; s32 len; } DbgOp;
-static DbgOp dbgRing[64];
-static u32 dbgOpCount = 0;
-
-static void dbgOpLog(char kind, u32 sector, u32 off, s32 len)
-{
-	static volatile u32 flushing = 0;
-	DbgOp *op = &dbgRing[dbgOpCount & 63];
-	op->n = dbgOpCount; op->kind = kind; op->sector = sector; op->off = off; op->len = len;
-	dbgOpCount++;
-	if ((dbgOpCount & 1023) != 0) return;
-	if (!__sync_bool_compare_and_swap(&flushing, 0, 1)) return;
-	FILE *f = fopen("mc:/diag2.bin", "wb");
-	if (!f) return;
-	static char buf[4096];
-	int p = snprintf(buf, sizeof(buf), "ops=%u\n", dbgOpCount);
-	u32 i, start = dbgOpCount > 64 ? dbgOpCount - 64 : 0;
-	for (i = start; i < dbgOpCount && p < (int)sizeof(buf) - 48; i++) {
-		DbgOp *o = &dbgRing[i & 63];
-		p += snprintf(buf + p, sizeof(buf) - p, "%u %c s%u o%u l%d\n", o->n, o->kind, o->sector, o->off, o->len);
-	}
-	fwrite(buf, 1, p, f);
-	fclose(f);
-}
-
 struct pvd_s
 {
 	char id[8];
@@ -523,7 +497,6 @@ static int _ISO9660_open_r(struct _reent *r, void *fileStruct, const char *path,
 	file->inUse = true;
 	file->mdescr = mdescr;
 
-	dbgOpLog('O', file->entry.sector, 0, (s32)file->entry.size);
 	return (int) file;
 }
 
@@ -571,12 +544,10 @@ static ssize_t _ISO9660_read_r(struct _reent *r, void *fd, char *ptr, size_t len
 	offset = (u64) file->entry.sector * SECTOR_SIZE + file->offset;
 	if ((ret = _read(file->mdescr, ptr, offset, len)) < 0)
 	{
-		dbgOpLog('E', file->entry.sector, file->offset, ret);
 		r->_errno = EIO;
 		return -1;
 	}
 
-	dbgOpLog('R', file->entry.sector, file->offset, ret);
 	len = (size_t)ret;
 	file->offset += len;
 	return len;
@@ -621,7 +592,6 @@ static off_t _ISO9660_seek_r(struct _reent *r, void *fd, off_t pos, int dir)
 		return -1;
 	}
 
-	dbgOpLog('S', file->entry.sector, (u32)position, 0);
 	file->offset = position;
 	return position;
 }

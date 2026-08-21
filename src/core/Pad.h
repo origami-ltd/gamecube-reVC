@@ -1,6 +1,8 @@
 #ifndef __GTA_PAD_H__
 #define __GTA_PAD_H__
 
+extern bool gbPoliceReviveCheat;
+
 enum {
 	PLAYERCONTROL_ENABLED = 0,
 	PLAYERCONTROL_CAMERA = 1,
@@ -216,6 +218,9 @@ public:
 	void StartShake_Train(float fX, float fY);
 #ifdef GTA_PS2_STUFF
 	void AddToCheatString(char c);
+#ifdef GTA_OGC
+	static bool ValidateGameCubeCheats(void);
+#endif
 #endif
 	void AddToPCCheatString(char c);
 
@@ -492,8 +497,20 @@ public:
 	void SetEnablePlayerControls(uint16 who) { DisablePlayerControls &= ~who; }
 	bool IsPlayerControlsDisabledBy(uint16 who) { return DisablePlayerControls & who; }
 	
-	int16 GetMode() { return Mode; }
-	void SetMode(int16 mode) { Mode = mode; }
+	int16 GetMode() {
+#ifdef GTA_OGC
+		return Mode == 1 ? 1 : 0;
+#else
+		return Mode;
+#endif
+	}
+	void SetMode(int16 mode) {
+#ifdef GTA_OGC
+		Mode = mode == 1 ? 1 : 0;
+#else
+		Mode = mode;
+#endif
+	}
 	
 	static bool IsNoOrObsolete() { return bDisplayNoControllerMessage || bObsoleteControllerMessage; }
 };

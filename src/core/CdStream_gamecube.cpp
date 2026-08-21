@@ -6,6 +6,7 @@
 #include <ogc/lwp.h>
 #include <ogc/semaphore.h>
 #include <ogc/mutex.h>
+#include <ogc/lwp_watchdog.h>
 #include <ogc/aram.h>
 #include <ogc/cache.h>
 
@@ -193,6 +194,12 @@ CdStreamFsLock(void)
 		LWP_MutexLock(fsLock);
 }
 
+extern "C" bool
+CdStreamFsTryLock(void)
+{
+	return fsLock == LWP_MUTEX_NULL || LWP_MutexTryLock(fsLock) == 0;
+}
+
 extern "C" void
 CdStreamFsUnlock(void)
 {
@@ -208,6 +215,16 @@ static int32 imageCount;
 static int32 channelCount;
 static int32 lastPosition;
 static int32 channelStatus[MAX_CDCHANNELS];
+
+static void
+CdStreamFatal(const char *what, int32 channel, uint32 offset, uint32 size)
+{
+	char line[160];
+	snprintf(line, sizeof(line), "%s ch=%d off=%08x sectors=%u\n",
+	    what, channel, offset, size);
+	extern void gcFatalPark(const char *tag, const char *msg);
+	gcFatalPark("STREAM", line);
+}
 
 void
 CdStreamInit(int32 numChannels)
@@ -236,15 +253,19 @@ CdStreamDoRead(int32 channel)
 	uint32 sector = _GET_OFFSET(offset);
 	if(image >= (uint32)imageCount || imageFiles[image] == nil || size == 0 ||
 	   size > UINT32_MAX - offset || sector > imageSectors[image] ||
-	   size > imageSectors[image] - sector)
+	   size > imageSectors[image] - sector){
+		CdStreamFatal("invalid range", channel, offset, size);
 		return STREAM_ERROR;
+	}
 
 	FILE *file = imageFiles[image];
 	uint64 byteOffset = (uint64)sector * CDSTREAM_SECTOR_SIZE;
 	uint64 byteCount64 = (uint64)size * CDSTREAM_SECTOR_SIZE;
 	if(byteOffset > imageBytes[image] || byteCount64 > imageBytes[image] - byteOffset ||
-	   (uint64)(off_t)byteOffset != byteOffset || byteCount64 > SIZE_MAX)
+	   (uint64)(off_t)byteOffset != byteOffset || byteCount64 > SIZE_MAX){
+		CdStreamFatal("invalid byte range", channel, offset, size);
 		return STREAM_ERROR;
+	}
 	size_t byteCount = (size_t)byteCount64;
 
 	// ARAM first. A hit costs a DMA and no disc access at all, which is the
@@ -259,8 +280,10 @@ CdStreamDoRead(int32 channel)
 	bool ok = fseeko(file, (off_t)byteOffset, SEEK_SET) == 0 &&
 	          fread(buffer, 1, byteCount, file) == byteCount;
 	CdStreamFsUnlock();
-	if(!ok)
+	if(!ok){
+		CdStreamFatal("read failed", channel, offset, size);
 		return STREAM_ERROR;
+	}
 	AramCacheStore(buffer, offset, size);
 
 	lastPosition = offset + size;
@@ -308,7 +331,8 @@ CdStreamInitThread(void)
 
 	// Below the game thread so a queued read never preempts simulation, but
 	// high enough to keep the disc busy while the frame runs.
-	LWP_CreateThread(&ioThread, CdStreamThread, nil, nil, 16*1024, 80);
+	if(LWP_CreateThread(&ioThread, CdStreamThread, nil, nil, 16*1024, 80) != 0)
+		CdStreamFatal("worker create failed", -1, 0, 0);
 }
 
 int32
@@ -323,6 +347,8 @@ CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
 	}
 
 	CdRequest *r = &requests[channel];
+	if(r->status == STREAM_READING)
+		CdStreamFatal("channel reused", channel, offset, size);
 	r->buffer = buffer;
 	r->offset = offset;
 	r->size = size;
@@ -342,8 +368,13 @@ CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
 	channelStatus[channel] = STREAM_READING;
 
 	LWP_MutexLock(ioLock);
+	int32 nextTail = (ioTail + 1) % (MAX_CDCHANNELS+1);
+	if(nextTail == ioHead){
+		LWP_MutexUnlock(ioLock);
+		CdStreamFatal("queue full", channel, offset, size);
+	}
 	ioQueue[ioTail] = channel;
-	ioTail = (ioTail + 1) % (MAX_CDCHANNELS+1);
+	ioTail = nextTail;
 	LWP_MutexUnlock(ioLock);
 	LWP_SemPost(ioPending);
 	return STREAM_SUCCESS;
@@ -374,8 +405,13 @@ CdStreamSync(int32 channel)
 	// count pending and the next Sync blocked forever — the loading screen
 	// hang. Status is written once by the worker and read here; there is no
 	// count to get out of step.
-	while(requests[channel].status == STREAM_READING)
+	u64 started = gettime();
+	while(requests[channel].status == STREAM_READING){
 		LWP_YieldThread();
+		if(ticks_to_millisecs(gettime() - started) > 30000)
+			CdStreamFatal("read timeout", channel, requests[channel].offset,
+			    requests[channel].size);
+	}
 	int32 st = requests[channel].status;
 	requests[channel].status = STREAM_NONE;
 	channelStatus[channel] = STREAM_NONE;

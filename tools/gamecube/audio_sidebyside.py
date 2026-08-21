@@ -14,11 +14,12 @@ Run the console side first:
     put dvd:/audiotest.txt on the card, boot, let it park
     python3 tools/gamecube/audio_sidebyside.py
 
-Each item is played for exactly 2s with a 1s gap, so the dump segments on
-silence. Reported per sound: level (RMS, in dB relative to the reference),
-spectral centroid (brightness - a transcode that lost or gained top end
-shows here), and per-octave energy difference. The verdict line is what
-"identical" means: level within 1dB and no band off by more than 3dB.
+Each item is fed for exactly 2s with a 1s gap, so the dump segments on
+silence. (The DSP may finish its already queued blocks after the two seconds.)
+Reported per sound: level (RMS, in dB relative to the reference), spectral
+centroid (brightness), and level-normalised per-band energy difference. A
+band below -50dB of the reference's peak band is omitted: dividing by its
+near-zero energy produced spectacular but meaningless false failures.
 """
 import glob
 import math
@@ -50,7 +51,7 @@ def dexor(src, dst):
     open(dst, "wb").write(bytes(b ^ 0x22 for b in data))
 
 
-def decode_reference(name, tmpdir, seconds=2.0, skip=0.0):
+def decode_reference(name, tmpdir, rate, seconds=2.0, skip=0.0):
     """Decode an original asset the way the reference build does."""
     for ext, prep in ((".adf", dexor), (".mp3", None), (".wav", None)):
         path = os.path.join(GTAVC, name + ext)
@@ -62,13 +63,13 @@ def decode_reference(name, tmpdir, seconds=2.0, skip=0.0):
             if not os.path.exists(src):
                 prep(path, src)
         raw = run(["ffmpeg", "-v", "error", "-ss", str(skip), "-t", str(seconds),
-                   "-i", src, "-ac", "1", "-ar", "48000",
+                   "-i", src, "-ac", "1", "-ar", str(rate),
                    "-f", "s16le", "-"])
         return list(struct.unpack("<%dh" % (len(raw) // 2), raw[:len(raw) // 2 * 2]))
     return None
 
 
-def sfx_reference(index):
+def sfx_reference(index, rate):
     with open(SDT, "rb") as f:
         f.seek(index * 20)
         off, size, freq, _ls, _le = struct.unpack("<IIIIi", f.read(20))
@@ -76,11 +77,12 @@ def sfx_reference(index):
         f.seek(off)
         data = f.read(size)
     src = list(struct.unpack("<%dh" % (len(data) // 2), data[:len(data) // 2 * 2]))
-    # The reference plays it at its own rate; resample to 48k for comparison.
+    # The reference plays it at its own rate; resample to the dump's actual
+    # output rate (32,028Hz on GameCube and 48kHz on the Wii dev target).
     out, n = [], len(src)
     if n < 2:
         return src
-    step = freq / 48000.0
+    step = freq / float(rate)
     pos = 0.0
     while pos < n - 1:
         i = int(pos)
@@ -133,10 +135,17 @@ def centroid(sig, rate):
     return num / den if den else 0.0
 
 
-def db(a, b):
+def amplitude_db(a, b):
     if a <= 0 or b <= 0:
         return float("nan")
     return 20.0 * math.log10(a / b)
+
+
+def power_db(a, b):
+    """spectrum() returns energy, not amplitude; its ratio is 10*log10."""
+    if a <= 0 or b <= 0:
+        return float("nan")
+    return 10.0 * math.log10(a / b)
 
 
 def load_dump(path, max_seconds=150):
@@ -155,6 +164,33 @@ def envelope(sig, rate, frame_ms=20):
     n = max(1, int(rate * frame_ms / 1000))
     return [math.sqrt(sum(float(v) * v for v in sig[i:i + n]) / n)
             for i in range(0, len(sig) - n, n)]
+
+
+def active_segments(dump, rate, threshold=10.0, join_silence=0.5, pad=0.08):
+    """Return active regions in chronological order.
+
+    The old analyser searched the complete recording separately for every
+    effect. Repeated engine/noise-like sounds then matched some other item,
+    and a valid capture reported 1/25. The self-test has a deliberate
+    one-second gap, so chronological segmentation is both simpler and exact.
+    """
+    frame_ms = 20
+    env = envelope(dump, rate, frame_ms)
+    active = [i for i, value in enumerate(env) if value > threshold]
+    if not active:
+        return []
+    max_gap = max(1, int(join_silence * 1000 / frame_ms))
+    groups = [[active[0]]]
+    for index in active[1:]:
+        if index - groups[-1][-1] > max_gap:
+            groups.append([index])
+        else:
+            groups[-1].append(index)
+    frame = max(1, int(rate * frame_ms / 1000))
+    padding = int(rate * pad)
+    return [dump[max(0, group[0] * frame - padding):
+                 min(len(dump), (group[-1] + 1) * frame + padding)]
+            for group in groups]
 
 
 def find_envelope(dump, ref, rate, frame_ms=20):
@@ -195,13 +231,17 @@ def find(dump, ref, rate, probe_s=0.6, dec=16):
         ref_start = best_i
     else:
         ref_start = 0
-    probe = ref[ref_start:ref_start + probe_n:dec]
+    probe_span = min(probe_n, len(ref) - ref_start)
+    probe = ref[ref_start:ref_start + probe_span:dec]
     ep = math.sqrt(sum(float(v) * v for v in probe)) or 1.0
-    step = dec * 4
+    # Search on a fine sample grid. A 64-sample stride (the old dec*4) can
+    # miss the correct phase entirely for a high-frequency, 26ms effect even
+    # when the waveforms are otherwise 99.9% correlated.
+    step = max(1, dec // 4)
     best, best_score = 0, -2.0
-    limit = len(dump) - probe_n
+    limit = len(dump) - probe_span
     for off in range(0, max(1, limit), step):
-        seg = dump[off:off + probe_n:dec]
+        seg = dump[off:off + probe_span:dec]
         if len(seg) < len(probe):
             break
         dot = sum(float(x) * y for x, y in zip(seg, probe))
@@ -224,18 +264,23 @@ def main():
     print(f"         {len(dump_pcm)/rate:.0f}s of console output\n")
 
     expected = [("stream", n) for n in STREAMS] + [("sfx", i) for i in SFX]
+    segments = active_segments(dump_pcm, rate)
+    if len(segments) != len(expected):
+        print(f"INVALID CAPTURE: found {len(segments)} active regions, "
+              f"expected {len(expected)}. No verdict is possible.")
+        return 2
     tmpdir = "/private/tmp/claude-501/adf"
     os.makedirs(tmpdir, exist_ok=True)
 
     print(f"{'sound':<16}{'match':>7}{'level':>9}{'centroid':>17}   bands (console - reference, dB)")
     bad = 0
     compared = 0
-    for kind, ident in expected:
+    for (kind, ident), segment in zip(expected, segments):
         if kind == "stream":
-            ref = decode_reference(ident, tmpdir)
+            ref = decode_reference(ident, tmpdir, rate)
             label = ident
         else:
-            ref = sfx_reference(ident)
+            ref = sfx_reference(ident, rate)
             label = f"sfx{ident}"
         if not ref:
             print(f"{label:<16}   (no reference asset)")
@@ -245,17 +290,24 @@ def main():
         # same master and never line up sample for sample - align those on
         # the envelope instead.
         if kind == "stream":
-            a, b, score = find_envelope(dump_pcm, ref, rate)
+            a, b, score = find_envelope(segment, ref, rate)
         else:
-            a, b, score = find(dump_pcm, ref, rate)
+            a, b, score = find(segment, ref, rate)
         compared += 1
-        lvl = db(rms(a), rms(b))
+        lvl = amplitude_db(rms(a), rms(b))
         ca, cb = centroid(a, rate), centroid(b, rate)
         sa, sb = spectrum(a, rate), spectrum(b, rate)
-        bands = " ".join(f"{db(x, y):+5.1f}" if x > 0 and y > 0 else "   --"
-                         for x, y in zip(sa, sb))
-        worst = max((abs(db(x, y)) for x, y in zip(sa, sb)
-                     if x > 0 and y > 0), default=0.0)
+        peak_ref = max(sb, default=0.0)
+        meaningful = [x > 0 and y > peak_ref * 1e-5
+                      for x, y in zip(sa, sb)]
+        # Remove the global gain from every energy band. What remains is the
+        # tonal change - precisely the metallic/telephone-quality question.
+        band_delta = [power_db(x, y) - lvl if keep else float("nan")
+                      for x, y, keep in zip(sa, sb, meaningful)]
+        bands = " ".join(f"{delta:+5.1f}" if math.isfinite(delta) else "   --"
+                         for delta in band_delta)
+        worst = max((abs(delta) for delta in band_delta if math.isfinite(delta)),
+                    default=0.0)
         flag = "" if abs(lvl) <= 1.0 and worst <= 3.0 and score > 0.5 else "   <-- DIFFERS"
         if flag:
             bad += 1

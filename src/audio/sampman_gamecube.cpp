@@ -45,6 +45,7 @@
 #include <tremor/ivorbisfile.h>
 #include <ctype.h>
 #include <unistd.h>
+#include "vendor/librw/src/lodepng/lodepng.h"
 
 void GeckoLog(const char *msg);
 
@@ -58,7 +59,7 @@ void GeckoLog(const char *msg);
 // and costs them the session. Audio that cannot be served is now a line on
 // the gecko and silence in that one channel; the game keeps running.
 // Re-enable it when hunting an audio bug, not otherwise.
-//#define AUDIO_FAIL_LOUD
+#define AUDIO_FAIL_LOUD
 
 #ifdef AUDIO_FAIL_LOUD
 static void
@@ -145,6 +146,22 @@ gcVoiceCallback(AESNDPB *pb, u32 state, void *arg)
 // uses: offset, size, frequency, loop start and loop end.
 static tSample *gSampleIndex;
 static uint32   gNumSamples;
+
+// Optional lossless mini-DVD bank. sfx.pak stores every PCM sample as an
+// independently seekable delta/byte-shuffled DEFLATE block. The original SD
+// layout with sfx.raw remains supported for development cards.
+static bool8  gPackedSfx;
+static uint32 gPackedSfxBytes;
+static uint32 gPackedSfxDataStart;
+enum { GC_SFX_PACK_HEADER = 16, GC_SFX_PACK_ENTRY = 8 };
+static const uint8 gSfxPackMagic[8] = { 'G','C','S','F','X','P','2',0 };
+
+static uint32
+gcReadBe32(const uint8 *p)
+{
+	return (uint32)p[0] << 24 | (uint32)p[1] << 16 |
+	       (uint32)p[2] << 8 | p[3];
+}
 
 // Bank residency in ARAM. A bank is a contiguous run of sfx.raw, so one ARAM
 // allocation and one DMA per bank.
@@ -241,8 +258,100 @@ static uint8  gCurrentPedSlot;
 static uint8 *gPlayerTalkData;
 static uint32 gPlayerTalkSfx = 0xFFFFFFFF;
 
-// One read shared by ped comments and player talk: sample bytes from
-// sfx.raw into dst, byteswapped to the DSP's big-endian.
+// Read one sample into DSP-native big-endian PCM. The packed path reconstructs
+// the exact sfx.raw words; it is compression, never a format conversion.
+static bool8
+gcReadSampleData(uint32 nSfx, uint8 *dst, uint32 capacity)
+{
+	if(gSampleIndex == nil || nSfx >= gNumSamples ||
+	   gSampleIndex[nSfx].nSize > capacity)
+		return FALSE;
+	uint32 rawSize = gSampleIndex[nSfx].nSize;
+
+	if(!gPackedSfx){
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/audio/sfx.raw", "rb");
+		if(f == nil)
+			return FALSE;
+		bool8 ok = fseek(f, (long)gSampleIndex[nSfx].nOffset, SEEK_SET) == 0 &&
+		    fread(dst, 1, rawSize, f) == rawSize;
+		fclose(f);
+		if(!ok)
+			return FALSE;
+		for(uint32 b = 0; b + 1 < rawSize; b += 2){
+			uint8 t = dst[b]; dst[b] = dst[b+1]; dst[b+1] = t;
+		}
+		return TRUE;
+	}
+
+	uint8 entry[GC_SFX_PACK_ENTRY];
+	uint8 *packed = nil;
+	uint32 packedSize = 0;
+	bool8 storedRaw = FALSE;
+	{
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/audio/sfx.pak", "rb");
+		if(f == nil || fseek(f, GC_SFX_PACK_HEADER + nSfx*GC_SFX_PACK_ENTRY,
+		                      SEEK_SET) != 0 ||
+		   fread(entry, 1, sizeof(entry), f) != sizeof(entry)){
+			if(f) fclose(f);
+			return FALSE;
+		}
+		uint32 offset = gcReadBe32(entry);
+		uint32 sizeFlags = gcReadBe32(entry + 4);
+		storedRaw = (sizeFlags & 0x80000000u) != 0;
+		packedSize = sizeFlags & 0x7FFFFFFFu;
+		if(offset < gPackedSfxDataStart || packedSize == 0 ||
+		   offset > gPackedSfxBytes || packedSize > gPackedSfxBytes - offset){
+			fclose(f);
+			return FALSE;
+		}
+		packed = (uint8*)memalign(32, packedSize);
+		bool8 ok = packed != nil && fseek(f, (long)offset, SEEK_SET) == 0 &&
+		    fread(packed, 1, packedSize, f) == packedSize;
+		fclose(f);
+		if(!ok){
+			free(packed);
+			return FALSE;
+		}
+	}
+
+	if(storedRaw){
+		if(packedSize != rawSize){
+			free(packed);
+			return FALSE;
+		}
+		for(uint32 i = 0; i < rawSize/2; i++){
+			dst[i*2] = packed[i*2 + 1];
+			dst[i*2 + 1] = packed[i*2];
+		}
+		free(packed);
+		return TRUE;
+	}
+
+	uint8 *predicted = nil;
+	size_t predictedSize = 0;
+	unsigned error = lodepng_zlib_decompress(&predicted, &predictedSize,
+	    packed, packedSize, &lodepng_default_decompress_settings);
+	free(packed);
+	if(error || predictedSize != rawSize){
+		free(predicted);
+		return FALSE;
+	}
+	uint32 count = rawSize/2;
+	uint16 previous = 0;
+	for(uint32 i = 0; i < count; i++){
+		uint16 zigzag = predicted[i] | (uint16)predicted[count + i] << 8;
+		int32 delta = (zigzag >> 1) ^ -(int32)(zigzag & 1);
+		previous = (uint16)(previous + delta);
+		dst[i*2] = previous >> 8;
+		dst[i*2 + 1] = previous & 0xFF;
+	}
+	free(predicted);
+	return TRUE;
+}
+
+// One bounded read shared by ped comments and player talk.
 static bool8
 gcReadSample(uint32 nSfx, uint8 *dst)
 {
@@ -253,25 +362,12 @@ gcReadSample(uint32 nSfx, uint8 *dst)
 		gcAudioDie("sample-request-bad", d);
 		return FALSE;
 	}
-	DVD_FS_GUARD;
-	FILE *f = fopen("dvd:/audio/sfx.raw", "rb");
-	if(f == nil){
-		gcAudioDie("sfx.raw-open", nil);
+	if(!gcReadSampleData(nSfx, dst, PED_BLOCKSIZE)){
+		snprintf(d, sizeof(d), "sfx=%u", (unsigned)nSfx);
+		gcAudioDie(gPackedSfx ? "sfx.pak-read" : "sfx.raw-read", d);
 		return FALSE;
 	}
-	uint32 size = gSampleIndex[nSfx].nSize;
-	bool8 ok = fseek(f, (long)gSampleIndex[nSfx].nOffset, SEEK_SET) == 0 &&
-	    fread(dst, 1, size, f) == size;
-	fclose(f);
-	if(!ok){
-		snprintf(d, sizeof(d), "sfx=%u", (unsigned)nSfx);
-		gcAudioDie("sample-read", d);
-	}
-	if(ok)
-		for(uint32 b = 0; b + 1 < size; b += 2){
-			uint8 t = dst[b]; dst[b] = dst[b+1]; dst[b+1] = t;
-		}
-	return ok;
+	return TRUE;
 }
 
 static inline uint32
@@ -469,6 +565,30 @@ cSampleManager::InitialiseSampleBanks(void)
 			w[j] = __builtin_bswap32(w[j]);
 	}
 
+	// Prefer the exact, losslessly packed bank used by the mini-DVD. Cards
+	// built before it existed keep working through sfx.raw.
+	gPackedSfx = FALSE;
+	gPackedSfxBytes = 0;
+	gPackedSfxDataStart = 0;
+	FILE *packed = fopen("dvd:/audio/sfx.pak", "rb");
+	if(packed){
+		uint8 header[GC_SFX_PACK_HEADER];
+		bool8 valid = fread(header, 1, sizeof(header), packed) == sizeof(header) &&
+		    memcmp(header, gSfxPackMagic, sizeof(gSfxPackMagic)) == 0 &&
+		    gcReadBe32(header + 8) == gNumSamples;
+		gPackedSfxDataStart = valid ? gcReadBe32(header + 12) : 0;
+		if(fseek(packed, 0, SEEK_END) == 0)
+			gPackedSfxBytes = (uint32)ftell(packed);
+		else
+			valid = FALSE;
+		fclose(packed);
+		uint32 tableEnd = GC_SFX_PACK_HEADER + gNumSamples*GC_SFX_PACK_ENTRY;
+		if(!valid || gPackedSfxDataStart < tableEnd ||
+		   gPackedSfxDataStart > gPackedSfxBytes)
+			return FALSE;
+		gPackedSfx = TRUE;
+	}
+
 	BankStartOffset[SFX_BANK_0] = 0;
 	return TRUE;
 }
@@ -538,34 +658,61 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 		}
 	}
 
-	DVD_FS_GUARD;
-
-	// ONE PATH, BOTH TARGETS: stream the bank's contiguous run of sfx.raw
-	// through a small staging buffer into audio memory, byteswapping as it
-	// goes. The staging buffer is one transfer, not the whole bank — the
-	// entire point of ARAM is that 14.3MB never has to sit in MEM1.
+	// Stream through a small staging buffer into audio memory. The staging
+	// buffer is one transfer, not the whole bank — the point of ARAM is that
+	// 14.3MB never has to sit in MEM1.
 	enum { STAGE = 64*1024 };
 	uint8 *stage = (uint8*)memalign(32, STAGE);
 	if(stage == nil){ return FALSE; }
-	FILE *raw = fopen("dvd:/audio/sfx.raw", "rb");
-	if(raw == nil){ free(stage); return FALSE; }
-	fseek(raw, (long)byteStart, SEEK_SET);
-	for(uint32 done = 0; done < bytes; ){
-		uint32 chunk = bytes - done > STAGE ? STAGE : align32(bytes - done);
-		size_t got = fread(stage, 1, chunk, raw);
-		if(got == 0)
-			break;
-		// sfx.raw is the PC file: 16-bit little-endian PCM. The DSP reads
-		// big-endian; unswapped it plays as metallic noise (user-confirmed).
-		// One swap here at load covers every later per-sample DMA.
-		for(uint32 b = 0; b + 1 < (uint32)got; b += 2){
-			uint8 t = stage[b]; stage[b] = stage[b+1]; stage[b+1] = t;
+	bool8 loaded = TRUE;
+	{
+		DVD_FS_GUARD;
+		FILE *raw = fopen(gPackedSfx ? "dvd:/audio/sfx.pak" :
+		                              "dvd:/audio/sfx.raw", "rb");
+		if(raw == nil)
+			loaded = FALSE;
+		else{
+			uint32 fileOffset = byteStart;
+			if(gPackedSfx){
+				uint8 firstEntry[GC_SFX_PACK_ENTRY] = {0};
+				uint8 lastEntry[GC_SFX_PACK_ENTRY] = {0};
+				loaded = fseek(raw, GC_SFX_PACK_HEADER + first*GC_SFX_PACK_ENTRY,
+				                  SEEK_SET) == 0 &&
+				    fread(firstEntry, 1, sizeof(firstEntry), raw) == sizeof(firstEntry) &&
+				    fseek(raw, GC_SFX_PACK_HEADER + (last-1)*GC_SFX_PACK_ENTRY,
+				          SEEK_SET) == 0 &&
+				    fread(lastEntry, 1, sizeof(lastEntry), raw) == sizeof(lastEntry);
+				uint32 firstOffset = gcReadBe32(firstEntry);
+				uint32 firstFlags = gcReadBe32(firstEntry + 4);
+				uint32 lastOffset = gcReadBe32(lastEntry);
+				uint32 lastFlags = gcReadBe32(lastEntry + 4);
+				loaded = loaded && (firstFlags & 0x80000000u) &&
+				    (lastFlags & 0x80000000u) &&
+				    (firstFlags & 0x7FFFFFFFu) == gSampleIndex[first].nSize &&
+				    (lastFlags & 0x7FFFFFFFu) == gSampleIndex[last-1].nSize &&
+				    firstOffset == gPackedSfxDataStart + byteStart &&
+				    lastOffset + (lastFlags & 0x7FFFFFFFu) ==
+				        gPackedSfxDataStart + byteEnd;
+				fileOffset = firstOffset;
+			}
+			loaded = loaded && fseek(raw, (long)fileOffset, SEEK_SET) == 0;
+			for(uint32 done = 0; loaded && done < bytes; ){
+				uint32 chunk = bytes - done > STAGE ? STAGE : align32(bytes - done);
+				size_t got = fread(stage, 1, chunk, raw);
+				if(got != chunk){ loaded = FALSE; break; }
+				// sfx.raw is little-endian; AESND reads big-endian PCM.
+				for(uint32 b = 0; b + 1 < chunk; b += 2){
+					uint8 t = stage[b]; stage[b] = stage[b+1]; stage[b+1] = t;
+				}
+				gcBankWrite(addr + done, stage, chunk);
+				done += chunk;
+			}
+			fclose(raw);
 		}
-		gcBankWrite(addr + done, stage, align32((uint32)got));
-		done += align32((uint32)got);
 	}
-	fclose(raw);
 	free(stage);
+	if(!loaded)
+		return FALSE;
 
 	// The run is contiguous, so a sample's address is its file offset
 	// rebased onto the bank.
@@ -1126,28 +1273,6 @@ cSampleManager::StartChannel(uint32 nChannel)
 		}
 	}
 	AESND_SetVoiceBuffer(c->voice, bufStart, bufBytes);
-	// TEMP diagnostic (remove at bring-up close): what actually starts, so a
-	// doubled sound shows up as the same sfx twice instead of being argued
-	// about. Keep this focused on radio/frontend samples: an all-channel trace
-	// was exhausted by vehicle release sounds before the menu was opened.
-	{
-		static int32 left = 200;
-		if(left > 0 && c->sample >= SFX_RADIO_CLICK &&
-		   c->sample <= SFX_FE_NOISE_BURST_3){
-			left--;
-			DVD_FS_GUARD;
-			FILE *sl = gcCardLogEnabled() ? fopen("dvd:/chan.log", "a") : nil;
-			if(sl){
-				fprintf(sl, "CH %u sfx=%u b=%u f=%u v%u p%u l%u c48=%d t=%u\n",
-				    (unsigned)nChannel, (unsigned)c->sample,
-				    (unsigned)c->pcmBytes, (unsigned)voiceFreq,
-				    (unsigned)c->volume, (unsigned)c->pan,
-				    (unsigned)c->loopCount, (int)c->pcm48,
-				    (unsigned)ticks_to_millisecs(gettime()));
-				fclose(sl);
-			}
-		}
-	}
 	c->playing = TRUE;
 	AESND_SetVoiceStop(c->voice, false);
 }
@@ -1944,36 +2069,6 @@ cSampleManager::SetChannel3DDistances(uint32 nChannel, float fMax, float fMin)
 	gChannels[nChannel].distMin = fMin;
 }
 
-// Cutscene speech arrives through this pair: MusicManager preloads the track
-// while the scene sets up, then releases it on the first frame. Open-paused is
-// exactly that.
-// TEMP (remove at bring-up close): the mission-audio slots, 1 and 2, are
-// where cutscene speech lives, and the game gives a stream 30 frames to
-// report itself playing before it writes the line off as finished and moves
-// to the next one. This records every transition on those slots so the
-// reason a line is skipped is a log line rather than an argument.
-static void
-gcStreamTrace(const char *what, uint8 nStream)
-{
-	if(nStream == 0 || nStream >= MAX_STREAMS)
-		return;                       // slot 0 is music, not speech
-	static int32 left = 120;
-	if(left-- <= 0)
-		return;
-	GcStream *st = &gStreams[nStream];
-	DVD_FS_GUARD;
-	FILE *f = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
-	if(f){
-		fprintf(f, "MA s%u %-10s play=%d paused=%d file=%d rate=%u pos=%u/%u cb=%u starve=%u eof=%d t=%u\n",
-		    (unsigned)nStream, what, (int)st->playing, (int)st->paused,
-		    st->file != nil, (unsigned)st->rate,
-		    (unsigned)st->posSamples, (unsigned)st->lenSamples,
-		    (unsigned)st->cbCount, (unsigned)st->starved, (int)st->eof,
-		    (unsigned)ticks_to_millisecs(gettime()));
-		fclose(f);
-	}
-}
-
 void
 cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 {
@@ -1988,7 +2083,6 @@ cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 		if(st->voice)
 			AESND_SetVoiceStop(st->voice, true);
 	}
-	gcStreamTrace("preload", nStream);
 }
 
 void
@@ -2011,7 +2105,6 @@ cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 	st->paused = FALSE;
 	// Re-arm rather than merely un-stop: see gcStreamArm.
 	gcStreamArm(st, nStream);
-	gcStreamTrace("start", nStream);
 }
 
 bool8
@@ -2229,15 +2322,6 @@ cSampleManager::GetStreamedFileLength(uint8 nStream)
 bool8
 cSampleManager::IsStreamPlaying(uint8 nStream)
 {
-	// One trace of the first few answers on a speech slot: this is the reply
-	// the mission-audio state machine acts on.
-	if(nStream != 0 && nStream < MAX_STREAMS){
-		static int32 seen[MAX_STREAMS];
-		if(seen[nStream] < 6){
-			seen[nStream]++;
-			gcStreamTrace("isplaying?", nStream);
-		}
-	}
 	// OAL parity: a paused stream reads as NOT playing (CStream::IsPlaying
 	// returns false under m_bPaused). MusicManager's mode-change handshake
 	// depends on it — reading TRUE here made Service stop a preloaded
@@ -2412,7 +2496,7 @@ cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffect
 // Armed by dvd:/audiotest.txt. Sweeps EVERY category of audio the game has -
 // bank effects across the whole rate range, all nine radio stations, mission
 // voice, ambience - measures what each one actually produces, and writes the
-// numbers to dvd:/audiotest.log before the game ever boots.
+// numbers to mc:/audiotest.log before the game ever boots.
 //
 // RMS is the point. A stream that opens successfully and decodes silence
 // looks identical to a working one in every other log; here it reads 0. A
@@ -2461,8 +2545,7 @@ gcTestLog(const char *fmt, ...)
 static void
 gcTestFlush(void)
 {
-	DVD_FS_GUARD;
-	FILE *f = fopen("dvd:/audiotest.log", "w");
+	FILE *f = fopen("mc:/audiotest.log", "w");
 	if(f){ fwrite(gTestBuf, 1, gTestLen, f); fclose(f); }
 }
 
@@ -2493,12 +2576,20 @@ gcAudioSelfTest(void)
 		}
 		GcStream *st = &gStreams[0];
 		uint32 rms = 0;
+		// StartStreamedFile has already handed buffer zero to the DSP and
+		// filled buffer `play` for the callback. The old test cleared
+		// bufReady and pumped again just to obtain an RMS value; that overwrote
+		// buffer zero while the DSP was reading it and invalidated the capture.
+		// Observe the queued buffer, exactly as the callback will, without
+		// changing producer/consumer state.
 		for(uint32 tries = 0; tries < 6 && rms == 0; tries++){
-			st->bufReady = FALSE;
-			gcStreamPump(st);
 			if(st->bufReady)
-				rms = gcRms((const int16*)st->buf[st->fill ^ 1],
+				rms = gcRms((const int16*)st->buf[st->play],
 				    STREAM_CHUNK_BYTES/2);
+			if(rms == 0){
+				SampleManager.Service();
+				usleep(5*1000);
+			}
 		}
 		gcTestLog("STREAM %u %s %uHz ch%u len=%u rms=%u%s",
 		    (unsigned)t, path, (unsigned)st->rate, (unsigned)st->channels,
@@ -2506,7 +2597,15 @@ gcAudioSelfTest(void)
 		    rms == 0 ? "  SILENT" : "");
 		gcTestFlush();          // partial sweeps must still leave evidence
 		SampleManager.SetStreamedVolumeAndPan(127, 63, 0, 0);
-		usleep(2000*1000);
+		// In normal gameplay Service() runs once per frame and keeps one
+		// decoded block ahead of the DSP. Sleeping here used to starve that
+		// producer, so the capture contained only the primed ~0.2 seconds and
+		// then silence. Exercise the exact runtime path for the full two-second
+		// comparison window.
+		for(uint32 frame = 0; frame < 400; frame++){
+			SampleManager.Service();
+			usleep(5*1000);
+		}
 		SampleManager.StopStreamedFile(0);
 		usleep(1000*1000);   // gap: the host segments the dump on silence
 	}
@@ -2522,17 +2621,18 @@ gcAudioSelfTest(void)
 			gcTestLog("SFX %u INIT-FAILED", (unsigned)sfx);
 			continue;
 		}
+		SampleManager.SetChannelFrequency(0, gSampleIndex[sfx].nFrequency);
+		SampleManager.SetChannelVolume(0, 127);
+		SampleManager.SetChannelPan(0, 63);
+		SampleManager.SetChannelLoopCount(0, 1);
+		SampleManager.StartChannel(0);
 		GcChannel *c = &gChannels[0];
 		uint32 rms = gcRms((const int16*)c->pcm, c->pcmBytes/2);
 		gcTestLog("SFX %u src=%uB %uHz -> %uB conv=%d rms=%u",
 		    (unsigned)sfx, (unsigned)gSampleIndex[sfx].nSize,
 		    (unsigned)gSampleIndex[sfx].nFrequency,
 		    (unsigned)c->pcmBytes, (int)c->pcm48, (unsigned)rms);
-		SampleManager.SetChannelVolume(0, 127);
-		SampleManager.SetChannelPan(0, 63);
-		SampleManager.SetChannelLoopCount(0, 1);
 		gcTestFlush();
-		SampleManager.StartChannel(0);
 		usleep(2000*1000);
 		SampleManager.StopChannel(0);
 		usleep(1000*1000);
@@ -2541,5 +2641,5 @@ gcAudioSelfTest(void)
 	gcTestLog("AUDIOTEST end");
 	gcTestFlush();
 	extern void gcFatalPark(const char *tag, const char *msg);
-	gcFatalPark("AUDIOTEST", "sweep complete; see dvd:/audiotest.log");
+	gcFatalPark("AUDIOTEST", "sweep complete; see mc:/audiotest.log");
 }

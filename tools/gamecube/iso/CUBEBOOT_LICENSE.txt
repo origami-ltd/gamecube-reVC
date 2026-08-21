@@ -1,0 +1,17 @@
+gbi.hdr contains the GameCube Linux Team El Torito apploader from
+cubeboot-tools:
+
+  https://github.com/makeo/cubeboot-tools
+  revision a68d82ee42f21f11530332d4f2b17298565ed5f7
+
+Copyright (C) 2005-2006 The GameCube Linux Team
+Copyright (C) 2005, 2006 Albert Herranz
+Copyright (C) 2020-2025 Extrems
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; either version 2 of the License, or (at your option) any later
+version.
+
+The repository's apploader source is the corresponding source for the binary
+embedded in gbi.hdr. This copy is distributed without warranty.

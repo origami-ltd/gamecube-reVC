@@ -1,0 +1,14 @@
+Gamecube Controller
+Copyright / author: Cory Richards (CoryRichards)
+
+Source:
+https://sketchfab.com/3d-models/gamecube-controller-21983501bac64993ac09cdc7936ffdf2
+
+Licensed under the Creative Commons Attribution 4.0 International license:
+https://creativecommons.org/licenses/by/4.0/
+
+The source GLB is preserved as gamecube_controller.glb. The generated
+gamecube_controller.dff contains the same complete static mesh converted to a
+RenderWare container for runtime GX instancing. gamecube_controller.tga is the
+embedded base-colour texture extracted losslessly for the native GX texture
+conversion step.

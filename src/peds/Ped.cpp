@@ -7203,6 +7203,22 @@ CPed::FinishDieAnimCB(CAnimBlendAssociation *animAssoc, void *arg)
 void
 CPed::SetDead(void)
 {
+	if(gbPoliceReviveCheat && m_nPedType == PEDTYPE_COP){
+		// Console-only "police return from dead" cheat. Revive after the
+		// death animation has completed, while the cop still owns its model,
+		// weapon and AI references; resurrecting after SetDead's cleanup would
+		// leave a visible ped with the dead entity's torn-down state.
+		m_fHealth = 100.0f;
+		bUsesCollision = true;
+		bIsVisible = true;
+		bIsPedDieAnimPlaying = false;
+		m_deadBleeding = false;
+		bDoBloodyFootprints = false;
+		SetPedState(PED_FALL);
+		SetGetUp();
+		return;
+	}
+
 	if (!RpAnimBlendClumpGetAssociation(GetClump(), ANIM_STD_DROWN))
 		bUsesCollision = false;
 

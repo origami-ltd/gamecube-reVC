@@ -34,12 +34,15 @@ LOOSE_TXD_DIRS = ("models", "txd")
 # about 6MB, and FRONTEND_DS2.TXD is the one dictionary txdconv cannot read,
 # which made shipping it a live D3D8 path in a GX-only build.
 SKIP_TXD = ("frontend_ds2.txd", "frontend_ds3.txd", "frontend_ds4.txd",
-            "frontend_x360.txd", "frontend_xone.txd", "frontend_nsw.txd")
+            "frontend_x360.txd", "frontend_xone.txd", "frontend_nsw.txd",
+            "ps3btns.txd", "x360btns.txd", "nswbtns.txd")
 
-# fe_arrows1..4 are the highlight overlays drawn on top of the pad. Blank
-# rather than absent: CSprite2d::Draw on a sprite with no texture paints an
-# untextured quad, which would cover the diagram it is meant to annotate.
-GCC_TXD_IMAGES = (("fe_controller", "fe_controller.tga"),
+# The controller itself is a real DFF clump. gc_controller is its full-size
+# base colour converted to a GX-native raster. The old diagram and its arrow
+# overlays remain as blank compatibility slots because LoadController still
+# owns those five frontend sprites on non-GC builds.
+GCC_TXD_IMAGES = (("gc_controller", "gamecube_controller.tga"),
+                  ("fe_controller", "fe_blank.tga"),
                   ("fe_arrows1", "fe_blank.tga"),
                   ("fe_arrows2", "fe_blank.tga"),
                   ("fe_arrows3", "fe_blank.tga"),
@@ -65,6 +68,8 @@ def main():
     ap.add_argument("--max-dim", type=int, help="cap texture axes, passed to txdconv")
     ap.add_argument("--size-mb", type=int, default=1500,
                     help="target disc size, for the fit report")
+    ap.add_argument("--keep-sfx-raw", action="store_true",
+                    help="keep the unpacked sample bank for an SD-only build")
     args = ap.parse_args()
 
     if not os.path.isdir(args.game):
@@ -81,7 +86,8 @@ def main():
         dst = os.path.join(args.out, name)
         print("copy %s" % name, flush=True)
         shutil.copytree(src, dst, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("gta3.img", "gta3.dir"))
+                        ignore=shutil.ignore_patterns("gta3.img", "gta3.dir",
+                                                     "*.bak", "._*"))
 
     converted = failed = 0
     for sub in LOOSE_TXD_DIRS:
@@ -148,10 +154,35 @@ def main():
         sys.exit("frontend_gcc.txd failed; the frontend would draw an "
                  "untextured quad where the pad goes")
 
+    controller_dff = os.path.join(assets, "gamecube_controller.dff")
+    if not os.path.isfile(controller_dff):
+        sys.exit("missing converted 3D controller: " + controller_dff)
+    shutil.copy2(controller_dff,
+                 os.path.join(args.out, "models", "frontend_gcc.dff"))
+
     if args.audio and os.path.isdir(args.audio):
         dst = os.path.join(args.out, "audio")
         print("copy audio", flush=True)
         shutil.copytree(args.audio, dst, dirs_exist_ok=True)
+
+    # The mini-DVD uses an exact lossless pack, not lower-rate audio. Verify
+    # all 9,941 random-access samples before removing the 340MB raw bank.
+    audio_dir = os.path.join(args.out, "audio")
+    raw = os.path.join(audio_dir, "sfx.raw")
+    sdt = os.path.join(audio_dir, "sfx.sdt")
+    pak = os.path.join(audio_dir, "sfx.pak")
+    if not args.keep_sfx_raw and os.path.isfile(raw) and os.path.isfile(sdt):
+        packer = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "pack_sfx.py")
+        cmd = [sys.executable, packer, raw, sdt, pak]
+        if os.path.isfile(pak):
+            cmd.append("--check")
+        else:
+            cmd.append("--verify")
+        print("verify lossless sfx.pak", flush=True)
+        if subprocess.run(cmd).returncode != 0:
+            sys.exit("sfx.pak failed verification; refusing to remove sfx.raw")
+        os.remove(raw)
 
     total = 0
     for root, _, files in os.walk(args.out):

@@ -87,6 +87,7 @@ bool CPad::IsAffectedByController = false;
 
 _TODO("gbFastTime");
 extern bool gbFastTime;
+bool gbPoliceReviveCheat;
 
 #ifdef WALLCLIMB_CHEAT
 extern bool gGravityCheat;
@@ -529,6 +530,13 @@ void FannyMagnetCheat()
 {
 	CHud::SetHelpMessage(TheText.Get("CHEAT1"), true);
 	CPed::bFannyMagnetCheat = !CPed::bFannyMagnetCheat;
+	CPad::bHasPlayerCheated = true;
+}
+
+void PoliceReviveCheat()
+{
+	CHud::SetHelpMessage(TheText.Get("CHEAT1"), true);
+	gbPoliceReviveCheat = true;
 	CPad::bHasPlayerCheated = true;
 }
 
@@ -1131,103 +1139,98 @@ void CPad::StartShake_Train(float fX, float fY)
 }
 
 #ifdef GTA_PS2_STUFF
+static void SpawnRhino(void)       { VehicleCheat(MI_RHINO); }
+static void SpawnBloodringA(void)  { VehicleCheat(MI_BLOODRA); }
+static void SpawnBloodringB(void)  { VehicleCheat(MI_BLOODRB); }
+static void SpawnHotringA(void)    { VehicleCheat(MI_HOTRINA); }
+static void SpawnHotringB(void)    { VehicleCheat(MI_HOTRINB); }
+static void SpawnRomero(void)      { VehicleCheat(MI_ROMERO); }
+static void SpawnLoveFist(void)    { VehicleCheat(MI_LOVEFIST); }
+static void SpawnTrashmaster(void) { VehicleCheat(MI_TRASH); }
+static void SpawnSabreTurbo(void)  { VehicleCheat(MI_SABRETUR); }
+static void SpawnCaddy(void)       { VehicleCheat(MI_CADDY); }
+
+static void PlayAsRicardoDiaz(void) { ChangePlayerModel("igdiaz"); }
+static void PlayAsLanceVance(void)  { ChangePlayerModel("igbuddy"); }
+static void PlayAsCandySuxxx(void)  { ChangePlayerModel("igcandy"); }
+static void PlayAsKenRosenberg(void){ ChangePlayerModel("igken"); }
+static void PlayAsHilaryKing(void)  { ChangePlayerModel("ighlary"); }
+static void PlayAsJezzTorrent(void) { ChangePlayerModel("igjezz"); }
+static void PlayAsDick(void)        { ChangePlayerModel("igdick"); }
+static void PlayAsPhilCassidy(void) { ChangePlayerModel("igphil"); }
+static void PlayAsSonnyForelli(void){ ChangePlayerModel("igsonny"); }
+static void PlayAsMercedes(void)    { ChangePlayerModel("igmerc"); }
+
+static void
+MediaAndFlyingBoatsCheat(void)
+{
+	// The original console sequence is documented under both effects. Keep
+	// both instead of silently dropping the AIRSHIP behaviour from the PC game.
+	DoShowChaseStatCheat();
+	FlyingFishCheat();
+}
+
+struct GameCubeCheat
+{
+	const char *code;
+	void (*activate)(void);
+	const char *name;
+};
+
+static const GameCubeCheat gameCubeCheats[] = {
+#define GC_CHEAT(code, activate, name) { code, activate, name },
+#include "GameCubeCheats.inc"
+#undef GC_CHEAT
+};
+
+static const GameCubeCheat *
+FindGameCubeCheat(const char *entered)
+{
+	for(uint32 entry = 0; entry < ARRAY_SIZE(gameCubeCheats); entry++){
+		const char *code = gameCubeCheats[entry].code;
+		size_t length = strlen(code);
+		bool match = length <= sizeof(CPad::GetPad(0)->CheatString);
+		for(size_t i = 0; match && i < length; i++)
+			match = entered[i] == code[length - i - 1];
+		if(match)
+			return &gameCubeCheats[entry];
+	}
+	return nil;
+}
+
+#ifdef GTA_OGC
+bool
+CPad::ValidateGameCubeCheats(void)
+{
+	if(ARRAY_SIZE(gameCubeCheats) != 54)
+		return false;
+
+	char entered[sizeof(CheatString)];
+	for(uint32 entry = 0; entry < ARRAY_SIZE(gameCubeCheats); entry++){
+		memset(entered, ' ', sizeof(entered));
+		size_t length = strlen(gameCubeCheats[entry].code);
+		if(length > sizeof(entered))
+			return false;
+		for(size_t i = 0; i < length; i++)
+			entered[i] = gameCubeCheats[entry].code[length - i - 1];
+		if(FindGameCubeCheat(entered) != &gameCubeCheats[entry])
+			return false;
+	}
+	return true;
+}
+#endif
+
 void CPad::AddToCheatString(char c)
 {
 	for ( int32 i = ARRAY_SIZE(CheatString) - 2; i >= 0; i-- )
 		CheatString[i + 1] = CheatString[i];
 
 	CheatString[0] = c;
-
-#define _CHEATCMP(str)	strncmp(str, CheatString, sizeof(str)-1)
-	// "4414LDRULDRU"	-	R2 R2 L1 R2 LEFT DOWN RIGHT UP LEFT DOWN RIGHT UP
-	if ( !_CHEATCMP("URDLURDL4144") )
-		WeaponCheat1();
-
-	// "4411LDRULDRU"	-	R2 R2 L1 L1 LEFT DOWN RIGHT UP LEFT DOWN RIGHT UP
-	else if ( !_CHEATCMP("URDLURDL1144") )
-		MoneyCheat();
-
-	// "4412LDRULDRU"	-	R2 R2 L1 L2 LEFT DOWN RIGHT UP LEFT DOWN RIGHT UP
-	else if ( !_CHEATCMP("URDLURDL2144") )
-		ArmourCheat();
-
-	// "4413LDRULDRU"	-	R2 R2 L1 R1 LEFT DOWN RIGHT UP LEFT DOWN RIGHT UP
-	else if ( !_CHEATCMP("URDLURDL3144") )
-		HealthCheat();
-
-	// "4414LRLRLR"		-	R2 R2 L1 R2 LEFT RIGHT LEFT RIGHT LEFT RIGHT
-	else if ( !_CHEATCMP("RLRLRL4144") )
-		WantedLevelUpCheat();
-
-	// "4414UDUDUD"		-	R2 R2 L1 R2 UP DOWN UP DOWN UP DOWN
-	else if ( !_CHEATCMP("DUDUDU4144") )
-		WantedLevelDownCheat();
-
-	// "1234432T"		-	L1 L2 R1 R2 R2 R1 L2 TRIANGLE
-	else if ( !_CHEATCMP("T2344321") )
-		SunnyWeatherCheat();
-
-	// "1234432S"		-	L1 L2 R1 R2 R2 R1 L2 SQUARE
-	else if ( !_CHEATCMP("S2344321") )
-		CloudyWeatherCheat();
-
-	// "1234432C"		-	L1 L2 R1 R2 R2 R1 L2 CIRCLE
-	else if ( !_CHEATCMP("C2344321") )
-		RainyWeatherCheat();
-
-	// "1234432X"		-	L1 L2 R1 R2 R2 R1 L2 CROSS
-	else if ( !_CHEATCMP("X2344321") )
-		FoggyWeatherCheat();
-
-	// "CCCCCC321TCT"	-	CIRCLE CIRCLE CIRCLE CIRCLE CIRCLE CIRCLE R1 L2 L1 TRIANGLE CIRCLE TRIANGLE
-	else if ( !_CHEATCMP("TCT123CCCCCC") )
-		VehicleCheat(MI_RHINO);
-
-	// "CCCSSSSS1TCT"	-	CIRCLE CIRCLE CIRCLE SQUARE SQUARE SQUARE SQUARE SQUARE L1 TRIANGLE CIRCLE TRIANGLE
-	else if ( !_CHEATCMP("TCT1SSSSSCCC") )
-		FastWeatherCheat();
-
-	// "241324TSCT21"	-	L2 R2 L1 R1 L2 R2 TRIANGLE SQUARE CIRCLE TRIANGLE L2 L1
-	else if ( !_CHEATCMP("12TCST423142") )
-		BlowUpCarsCheat();
-
-	// "RDLU12ULDR"		-	RIGHT DOWN LEFT UP L1 L2 UP LEFT DOWN RIGHT
-	else if ( !_CHEATCMP("RDLU21ULDR") )
-		ChangePlayerCheat();
-
-	// "DULUX3421"		-	DOWN UP LEFT UP CROSS R1 R2 L2 L1
-	else if ( !_CHEATCMP("1243XULUD") )
-		MayhemCheat();
-
-	// "DULUX3412"		-	DOWN UP LEFT UP CROSS R1 R2 L1 L2
-	else if ( !_CHEATCMP("2143XULUD") )
-		EverybodyAttacksPlayerCheat();
-
-	// "43TX21UD"		-	R2 R1 TRIANGLE CROSS L2 L1 UP DOWN
-	else if ( !_CHEATCMP("DU12XT34") )
-		WeaponsForAllCheat();
-
-	// "TURDS12"		-	TRIANGLE UP RIGHT DOWN SQUARE L1 L2
-	else if ( !_CHEATCMP("21SDRUT") )
-		FastTimeCheat();
-
-	// "TURDS34"		-	TRIANGLE UP RIGHT DOWN SQUARE R1 R2
-	else if ( !_CHEATCMP("43SDRUT") )
-		SlowTimeCheat();
-
-	// "11S4T1T"		-	L1 L1 SQUARE R2 TRIANGLE L1 TRIANGLE
-	else if ( !_CHEATCMP("T1T4S11") )
-		OnlyRenderWheelsCheat();
-
-	// "R4C32D13"		-	RIGHT R2 CIRCLE R1 L2 DOWN L1 R1
-	else if ( !_CHEATCMP("31D23C4R") )
-		ChittyChittyBangBangCheat();
-
-	// "3141L33T"		-	R1 L1 R2 L1 LEFT R1 R1 TRIANGLE
-	else if ( !_CHEATCMP("T33L1413") )
-		StrongGripCheat();
-
-#undef _CHEATCMP
+	const GameCubeCheat *cheat = FindGameCubeCheat(CheatString);
+	if(cheat){
+		CheatString[0] = ' ';
+		cheat->activate();
+	}
 }
 #endif
 
@@ -2098,6 +2101,43 @@ void CPad::DoCheats(void)
 void CPad::DoCheats(int16 unk)
 {
 #ifdef GTA_PS2_STUFF
+#ifdef GTA_OGC
+	// A GameCube trigger has two distinct inputs: the analogue pull and the
+	// click at the end. Delay the pull until release (or a short hold) so a
+	// quick click produces only L1/R1 instead of contaminating the sequence
+	// with an L2/R2 first. This preserves all four PS2 shoulder symbols.
+	static bool leftPullPending, rightPullPending;
+	static uint32 leftPullStarted, rightPullStarted;
+	uint32 now = CTimer::GetTimeInMilliseconds();
+	bool leftClick = GetLeftShoulder1JustDown();
+	bool rightClick = GetRightShoulder1JustDown();
+
+	if(NewState.LeftShoulder2 && !OldState.LeftShoulder2){
+		leftPullPending = true;
+		leftPullStarted = now;
+	}
+	if(NewState.RightShoulder2 && !OldState.RightShoulder2){
+		rightPullPending = true;
+		rightPullStarted = now;
+	}
+	if(leftClick){
+		leftPullPending = false;
+		AddToCheatString('1');
+	}else if(leftPullPending &&
+	    (!NewState.LeftShoulder2 || now - leftPullStarted >= 300)){
+		leftPullPending = false;
+		AddToCheatString('2');
+	}
+	if(rightClick){
+		rightPullPending = false;
+		AddToCheatString('3');
+	}else if(rightPullPending &&
+	    (!NewState.RightShoulder2 || now - rightPullStarted >= 300)){
+		rightPullPending = false;
+		AddToCheatString('4');
+	}
+#endif
+
 	if ( GetTriangleJustDown() )
 		AddToCheatString('T');
 
@@ -2122,17 +2162,12 @@ void CPad::DoCheats(int16 unk)
 	if ( GetDPadRightJustDown() )
 		AddToCheatString('R');
 
-	if ( GetLeftShoulder1JustDown() )
-		AddToCheatString('1');
-
-	if ( GetLeftShoulder2JustDown() )
-		AddToCheatString('2');
-
-	if ( GetRightShoulder1JustDown() )
-		AddToCheatString('3');
-
-	if ( GetRightShoulder2JustDown() )
-		AddToCheatString('4');
+#ifndef GTA_OGC
+	if ( GetLeftShoulder1JustDown() ) AddToCheatString('1');
+	if ( GetLeftShoulder2JustDown() ) AddToCheatString('2');
+	if ( GetRightShoulder1JustDown() ) AddToCheatString('3');
+	if ( GetRightShoulder2JustDown() ) AddToCheatString('4');
+#endif
 #endif
 }
 
@@ -2168,12 +2203,20 @@ CPad *CPad::GetPad(int32 pad)
 #else
 #define CURMODE (Mode)
 #endif
+#ifdef GTA_OGC
+#undef CURMODE
+#define CURMODE (Mode == 1 ? 1 : 0)
+#endif
 
 int16 CPad::GetSteeringLeftRight(void)
 {
 	if ( ArePlayerControlsDisabled() )
 		return 0;
 
+#ifdef GTA_OGC
+	SteeringLeftRightBuffer[0] = NewState.LeftStickX;
+	return SteeringLeftRightBuffer[DrunkDrivingBufferUsed];
+#else
 	int16 value;
 	switch (CURMODE)
 	{
@@ -2209,6 +2252,7 @@ int16 CPad::GetSteeringLeftRight(void)
 	}
 
 	return value;
+#endif
 }
 
 int16 CPad::GetSteeringUpDown(void)
@@ -2216,6 +2260,9 @@ int16 CPad::GetSteeringUpDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return 0;
 
+#ifdef GTA_OGC
+	return NewState.LeftStickY;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2242,6 +2289,7 @@ int16 CPad::GetSteeringUpDown(void)
 	}
 
 	return 0;
+#endif
 }
 
 int16 CPad::GetCarGunUpDown(void)
@@ -2303,6 +2351,9 @@ int16 CPad::GetPedWalkLeftRight(void)
 	if ( ArePlayerControlsDisabled() )
 		return 0;
 
+#ifdef GTA_OGC
+	return NewState.LeftStickX;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2329,6 +2380,7 @@ int16 CPad::GetPedWalkLeftRight(void)
 	}
 
 	return 0;
+#endif
 }
 
 int16 CPad::GetPedWalkUpDown(void)
@@ -2336,6 +2388,9 @@ int16 CPad::GetPedWalkUpDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return 0;
 
+#ifdef GTA_OGC
+	return NewState.LeftStickY;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2362,10 +2417,14 @@ int16 CPad::GetPedWalkUpDown(void)
 	}
 
 	return 0;
+#endif
 }
 
 int16 CPad::GetAnalogueUpDown(void)
 {
+#ifdef GTA_OGC
+	return NewState.LeftStickY;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2392,10 +2451,14 @@ int16 CPad::GetAnalogueUpDown(void)
 	}
 
 	return 0;
+#endif
 }
 
 int16 CPad::GetAnalogueLeftRight(void)
 {
+#ifdef GTA_OGC
+	return NewState.LeftStickX;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2422,6 +2485,7 @@ int16 CPad::GetAnalogueLeftRight(void)
 	}
 
 	return 0;
+#endif
 }
 
 bool CPad::GetLookLeft(void)
@@ -2429,7 +2493,15 @@ bool CPad::GetLookLeft(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	// Layout 1 uses the analogue shoulder travel to look out of the car;
+	// layout 2 reserves both triggers for progressive pedals. The C-stick is
+	// never stolen from the free camera, so directional drive-by is deliberately
+	// unavailable in that layout (B still fires from the vehicle).
+	return CURMODE == 0 && NewState.LeftShoulder2 && !NewState.RightShoulder2;
+#else
 	return !!(NewState.LeftShoulder2 && !NewState.RightShoulder2);
+#endif
 }
 
 bool CPad::GetLookRight(void)
@@ -2437,7 +2509,11 @@ bool CPad::GetLookRight(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return CURMODE == 0 && NewState.RightShoulder2 && !NewState.LeftShoulder2;
+#else
 	return !!(NewState.RightShoulder2 && !NewState.LeftShoulder2);
+#endif
 }
 
 
@@ -2446,7 +2522,11 @@ bool CPad::GetLookBehindForCar(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return CURMODE == 0 && NewState.RightShoulder2 && NewState.LeftShoulder2;
+#else
 	return !!(NewState.RightShoulder2 && NewState.LeftShoulder2);
+#endif
 }
 
 bool CPad::GetLookBehindForPed(void)
@@ -2454,7 +2534,11 @@ bool CPad::GetLookBehindForPed(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!NewState.LeftShoulder1;
+#else
 	return !!NewState.RightShock;
+#endif
 }
 
 bool CPad::GetHorn(void)
@@ -2462,6 +2546,9 @@ bool CPad::GetHorn(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!NewState.DPadUp;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2494,6 +2581,7 @@ bool CPad::GetHorn(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::HornJustDown(void)
@@ -2501,6 +2589,9 @@ bool CPad::HornJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.DPadUp && !OldState.DPadUp);
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2533,6 +2624,7 @@ bool CPad::HornJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::GetCarGunFired(void)
@@ -2540,6 +2632,10 @@ bool CPad::GetCarGunFired(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.Circle ||
+	    (CURMODE == 0 && (NewState.LeftShoulder1 || NewState.RightShoulder1)));
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2560,6 +2656,7 @@ bool CPad::GetCarGunFired(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::CarGunJustDown(void)
@@ -2567,6 +2664,12 @@ bool CPad::CarGunJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.Circle && !OldState.Circle) ||
+	    (CURMODE == 0 &&
+	     ((NewState.LeftShoulder1 && !OldState.LeftShoulder1) ||
+	      (NewState.RightShoulder1 && !OldState.RightShoulder1)));
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2587,6 +2690,7 @@ bool CPad::CarGunJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 int16 CPad::GetHandBrake(void)
@@ -2594,6 +2698,9 @@ int16 CPad::GetHandBrake(void)
 	if ( ArePlayerControlsDisabled() )
 		return 0;
 
+#ifdef GTA_OGC
+	return NewState.Square;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2620,6 +2727,7 @@ int16 CPad::GetHandBrake(void)
 	}
 
 	return 0;
+#endif
 }
 
 int16 CPad::GetBrake(void)
@@ -2627,6 +2735,14 @@ int16 CPad::GetBrake(void)
 	if ( ArePlayerControlsDisabled() )
 		return 0;
 
+#ifdef GTA_OGC
+	// A GameCube trigger reports its analogue travel separately from its
+	// bottom click.  Layout 2 therefore has a real progressive brake and the
+	// click becomes full brake/reverse once the vehicle stops.
+	return CURMODE == 1
+	    ? (NewState.LeftShoulder1 ? 255 : NewState.LeftShoulder2)
+	    : NewState.Triangle;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2658,6 +2774,7 @@ int16 CPad::GetBrake(void)
 	}
 
 	return 0;
+#endif
 }
 
 bool CPad::GetExitVehicle(void)
@@ -2669,6 +2786,9 @@ bool CPad::GetExitVehicle(void)
 	if ( JustOutOfFrontend != 0 )
 		return false;
 
+#ifdef GTA_OGC
+	return !!NewState.Select;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2689,6 +2809,7 @@ bool CPad::GetExitVehicle(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::ExitVehicleJustDown(void)
@@ -2699,6 +2820,9 @@ bool CPad::ExitVehicleJustDown(void)
 	if ( JustOutOfFrontend != 0 )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.Select && !OldState.Select);
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2719,6 +2843,7 @@ bool CPad::ExitVehicleJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 int32 CPad::GetWeapon(void)
@@ -2726,6 +2851,11 @@ int32 CPad::GetWeapon(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	// B remains the direct melee/action button. On foot, R click fires in both
+	// layouts; its layout-2 meaning of "full throttle" is vehicle-only.
+	return NewState.Circle || NewState.RightShoulder1;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2752,6 +2882,7 @@ int32 CPad::GetWeapon(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::WeaponJustDown(void)
@@ -2759,6 +2890,10 @@ bool CPad::WeaponJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.Circle && !OldState.Circle) ||
+	    !!(NewState.RightShoulder1 && !OldState.RightShoulder1);
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2785,6 +2920,7 @@ bool CPad::WeaponJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 int16 CPad::GetAccelerate(void)
@@ -2792,6 +2928,12 @@ int16 CPad::GetAccelerate(void)
 	if ( ArePlayerControlsDisabled() )
 		return 0;
 
+#ifdef GTA_OGC
+	// Layout 2: R travel is progressive, R click is unambiguously 100%.
+	return CURMODE == 1
+	    ? (NewState.RightShoulder1 ? 255 : NewState.RightShoulder2)
+	    : NewState.Cross;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2823,10 +2965,15 @@ int16 CPad::GetAccelerate(void)
 	}
 
 	return 0;
+#endif
 }
 
 bool CPad::CycleCameraModeJustDown(void)
 {
+#ifdef GTA_OGC
+	// Z is dedicated to enter/exit and the C-stick is the free camera.
+	return false;
+#else
 	bool result;
 	switch (CURMODE)
 	{
@@ -2870,10 +3017,14 @@ bool CPad::CycleCameraModeJustDown(void)
 	}
 
 	return result;
+#endif
 }
 
 bool CPad::CycleCameraModeUpJustDown(void)
 {
+#ifdef GTA_OGC
+	return false;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2894,10 +3045,14 @@ bool CPad::CycleCameraModeUpJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::CycleCameraModeDownJustDown(void)
 {
+#ifdef GTA_OGC
+	return false;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2918,6 +3073,7 @@ bool CPad::CycleCameraModeDownJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::ChangeStationJustDown(void)
@@ -2925,6 +3081,10 @@ bool CPad::ChangeStationJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.DPadLeft && !OldState.DPadLeft) ||
+	    !!(NewState.DPadRight && !OldState.DPadRight);
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -2957,6 +3117,7 @@ bool CPad::ChangeStationJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::CycleWeaponLeftJustDown(void)
@@ -2964,7 +3125,11 @@ bool CPad::CycleWeaponLeftJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.DPadLeft && !OldState.DPadLeft);
+#else
 	return !!(NewState.LeftShoulder2 && !OldState.LeftShoulder2);
+#endif
 }
 
 bool CPad::CycleWeaponRightJustDown(void)
@@ -2972,7 +3137,11 @@ bool CPad::CycleWeaponRightJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.DPadRight && !OldState.DPadRight);
+#else
 	return !!(NewState.RightShoulder2 && !OldState.RightShoulder2);
+#endif
 }
 
 bool CPad::GetTarget(void)
@@ -2980,6 +3149,9 @@ bool CPad::GetTarget(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!NewState.RightShoulder2;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -3000,6 +3172,7 @@ bool CPad::GetTarget(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::TargetJustDown(void)
@@ -3007,6 +3180,9 @@ bool CPad::TargetJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.RightShoulder2 && !OldState.RightShoulder2);
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -3027,6 +3203,7 @@ bool CPad::TargetJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::CollectPickupJustDown(void)
@@ -3034,6 +3211,9 @@ bool CPad::CollectPickupJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.Select && !OldState.Select);
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -3059,6 +3239,7 @@ bool CPad::CollectPickupJustDown(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::DuckJustDown(void)
@@ -3066,7 +3247,11 @@ bool CPad::DuckJustDown(void)
 	if (ArePlayerControlsDisabled())
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.Square && !OldState.Square);
+#else
 	return !!(NewState.LeftShock && !OldState.LeftShock);
+#endif
 }
 
 bool CPad::JumpJustDown(void)
@@ -3074,7 +3259,11 @@ bool CPad::JumpJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.Triangle && !OldState.Triangle);
+#else
 	return !!(NewState.Square && !OldState.Square);
+#endif
 }
 
 bool CPad::GetSprint(void)
@@ -3082,6 +3271,9 @@ bool CPad::GetSprint(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!NewState.Cross;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -3102,6 +3294,7 @@ bool CPad::GetSprint(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::ShiftTargetLeftJustDown(void)
@@ -3109,7 +3302,11 @@ bool CPad::ShiftTargetLeftJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.DPadLeft && !OldState.DPadLeft);
+#else
 	return !!(NewState.LeftShoulder2 && !OldState.LeftShoulder2);
+#endif
 }
 
 bool CPad::ShiftTargetRightJustDown(void)
@@ -3117,7 +3314,11 @@ bool CPad::ShiftTargetRightJustDown(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.DPadRight && !OldState.DPadRight);
+#else
 	return !!(NewState.LeftShoulder1 && !OldState.LeftShoulder1) || !!(NewState.RightShoulder2 && !OldState.RightShoulder2);
+#endif
 }
 
 bool CPad::GetAnaloguePadUp(void)
@@ -3237,6 +3438,9 @@ bool CPad::ForceCameraBehindPlayer(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!(NewState.LeftShoulder2 && !NewState.LeftShoulder1);
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -3263,6 +3467,7 @@ bool CPad::ForceCameraBehindPlayer(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::SniperZoomIn(void)
@@ -3270,6 +3475,9 @@ bool CPad::SniperZoomIn(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!NewState.DPadUp;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -3290,6 +3498,7 @@ bool CPad::SniperZoomIn(void)
 	}
 
 	return false;
+#endif
 }
 
 bool CPad::SniperZoomOut(void)
@@ -3297,6 +3506,9 @@ bool CPad::SniperZoomOut(void)
 	if ( ArePlayerControlsDisabled() )
 		return false;
 
+#ifdef GTA_OGC
+	return !!NewState.DPadDown;
+#else
 	switch (CURMODE)
 	{
 		case 0:
@@ -3317,6 +3529,7 @@ bool CPad::SniperZoomOut(void)
 	}
 
 	return false;
+#endif
 }
 
 #undef CURMODE
@@ -3496,6 +3709,7 @@ void CPad::ResetCheats(void)
 	CCarCtrl::bMadDriversCheat = false;
 	CTrafficLights::bGreenLightsCheat = false;
 	CStats::ShowChaseStatOnScreen = 0;
+	gbPoliceReviveCheat = false;
 	CPed::bNastyLimbsCheat = false;
 	CPed::bFannyMagnetCheat = false;
 	CPed::bPedCheat3 = false;
