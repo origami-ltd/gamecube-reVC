@@ -27,6 +27,7 @@ extern "C" bool ISO9660_MountDbg(const char *name, const DISC_INTERFACE *disc_in
 #include <fat.h>
 #ifdef HW_RVL
 #include <sdcard/wiisd_io.h>
+#include <ogc/usbstorage.h>
 #else
 #include <sdcard/gcsd.h>
 #endif
@@ -578,8 +579,14 @@ psInstallFileSystem(void)
 {
 	if(!fileSystemReady){
 #ifdef HW_RVL
-		static const DISC_INTERFACE *const sdSlots[] = { &__io_wiisd };
-		static const char *const sdNames[] = { "front SD" };
+		// SD first, then USB. The Wii's front SD is the documented setup and
+		// mounts instantly; USB is probed after it because usbstorage's startup
+		// blocks for a while when nothing is attached, and that would tax every
+		// boot to serve the rarer case. Put the game data on whichever one you
+		// want it read from - USB is the faster of the two on this machine by a
+		// wide margin, which matters for a game that streams hundreds of MB.
+		static const DISC_INTERFACE *const sdSlots[] = { &__io_wiisd, &__io_usbstorage };
+		static const char *const sdNames[] = { "front SD", "USB storage" };
 #else
 		static const DISC_INTERFACE *const sdSlots[] = { &__io_gcsda, &__io_gcsdb };
 		static const char *const sdNames[] = { "SD Gecko slot A", "SD Gecko slot B" };

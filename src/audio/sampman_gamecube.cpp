@@ -88,6 +88,7 @@ struct GcChannel {
 	AESNDPB *voice;
 	void    *pcm;        // sample data the voice reads from
 	bool8    pcm48;      // pcm holds 48kHz-converted data, so scale the freq
+	uint32   pcmFreq;    // game pitch baked into pcm48; live changes scale from it
 	bool8    pcmOwned;   // pcm is this channel's own buffer (ped/talk copies);
 	                     // FALSE = pointer into the resident bank, never freed
 	uint32   pcmBytes;
@@ -153,7 +154,11 @@ static GcBank gBanks[MAX_SFX_BANKS];
 // resampler never runs. 48kHz 16-bit is the hardware ceiling; there is no
 // higher-quality path on this machine.
 #define GC_DSP_RATE_F  ((f32)DSP_DEFAULT_FREQ)
+#ifdef HW_RVL
+enum { GC_DSP_RATE = 48000 };
+#else
 enum { GC_DSP_RATE = (uint32)(54000000.0/1124.0 + 0.5) };
+#endif
 // Ceiling on a converted channel buffer. Above it the sample plays native
 // (the DSP's stair-step is the lesser evil against a 24MB arena).
 // A converted buffer is ~2.2x the native sample. 512KB covers 99.9% of the
@@ -629,6 +634,157 @@ gcBuildFir(void)
 	gFirReady = TRUE;
 }
 
+static void
+gcDiscardChannelPcm(GcChannel *c)
+{
+	if(c->pcmOwned){
+		gConvBytes -= c->allocBytes;
+		free(c->pcm);
+	}
+	c->pcm = nil;
+	c->pcmBytes = 0;
+	c->allocBytes = 0;
+	c->pcmOwned = FALSE;
+	c->pcm48 = FALSE;
+	c->pcmFreq = 0;
+}
+
+// A stopped voice cannot read its buffer again. Evict those cached copies
+// before accepting AESND's metallic native-rate fallback.
+static void
+gcMakeConversionRoom(GcChannel *keep, uint32 need)
+{
+	uint32 held = keep->pcmOwned ? keep->allocBytes : 0;
+	if(need <= held || gConvBytes - held + need <= GC_CONV_BUDGET)
+		return;
+	for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++){
+		GcChannel *c = &gChannels[i];
+		if(c != keep && !c->playing && c->pcmOwned)
+			gcDiscardChannelPcm(c);
+		held = keep->pcmOwned ? keep->allocBytes : 0;
+		if(gConvBytes - held + need <= GC_CONV_BUDGET)
+			return;
+	}
+}
+
+// Prepare the sample only after SetChannelFrequency has supplied the pitch.
+// The old path converted at the file's base rate, then asked AESND to play the
+// result at 61-70kHz for pitched effects — which simply re-enabled the DSP's
+// sample-repeat resampler. Bake the requested pitch into the FIR conversion
+// and hand AESND a 1:1 DSP-rate buffer instead. This also covers ped/player
+// speech, which used to bypass conversion entirely.
+static bool8
+gcPrepareChannel(GcChannel *c, uint32 nChannel)
+{
+	uint32 nSfx = c->sample;
+	uint32 rawBytes = gSampleIndex[nSfx].nSize;
+	uint32 baseFreq = gSampleIndex[nSfx].nFrequency ?
+	    gSampleIndex[nSfx].nFrequency : 22050;
+	uint32 targetFreq = c->freq ? c->freq : baseFreq;
+	uint32 inS = rawBytes/2;
+	uint32 outS = targetFreq < GC_DSP_RATE ?
+	    (uint32)((uint64)inS*GC_DSP_RATE/targetFreq) : inS;
+	uint32 outBytes = align32(outS*2);
+	uint32 srcSkew = 0;
+	uint32 readBytes = align32(rawBytes);
+	uint32 srcAddr = 0;
+	const uint8 *memSrc = nil;
+	char d[64];
+
+	if(nSfx < SAMPLEBANK_PED_START){
+		srcAddr = gBankSampleAddr[nSfx];
+		srcSkew = srcAddr & 31;
+		readBytes = align32(srcSkew + rawBytes);
+	}else if(nSfx == gPlayerTalkSfx && gPlayerTalkData)
+		memSrc = gPlayerTalkData;
+	else{
+		int32 slot = SampleManager._GetPedCommentSlot(nSfx);
+		if(slot < 0 || gPedBuf == nil){
+			snprintf(d, sizeof(d), "sfx=%u slot=%d", (unsigned)nSfx, (int)slot);
+			gcAudioDie("ped-comment-not-loaded", d);
+			return FALSE;
+		}
+		memSrc = gPedBuf + PED_BLOCKSIZE*slot;
+	}
+
+	bool8 resample = targetFreq < GC_DSP_RATE && inS >= 2 &&
+	                   outBytes <= GC_CH_RESAMPLE_CAP;
+	if(resample){
+		uint32 need = outBytes + 64;
+		gcMakeConversionRoom(c, need);
+		uint32 held = c->pcmOwned ? c->allocBytes : 0;
+		if(need > held && gConvBytes - held + need > GC_CONV_BUDGET)
+			resample = FALSE;
+	}
+	uint32 want = resample ? outBytes + 64 : readBytes;
+	if(want < readBytes)
+		want = readBytes;
+
+	if(!c->pcmOwned){
+		c->pcm = nil;
+		c->allocBytes = 0;
+	}
+	if(c->allocBytes < want){
+		gcDiscardChannelPcm(c);
+		c->pcm = memalign(32, want);
+		c->allocBytes = c->pcm ? want : 0;
+		c->pcmOwned = c->pcm != nil;
+		gConvBytes += c->allocBytes;
+	}
+	if(c->pcm == nil){
+		snprintf(d, sizeof(d), "ch=%u %uB", (unsigned)nChannel, (unsigned)want);
+		gcAudioDie("channel-pcm-alloc", d);
+		return FALSE;
+	}
+
+	uint8 *base = (uint8*)c->pcm;
+	uint32 tail = align32(want - readBytes);
+	if(tail + readBytes > want)
+		tail = 0;
+	if(nSfx < SAMPLEBANK_PED_START)
+		gcBankRead(base + tail, srcAddr - srcSkew, readBytes);
+	else
+		memcpy(base + tail, memSrc, rawBytes);
+	const int16 *sp = (const int16*)(base + tail + srcSkew);
+
+	if(resample){
+		int16 *dst = (int16*)base;
+		uint32 step = (targetFreq << 16)/GC_DSP_RATE;
+		uint32 pos = 0;
+		gcBuildFir();
+		for(uint32 k = 0; k < outS; k++, pos += step){
+			int32 i0 = (int32)(pos >> 16);
+			uint32 ph = (pos >> 10) & (GC_FIR_PHASES-1);
+			const f32 *tap = gFirTable[ph];
+			f32 acc = 0.0f;
+			for(int32 t = 0; t < GC_FIR_TAPS; t++){
+				int32 si = i0 + t - (GC_FIR_TAPS/2 - 1);
+				if(si < 0) si = 0;
+				else if(si >= (int32)inS) si = (int32)inS - 1;
+				acc += tap[t]*(f32)sp[si];
+			}
+			int32 v = (int32)(acc + (acc >= 0.0f ? 0.5f : -0.5f));
+			if(v > 32767) v = 32767;
+			else if(v < -32768) v = -32768;
+			dst[k] = (int16)v;
+		}
+		c->pcmBytes = outS*2;
+		c->pcm48 = TRUE;
+		c->pcmFreq = targetFreq;
+		gConvOk++;
+		if(gConvBytes > gConvPeak) gConvPeak = gConvBytes;
+	}else{
+		if(tail || srcSkew)
+			memmove(base, sp, rawBytes);
+		c->pcmBytes = align32(rawBytes);
+		c->pcm48 = FALSE;
+		c->pcmFreq = 0;
+		if(targetFreq != GC_DSP_RATE)
+			gConvFallback++;
+	}
+	return TRUE;
+}
+
 bool8
 cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 {
@@ -645,16 +801,12 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 		gcAudioDie("channel-no-voice", d);
 		return FALSE;
 	}
-	uint32 bytes = align32(gSampleIndex[nSfx].nSize);
-	if(bytes == 0){
+	if(gSampleIndex[nSfx].nSize == 0){
 		snprintf(d, sizeof(d), "sfx=%u", (unsigned)nSfx);
 		gcAudioDie("sample-zero-bytes", d);
 		return FALSE;
 	}
 
-	// Route by sample index, like the OAL backend: bank samples from the
-	// resident bank, player talk and ped comments from their MEM staging
-	// buffers (already byteswapped at load).
 	if(nSfx < SAMPLEBANK_PED_START){
 		nBank = SFX_BANK_0;
 		if(!gBanks[nBank].loaded){
@@ -662,157 +814,28 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 			gcAudioDie("bank0-not-loaded", d);
 			return FALSE;
 		}
-		// The bank holds the game's own PCM at its own rate (ARAM on the
-		// GameCube, the 16MB-capped MEM2 shim on the Wii dev target) - DMA
-		// only, never CPU-addressable, and never inflated. What DOES get
-		// converted is the copy this channel is about to play.
-		//
-		// Why convert at all: AESND's ucode resamples by repeating samples,
-		// with no interpolation, so an 11kHz effect played at the DSP's
-		// 48kHz output gets aliasing images as loud as the real top octave.
-		// That is the "metallic" the user keeps hearing, and the GameCube is
-		// better than this. Interpolating once, here, into the channel's own
-		// MEM1 buffer costs a few dozen KB for the length of one sound and
-		// hands the DSP a 1:1 buffer with nothing left to alias. Storing the
-		// whole bank at 48kHz instead would be 46MB against 14.3MB of source
-		// - it never fit ARAM, which is the mistake this replaces.
-		uint32 rawBytes = gSampleIndex[nSfx].nSize;
-		uint32 baseFreq = gSampleIndex[nSfx].nFrequency ?
-		    gSampleIndex[nSfx].nFrequency : 22050;
-		uint32 inS = rawBytes/2;
-		uint32 outS = baseFreq < GC_DSP_RATE ?
-		    (uint32)((uint64)inS*GC_DSP_RATE/baseFreq) : inS;
-		uint32 outBytes = align32(outS*2);
-
-		// ARAM DMA needs a 32-byte aligned source, and sample offsets are
-		// arbitrary (the table is packed byte-for-byte: 0, 1400, 3918...).
-		// Read from the aligned address below the sample and skip the
-		// remainder. On the Wii shim this is a memcpy and the alignment is
-		// free, which is exactly why it went unnoticed there.
-		uint32 srcAddr = gBankSampleAddr[nSfx];
-		uint32 srcSkew = srcAddr & 31;
-		uint32 readBytes = align32(srcSkew + rawBytes);
-
-		// One buffer. The native data lands at the TAIL and the conversion
-		// runs forward into the front: for every output k the source index
-		// i0 satisfies (k - i0) <= (outS - inS), so the read head always
-		// stays ahead of the write head and no scratch is needed. 64 bytes
-		// of slack covers the alignment skew.
-		bool8 resample = baseFreq < GC_DSP_RATE && outBytes <= GC_CH_RESAMPLE_CAP;
-		if(resample){
-			uint32 need = outBytes + 64;
-			if(need > c->allocBytes &&
-			   gConvBytes - c->allocBytes + need > GC_CONV_BUDGET)
-				resample = FALSE;      // pool is full; take the DSP's version
-		}
-		uint32 want = resample ? outBytes + 64 : readBytes;
-		if(want < readBytes)
-			want = readBytes;
-
-		if(!c->pcmOwned) { c->pcm = nil; c->pcmBytes = 0; c->allocBytes = 0; }
-		if(c->allocBytes < want){
-			gConvBytes -= c->allocBytes;
-			free(c->pcm);
-			c->pcm = memalign(32, want);
-			c->allocBytes = c->pcm ? want : 0;
-			gConvBytes += c->allocBytes;
-			c->pcmBytes = c->allocBytes;
-			c->pcmOwned = c->pcm != nil;
-		}
-		if(c->pcm == nil){
-			snprintf(d, sizeof(d), "ch=%u %uB", (unsigned)nChannel, (unsigned)want);
-			gcAudioDie("channel-pcm-alloc", d);
-			return FALSE;
-		}
-
-		uint8 *base = (uint8*)c->pcm;
-		uint32 tail = align32(want - readBytes);
-		if(tail + readBytes > want)
-			tail = 0;
-		gcBankRead(base + tail, srcAddr - srcSkew, readBytes);
-		const int16 *sp = (const int16*)(base + tail + srcSkew);
-		if(resample && inS >= 2){
-			int16 *dst = (int16*)base;
-			uint32 step = (baseFreq << 16)/GC_DSP_RATE;   // 16.16 source cursor
-			uint32 pos = 0;
-			gcBuildFir();
-			for(uint32 k = 0; k < outS; k++, pos += step){
-				int32 i0 = (int32)(pos >> 16);
-				uint32 ph = (pos >> 10) & (GC_FIR_PHASES-1);
-				const f32 *tap = gFirTable[ph];
-				f32 acc = 0.0f;
-				for(int32 t = 0; t < GC_FIR_TAPS; t++){
-					int32 si = i0 + t - (GC_FIR_TAPS/2 - 1);
-					if(si < 0) si = 0;
-					else if(si >= (int32)inS) si = (int32)inS - 1;
-					acc += tap[t]*(f32)sp[si];
-				}
-				int32 v = (int32)(acc + (acc >= 0.0f ? 0.5f : -0.5f));
-				if(v > 32767) v = 32767;
-				else if(v < -32768) v = -32768;
-				dst[k] = (int16)v;
-			}
-			c->pcmBytes = outS*2;
-			c->pcm48 = TRUE;
-			gConvOk++;
-			if(gConvBytes > gConvPeak) gConvPeak = gConvBytes;
-		}else{
-			if(tail || srcSkew)
-				memmove(base, sp, rawBytes);
-			c->pcmBytes = align32(rawBytes);
-			c->pcm48 = FALSE;
-			if(baseFreq < GC_DSP_RATE)
-				gConvFallback++;   // this one will alias, and we know it
-		}
 	}else{
-		// Ped comments and player talk are copied, not pointed to: their
-		// staging slots rotate and a pointed-at slot could be overwritten
-		// mid-play. Bounded by PED_BLOCKSIZE, so the cost is fixed.
-		//
-		// Size check FIRST: the observed channel-pcm-alloc park was a 205088B
-		// request — 2.6x the ped cap — failing its alloc before the slot
-		// check could name the real problem. An oversize sample can never
-		// have a loaded slot, so refuse it by name.
 		if(gSampleIndex[nSfx].nSize > PED_BLOCKSIZE){
 			snprintf(d, sizeof(d), "sfx=%u %uB", (unsigned)nSfx,
 			    (unsigned)gSampleIndex[nSfx].nSize);
 			gcAudioDie("ped-sample-oversize", d);
 			return FALSE;
 		}
-		if(!c->pcmOwned) { c->pcm = nil; c->pcmBytes = 0; c->allocBytes = 0; }
-		if(c->allocBytes < bytes){
-			gConvBytes -= c->allocBytes;
-			free(c->pcm);
-			c->pcm = memalign(32, bytes);
-			c->allocBytes = c->pcm ? bytes : 0;
-			gConvBytes += c->allocBytes;
-			c->pcmBytes = c->allocBytes;
-			c->pcmOwned = c->pcm != nil;
-		}
-		if(c->pcm == nil){
-			snprintf(d, sizeof(d), "ch=%u %uB", (unsigned)nChannel, (unsigned)bytes);
-			gcAudioDie("channel-pcm-alloc", d);
-			return FALSE;
-		}
-		if(nSfx == gPlayerTalkSfx && gPlayerTalkData){
-			memcpy(c->pcm, gPlayerTalkData, gSampleIndex[nSfx].nSize);
-		}else{
+		if(nSfx != gPlayerTalkSfx || gPlayerTalkData == nil){
 			int32 slot = _GetPedCommentSlot(nSfx);
 			if(slot < 0 || gPedBuf == nil){
 				snprintf(d, sizeof(d), "sfx=%u slot=%d", (unsigned)nSfx, (int)slot);
 				gcAudioDie("ped-comment-not-loaded", d);
 				return FALSE;
 			}
-			memcpy(c->pcm, gPedBuf + PED_BLOCKSIZE*slot, gSampleIndex[nSfx].nSize);
 		}
-		// Copied verbatim, never converted - and the flag has to be cleared
-		// for BOTH the ped and the player-talk path, or a channel that last
-		// played a converted bank sample keeps scaling this one's pitch.
-		c->pcm48 = FALSE;
 	}
 
 	c->sample = nSfx;
 	c->freq = gSampleIndex[nSfx].nFrequency;
+	c->pcmBytes = 0;       // prepared at StartChannel, after pitch is known
+	c->pcm48 = FALSE;
+	c->pcmFreq = 0;
 	// Centre unless the game asks otherwise. The OAL backend discards pan
 	// altogether (CChannel::SetPan only sets bForce2D; its positional line is
 	// commented out as "kinda pointless"), so a sound that never calls
@@ -827,8 +850,19 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 void
 cSampleManager::SetChannelFrequency(uint32 nChannel, uint32 nFreq)
 {
-	if(nChannel < ARRAY_SIZE(gChannels))
-		gChannels[nChannel].freq = nFreq;
+	if(nChannel >= ARRAY_SIZE(gChannels))
+		return;
+	GcChannel *c = &gChannels[nChannel];
+	c->freq = nFreq;
+	// Initial pitch is baked by gcPrepareChannel. Later engine/doppler
+	// changes still have to reach a live voice; scale around that clean
+	// prepared rate instead of around the file's unrelated base rate.
+	if(c->playing && c->voice){
+		f32 f = (f32)nFreq;
+		if(c->pcm48 && c->pcmFreq)
+			f = GC_DSP_RATE_F*(f32)nFreq/(f32)c->pcmFreq;
+		AESND_SetVoiceFrequency(c->voice, f);
+	}
 }
 
 void
@@ -934,13 +968,15 @@ cSampleManager::StartChannel(uint32 nChannel)
 	if(nChannel >= ARRAY_SIZE(gChannels))
 		return;
 	GcChannel *c = &gChannels[nChannel];
-	if(c->voice == nil || c->pcm == nil || !c->used){
+	if(c->voice == nil || !c->used){
 		char d[64];
-		snprintf(d, sizeof(d), "ch=%u v=%d p=%d u=%d", (unsigned)nChannel,
-		    c->voice != nil, c->pcm != nil, (int)c->used);
+		snprintf(d, sizeof(d), "ch=%u v=%d u=%d", (unsigned)nChannel,
+		    c->voice != nil, (int)c->used);
 		gcAudioDie("start-unprepared-channel", d);
 		return;
 	}
+	if(c->pcmBytes == 0 && !gcPrepareChannel(c, nChannel))
+		return;
 
 	// Volume and pan live in one place now (gcApplyChannelVolume), so a
 	// fade that arrives mid-sound reaches the voice too.
@@ -948,13 +984,11 @@ cSampleManager::StartChannel(uint32 nChannel)
 		DCFlushRange(c->pcm, c->pcmBytes);
 	gcApplyChannelVolume(c);
 	AESND_SetVoiceFormat(c->voice, VOICE_MONO16);
-	// A converted buffer is 48kHz, so the game's pitch request (engine revs
-	// and friends, expressed against the sample's own rate) scales onto it.
+	// gcPrepareChannel baked the initial requested pitch into this buffer, so
+	// normal one-shots run at the DSP's exact 1:1 rate.
 	f32 voiceFreq = (f32)c->freq;
-	if(c->pcm48 && c->sample < SAMPLEBANK_PED_START &&
-	   gSampleIndex && gSampleIndex[c->sample].nFrequency)
-		voiceFreq = GC_DSP_RATE_F*(f32)c->freq /
-		            (f32)gSampleIndex[c->sample].nFrequency;
+	if(c->pcm48 && c->pcmFreq)
+		voiceFreq = GC_DSP_RATE_F*(f32)c->freq/(f32)c->pcmFreq;
 	AESND_SetVoiceFrequency(c->voice, voiceFreq);
 	bool8 looping = c->loopCount != 1;
 	AESND_SetVoiceLoop(c->voice, looping);
@@ -971,9 +1005,8 @@ cSampleManager::StartChannel(uint32 nChannel)
 		// The buffer may have been converted to the DSP's rate, so the loop
 		// points - which the game gives against the sample's own rate - move
 		// with it.
-		if(c->pcm48 && c->sample < SAMPLEBANK_PED_START &&
-		   gSampleIndex && gSampleIndex[c->sample].nFrequency){
-			uint32 f = gSampleIndex[c->sample].nFrequency;
+		if(c->pcm48 && c->pcmFreq){
+			uint32 f = c->pcmFreq;
 			s = (uint32)((uint64)s*GC_DSP_RATE/f);
 			if(e) e = (uint32)((uint64)e*GC_DSP_RATE/f);
 		}
@@ -1028,14 +1061,8 @@ cSampleManager::StopChannel(uint32 nChannel)
 	c->used = FALSE;
 	// Hand a large buffer back to the pool. Small ones stay put: they are the
 	// common case and churning them would just fragment the arena.
-	if(c->pcmOwned && c->allocBytes > GC_CONV_RECLAIM){
-		gConvBytes -= c->allocBytes;
-		free(c->pcm);
-		c->pcm = nil;
-		c->pcmBytes = 0;
-		c->allocBytes = 0;
-		c->pcmOwned = FALSE;
-	}
+	if(c->pcmOwned && c->allocBytes > GC_CONV_RECLAIM)
+		gcDiscardChannelPcm(c);
 }
 
 // ------------------------------------------------------------------ volumes
@@ -1152,6 +1179,12 @@ struct GcStream {
 	bool8    adpcm;         // native IMA ADPCM .wav (voice) rather than Vorbis
 	uint8    adpcmSpill[4224];  // decoded samples that did not fit the last chunk
 	uint32   adpcmSpillBytes;
+	// Native-rate codec output waiting for the shared FIR resampler. Extra
+	// frames hold the history carried across decode-chunk boundaries.
+	uint8    srcBuf[STREAM_CHUNK_BYTES + GC_FIR_TAPS*4];
+	uint32   srcFrames;
+	uint32   srcPos;       // 16.16 cursor inside srcBuf
+	bool8    srcEof;
 	uint16   blockAlign;    // ADPCM block size in bytes
 	uint32   dataBytes;     // ADPCM payload length
 	bool8    playing;
@@ -1410,7 +1443,7 @@ gcLoadTrackLengths(void)
 		const char *lext = strrchr(path, '.');
 		if(lext && (lext[1] == 'w' || lext[1] == 'W')){
 			// Native voice: length comes from the RIFF header, no decoder.
-			GcStream probe;
+			static GcStream probe; // includes the stream resampler buffer; not stack-sized
 			memset(&probe, 0, sizeof(probe));
 			probe.file = f;
 			if(gcWavOpen(&probe) && probe.rate)
@@ -1434,14 +1467,10 @@ gcLoadTrackLengths(void)
 	}
 }
 
-// Fill dst with up to STREAM_CHUNK_BYTES of 16-bit stereo PCM at DIGITALRATE.
-// Returns bytes produced; 0 means end of track.
-//
-// Placeholder until the converter settles the disc format. It reads raw
-// interleaved PCM, which is what a decoded stream looks like, so the pump can
-// be exercised before the codec exists.
+// Decode one native-rate codec chunk. Returns actual bytes before zero padding;
+// 0 means end of track.
 static uint32
-gcStreamDecode(GcStream *st, uint8 *dst)
+gcStreamDecodeNative(GcStream *st, uint8 *dst)
 {
 	if(st->file && !st->vfOpen)
 		return gcWavDecode(st, dst);
@@ -1463,6 +1492,77 @@ gcStreamDecode(GcStream *st, uint8 *dst)
 		memset(dst + done, 0, STREAM_CHUNK_BYTES - done);
 	st->posSamples += done/(2*st->channels);
 	return done;
+}
+
+// Every stream — 22.05kHz speech/ambience as well as 44.1kHz radio — reaches
+// AESND at the DSP's exact rate. Otherwise the ucode repeats samples, the same
+// metallic mechanism already measured on effects. Keep nine source frames at
+// decode boundaries so the existing polyphase FIR stays continuous.
+static uint32
+gcStreamDecode(GcStream *st, uint8 *dst)
+{
+	if(st->rate == GC_DSP_RATE)
+		return gcStreamDecodeNative(st, dst);
+	uint32 channels = st->channels == 1 ? 1 : 2;
+	uint32 frameBytes = channels*2;
+	uint32 outFrames = STREAM_CHUNK_BYTES/frameBytes;
+	uint32 step = (st->rate << 16)/GC_DSP_RATE;
+	uint32 made = 0;
+	int16 *out = (int16*)dst;
+	gcBuildFir();
+
+	while(made < outFrames){
+		uint32 i0;
+		for(;;){
+			i0 = st->srcPos >> 16;
+			uint32 right = GC_FIR_TAPS - (GC_FIR_TAPS/2 - 1) - 1;
+			if(st->srcFrames && (st->srcEof || i0 + right < st->srcFrames))
+				break;
+			if(st->srcEof)
+				break;
+
+			uint32 keep = st->srcFrames < GC_FIR_TAPS ?
+			    st->srcFrames : GC_FIR_TAPS;
+			uint32 first = st->srcFrames - keep;
+			if(keep)
+				memmove(st->srcBuf,
+				    st->srcBuf + first*frameBytes, keep*frameBytes);
+			uint32 shift = first << 16;
+			st->srcPos = st->srcPos >= shift ? st->srcPos - shift : 0;
+			uint32 got = gcStreamDecodeNative(st,
+			    st->srcBuf + keep*frameBytes);
+			st->srcFrames = keep + got/frameBytes;
+			if(got == 0)
+				st->srcEof = TRUE;
+		}
+
+		if(st->srcFrames == 0 ||
+		   (st->srcEof && st->srcPos >= (st->srcFrames << 16)))
+			break;
+		i0 = st->srcPos >> 16;
+		uint32 ph = (st->srcPos >> 10) & (GC_FIR_PHASES-1);
+		const f32 *tap = gFirTable[ph];
+		for(uint32 ch = 0; ch < channels; ch++){
+			f32 acc = 0.0f;
+			for(int32 t = 0; t < GC_FIR_TAPS; t++){
+				int32 si = (int32)i0 + t - (GC_FIR_TAPS/2 - 1);
+				if(si < 0) si = 0;
+				else if(si >= (int32)st->srcFrames)
+					si = (int32)st->srcFrames - 1;
+				acc += tap[t]*(f32)((int16*)st->srcBuf)[si*channels + ch];
+			}
+			int32 v = (int32)(acc + (acc >= 0.0f ? 0.5f : -0.5f));
+			if(v > 32767) v = 32767;
+			else if(v < -32768) v = -32768;
+			out[made*channels + ch] = (int16)v;
+		}
+		made++;
+		st->srcPos += step;
+	}
+	uint32 bytes = made*frameBytes;
+	if(bytes < STREAM_CHUNK_BYTES)
+		memset(dst + bytes, 0, STREAM_CHUNK_BYTES - bytes);
+	return bytes;
 }
 
 
@@ -1560,14 +1660,8 @@ cSampleManager::Service(void)
 		// Finished, and nobody asked for it to stop: the voice callback
 		// cleared 'playing'. Give its buffer back so the next sound can be
 		// converted instead of falling through to the DSP's resampler.
-		if(!c->used && c->pcmOwned && c->allocBytes > GC_CONV_RECLAIM){
-			gConvBytes -= c->allocBytes;
-			free(c->pcm);
-			c->pcm = nil;
-			c->pcmBytes = 0;
-			c->allocBytes = 0;
-			c->pcmOwned = FALSE;
-		}
+		if(c->pcmOwned && c->allocBytes > GC_CONV_RECLAIM)
+			gcDiscardChannelPcm(c);
 	}
 	for(int32 i = 0; i < MAX_STREAMS; i++)
 		gcStreamPump(&gStreams[i]);
@@ -1598,10 +1692,11 @@ cSampleManager::Service(void)
 			DVD_FS_GUARD;
 			FILE *al = fopen("dvd:/audio.log", "a");
 			if(al){
-				fprintf(al, "AHB ch=%d/%d%s vol=%u/%u conv=%u/%u pool=%uK/%uK\n",
+				fprintf(al, "AHB ch=%d/%d%s vol=%u/%u conv=%u/%u pool=%uK/%uK/%uK\n",
 				    playing, used, sline,
 				    (unsigned)gEffectsVolume, (unsigned)gMusicVolume,
 				    (unsigned)gConvOk, (unsigned)(gConvOk + gConvFallback),
+				    (unsigned)(gConvBytes/1024),
 				    (unsigned)(gConvPeak/1024),
 				    (unsigned)(GC_CONV_BUDGET/1024));
 				fclose(al);
@@ -1765,10 +1860,11 @@ gcStreamTrace(const char *what, uint8 nStream)
 	DVD_FS_GUARD;
 	FILE *f = fopen("dvd:/audio.log", "a");
 	if(f){
-		fprintf(f, "MA s%u %-10s play=%d paused=%d file=%d rate=%u pos=%u/%u t=%u\n",
+		fprintf(f, "MA s%u %-10s play=%d paused=%d file=%d rate=%u pos=%u/%u cb=%u starve=%u eof=%d t=%u\n",
 		    (unsigned)nStream, what, (int)st->playing, (int)st->paused,
 		    st->file != nil, (unsigned)st->rate,
 		    (unsigned)st->posSamples, (unsigned)st->lenSamples,
+		    (unsigned)st->cbCount, (unsigned)st->starved, (int)st->eof,
 		    (unsigned)ticks_to_millisecs(gettime()));
 		fclose(f);
 	}
@@ -1822,6 +1918,9 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	GcStream *st = &gStreams[nStream];
 	u64 tOpen = gettime();
 	StopStreamedFile(nStream);
+	st->srcFrames = 0;
+	st->srcPos = 0;
+	st->srcEof = FALSE;
 	// Spans the fopen, ov_open_callbacks (which reads headers) and the priming
 	// pump. The lock is recursive, so the nested guards inside are free.
 	DVD_FS_GUARD;
@@ -1960,7 +2059,8 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	st->playing = TRUE;
 
 	AESND_SetVoiceFormat(st->voice, st->channels == 1 ? VOICE_MONO16 : VOICE_STEREO16);
-	AESND_SetVoiceFrequency(st->voice, (f32)st->rate);
+	AESND_SetVoiceFrequency(st->voice,
+	    st->rate == GC_DSP_RATE ? (f32)st->rate : GC_DSP_RATE_F);
 	AESND_SetVoiceVolume(st->voice, 255, 255);
 
 	// Arm the voice for streaming BEFORE handing it a buffer - that is the
@@ -2184,7 +2284,12 @@ cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffect
 	if(st->voice == nil)
 		return;
 	uint32 vol = nVolume*(nEffectFlag ? gEffectsVolume : gMusicVolume)/127;
-	vol = vol*(nEffectFlag ? gEffectsFade : gMusicFade)/127;
+	// Reference OAL behavior: mission streams 1/2 follow the effects slider
+	// but deliberately bypass the effects fade. During scene transitions that
+	// fade reaches zero; applying it here muted lines such as intro1 even while
+	// the stream state and decoder advanced normally.
+	if(!(nEffectFlag && (nStream == 1 || nStream == 2)))
+		vol = vol*(nEffectFlag ? gEffectsFade : gMusicFade)/127;
 	if(vol > 127) vol = 127;
 	uint32 base = vol*255/127;
 	uint32 pan = nPan > 127 ? 127 : nPan;
@@ -2334,4 +2439,3 @@ gcAudioSelfTest(void)
 	extern void gcFatalPark(const char *tag, const char *msg);
 	gcFatalPark("AUDIOTEST", "sweep complete; see dvd:/audiotest.log");
 }
-
