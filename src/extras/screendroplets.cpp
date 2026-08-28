@@ -35,6 +35,7 @@ RwTexture *ScreenDroplets::ms_screenTex;
 
 bool ScreenDroplets::ms_enabled = true;
 bool ScreenDroplets::ms_movingEnabled = true;
+int8 ScreenDroplets::ms_quality = ScreenDroplets::QUALITY_HIGH;
 
 ScreenDroplets::ScreenDrop ScreenDroplets::ms_drops[ScreenDroplets::MAXDROPS];
 int ScreenDroplets::ms_numDrops;
@@ -184,6 +185,13 @@ void
 ScreenDroplets::Process(void)
 {
 	ProcessCameraMovement();
+	if(!SmallDropsEnabled()){
+		if(ms_numDrops || ms_numDropsMoving)
+			Clear();
+		ms_splashDuration = -1;
+		ms_splashObject = nil;
+		return;
+	}
 	SprayDrops();
 #ifdef RW_GAMECUBE
 	// dvd:/autodrop.txt plants three fixed drops centre-screen every half
@@ -409,6 +417,11 @@ ScreenDroplets::Clear(void)
 	for(drop = &ms_drops[0]; drop < &ms_drops[MAXDROPS]; drop++)
 		drop->active = false;
 	ms_numDrops = 0;
+	for(ScreenDropMoving *moving = &ms_dropsMoving[0]; moving < &ms_dropsMoving[MAXDROPSMOVING]; moving++){
+		moving->drop = nil;
+		moving->dist = 0.0f;
+	}
+	ms_numDropsMoving = 0;
 }
 
 ScreenDroplets::ScreenDrop*
@@ -458,8 +471,10 @@ ScreenDroplets::FillScreen(int n)
 	float x, y, size;
 	ScreenDrop *drop;
 
-	if(!ms_initialised)
+	if(!ms_initialised || !SmallDropsEnabled())
 		return;
+	if(ms_quality == QUALITY_LOW)
+		n = (n + 3) / 4;
 	ms_numDrops = 0;
 	for(drop = &ms_drops[0]; drop < &ms_drops[MAXDROPS]; drop++){
 		drop->active = false;
@@ -475,6 +490,12 @@ ScreenDroplets::FillScreen(int n)
 void
 ScreenDroplets::FillScreenMoving(float amount, bool isBlood)
 {
+	if(!isBlood){
+		if(!SmallDropsEnabled())
+			return;
+		if(ms_quality == QUALITY_LOW)
+			amount *= 0.25f;
+	}
 	int n = (ms_screenMoveDelta.z > 5.0f ? 1.5f : 1.0f)*amount*20.0f;
 	float x, y, size;
 	ScreenDrop *drop;
@@ -497,6 +518,8 @@ ScreenDroplets::FillScreenMoving(float amount, bool isBlood)
 void
 ScreenDroplets::RegisterSplash(CParticleObject *pobj)
 {
+	if(!SmallDropsEnabled())
+		return;
 	CVector dist = pobj->GetPosition() - ms_prevCamPos;
 	if(dist.MagnitudeSqr() < 50.0f){	// 20 originally
 		ms_splashDuration = 14;
@@ -595,6 +618,8 @@ ScreenDroplets::SprayDrops(void)
 				if(numDropMult < 0) numDropMult = 0.0f;	// fix
 			}
 			int n = ndrops[ms_splashDuration] * numDropMult;
+			if(ms_quality == QUALITY_LOW)
+				n = (n + 3) / 4;
 			while(n--)
 				if(ms_numDrops < MAXDROPS){
 					float x = CGeneral::GetRandomNumber() % (int)SCREEN_WIDTH;

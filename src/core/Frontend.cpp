@@ -28,6 +28,7 @@ extern const char *gPhase;
 #include "ControllerConfig.h"
 #include "Vehicle.h"
 #include "MBlur.h"
+#include "screendroplets.h"
 #include "PlayerSkin.h"
 #include "PlayerInfo.h"
 #include "World.h"
@@ -470,6 +471,20 @@ CMenuManager::SwitchToNewScreen(int8 screen)
 
 	if (m_nCurrScreen == MENUPAGE_CHOOSE_SAVE_SLOT)
 		m_nCurrOption = 8;
+#ifdef GTA_OGC
+	// The 3D pad is almost 1MB on disc and larger while decoded. It belongs to
+	// this screen, not to the frontend's permanent texture set.
+	if(m_nPrevScreen == MENUPAGE_CONTROLLER_SETTINGS &&
+	   m_nCurrScreen != MENUPAGE_CONTROLLER_SETTINGS)
+		UnloadController();
+	if(m_nPrevScreen != MENUPAGE_CONTROLLER_SETTINGS &&
+	   m_nCurrScreen == MENUPAGE_CONTROLLER_SETTINGS){
+		CStreaming::MakeSpaceFor(1024 * CDSTREAM_SECTOR_SIZE);
+		CStreaming::ImGonnaUseStreamingMemory();
+		LoadController(m_PrefsControllerType);
+		CStreaming::IHaveUsedStreamingMemory();
+	}
+#endif
 	m_nMenuFadeAlpha = 0;
 	m_nOptionHighlightTransitionBlend = 0;
 	m_LastScreenSwitch = CTimer::GetTimeInMillisecondsPauseMode();
@@ -495,7 +510,7 @@ CMenuManager::CMenuManager()
 	// It cannot be turned down in game while the pause menu freezes, so
 	// shipping a value that flickers would leave no way out. Raise this once
 	// the streamer can hold what it asks for.
-	m_PrefsLOD = 1.2f;
+	m_PrefsLOD = 0.925f;
 	CRenderer::ms_lodDistScale = m_PrefsLOD;
 #else
 	m_PrefsLOD = CRenderer::ms_lodDistScale;
@@ -535,10 +550,14 @@ CMenuManager::CMenuManager()
 	m_PrefsAllowNastyGame = 1;
 	m_PrefsSpeakers = 0;
 	field_8 = 0;
+#ifdef GTA_OGC
+	m_PrefsUseVibration = 1;
+#else
 	m_PrefsUseVibration = 0;
+#endif
 	m_PrefsShowHud = 1;
 	m_PrefsRadarMode = 0;
-	m_DisplayControllerOnFoot = false;
+	m_DisplayControllerOnFoot = true;
 	m_bShutDownFrontEndRequested = false;
 	m_bStartUpFrontEndRequested = false;
 	pEditString = nil;
@@ -3115,23 +3134,25 @@ CMenuManager::LoadAllTextures()
 	if (m_bSpritesLoaded)
 		return;
 
+#ifdef GTA_OGC
+	// The splash is already visible in the XFB. Its 512x512 texture must not
+	// overlap the two frontend dictionaries in MEM1.
+	DestroySplashScreen();
+#endif
+
 	// First icon is hidden behind arrow
 	m_LeftMostRadioX = MENU_X_LEFT_ALIGNED(MENURADIO_ICON_FIRST_X - MENURADIO_ICON_SIZE);
 	CTimer::Stop();
 
-#ifdef GTA_OGC
-	// Load the full set even for the save menu, because UnloadTextures no
-	// longer frees any of it — see the note there. A half-loaded set would
-	// mean the first save point of the run permanently costs the pause menu
-	// its frontend2 sprites.
-	bool onlySave = m_OnlySaveMenu;
-	m_OnlySaveMenu = false;
-#endif
-
 	gPhase = "menu-space1";
+	printf("GCLOAD frontend space1 begin used=%zuK avail=%zuK\n",
+	    CStreaming::ms_memoryUsed / 1024, CStreaming::ms_memoryAvailable / 1024);
 	CStreaming::MakeSpaceFor(350 * CDSTREAM_SECTOR_SIZE); // twice of it in mobile
+	printf("GCLOAD frontend space1 end used=%zuK\n", CStreaming::ms_memoryUsed / 1024);
 	CStreaming::ImGonnaUseStreamingMemory();
+	printf("GCLOAD frontend tidy begin\n");
 	CGame::TidyUpMemory(false, true);
+	printf("GCLOAD frontend tidy end\n");
 	CTxdStore::PushCurrentTxd();
 	int frontendTxdSlot1 = CTxdStore::FindTxdSlot("frontend1");
 
@@ -3180,17 +3201,17 @@ CMenuManager::LoadAllTextures()
 		}
 
 		CTxdStore::PopCurrentTxd();
-#ifdef GAMEPAD_MENU
+#if defined(GAMEPAD_MENU) && !defined(GTA_OGC)
 		LoadController(m_PrefsControllerType);
 #endif
 		CStreaming::IHaveUsedStreamingMemory();
 	}
 
-#ifdef GTA_OGC
-	m_OnlySaveMenu = onlySave;
-#endif
 	m_bSpritesLoaded = true;
 	CTimer::Update();
+#ifdef GTA_OGC
+	printf("GCLOAD frontend complete\n");
+#endif
 }
 
 void
@@ -3206,6 +3227,11 @@ CMenuManager::LoadSettings()
 	// on GX that drew a permanent translucent square + dark ball in the
 	// top-left (user: "prioridade zero"). CPostFX carries the trail look.
 	CMBlur::BlurOn = false;
+#if defined(GTA_OGC) && defined(SCREEN_DROPLETS)
+	// Version 4 files predate this preference. HIGH is the compatible default:
+	// all pre-option builds rendered both the small and the large lens drops.
+	ScreenDroplets::ms_quality = ScreenDroplets::QUALITY_HIGH;
+#endif
 
 	// 50 is silly
 	char headerText[50];
@@ -3293,6 +3319,14 @@ CMenuManager::LoadSettings()
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsShowHud, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsRadarMode, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsShowLegends, 1);
+#if defined(GTA_OGC) && defined(SCREEN_DROPLETS)
+			if(someVersion >= 5){
+				int8 quality;
+				CFileMgr::Read(fileHandle, (char*)&quality, 1);
+				if(quality >= ScreenDroplets::QUALITY_OFF && quality <= ScreenDroplets::QUALITY_HIGH)
+					ScreenDroplets::ms_quality = quality;
+			}
+#endif
 		}
 	}
 
@@ -3313,6 +3347,12 @@ CMenuManager::LoadSettings()
 #endif
 #ifdef LEGACY_MENU_OPTIONS
 	m_PrefsVsync = m_PrefsVsyncDisp;
+#endif
+#ifdef GTA_OGC
+	// A settings file written by an older build may contain the PC 1.2 value.
+	// It overcommits MEM1 before the player gets a visible frame, so the
+	// console target always starts at the supported end of the same slider.
+	m_PrefsLOD = 0.925f;
 #endif
 	CRenderer::ms_lodDistScale = m_PrefsLOD;
 
@@ -3356,7 +3396,9 @@ CMenuManager::SaveSettings()
 {
 #ifndef LOAD_INI_SETTINGS
 	static char RubbishString[48] = "stuffmorestuffevenmorestuff                 etc";
-#ifdef BIND_VEHICLE_FIREWEAPON
+#ifdef GTA_OGC
+	static int SomeVersion = 5;
+#elif defined(BIND_VEHICLE_FIREWEAPON)
 	static int SomeVersion = 4;
 #else
 	static int SomeVersion = 3;
@@ -3411,6 +3453,9 @@ CMenuManager::SaveSettings()
 		CFileMgr::Write(fileHandle, (char*)&m_PrefsShowHud, 1);
 		CFileMgr::Write(fileHandle, (char*)&m_PrefsRadarMode, 1);
 		CFileMgr::Write(fileHandle, (char*)&m_PrefsShowLegends, 1);
+#if defined(GTA_OGC) && defined(SCREEN_DROPLETS)
+		CFileMgr::Write(fileHandle, (char*)&ScreenDroplets::ms_quality, 1);
+#endif
 	}
 	m_lastWorking3DAudioProvider = m_nPrefsAudio3DProviderIndex;
 
@@ -4494,13 +4539,6 @@ CMenuManager::UserInput(void)
 	if (m_nMousePosY > SCREEN_HEIGHT) m_nMousePosY = SCREEN_HEIGHT;
 
 	changeValueBy = 0;
-#ifdef GTA_OGC
-	// On this one screen the left stick is a direct manipulation control for
-	// the 3D pad. D-pad up/down remains normal menu navigation.
-	bool leftStickTiltsController = m_nCurrScreen == MENUPAGE_CONTROLLER_SETTINGS;
-#else
-	bool leftStickTiltsController = false;
-#endif
 	if (hasNativeList(m_nCurrScreen)) {
 		ProcessList(optionSelected, goBack);
 	} else {
@@ -4508,7 +4546,7 @@ CMenuManager::UserInput(void)
 
 		if (m_AllowNavigation &&
 			(CPad::GetPad(0)->GetDownJustDown() ||
-			 (!leftStickTiltsController && CPad::GetPad(0)->GetAnaloguePadDown()) ||
+			 CPad::GetPad(0)->GetAnaloguePadDown() ||
 			 CPad::GetPad(0)->GetDPadDownJustDown())) {
 			m_bShowMouse = false;
 			goDown = true;
@@ -4516,7 +4554,7 @@ CMenuManager::UserInput(void)
 
 		} else if (m_AllowNavigation &&
 			(CPad::GetPad(0)->GetUpJustDown() ||
-			 (!leftStickTiltsController && CPad::GetPad(0)->GetAnaloguePadUp()) ||
+			 CPad::GetPad(0)->GetAnaloguePadUp() ||
 			 CPad::GetPad(0)->GetDPadUpJustDown())) {
 			m_bShowMouse = false;
 			goUp = true;
@@ -4582,10 +4620,13 @@ CMenuManager::UserInput(void)
 			// JustDown checks that computed goUp/goDown above are the ones
 			// every other screen navigates with. Feed the list those.
 			m_nSelectedListRow = m_nCurrOption;
-			if (goDown)
+			if (goDown) {
+				DMAudio.PlayFrontEndSound(SOUND_FRONTEND_HIGHLIGHT_OPTION, 0);
 				ScrollDownListByOne();
-			else if (goUp)
+			} else if (goUp) {
+				DMAudio.PlayFrontEndSound(SOUND_FRONTEND_HIGHLIGHT_OPTION, 0);
 				ScrollUpListByOne();
+			}
 			goUp = false;
 			goDown = false;
 			m_nCurrOption = m_nSelectedListRow;
@@ -5089,7 +5130,11 @@ CMenuManager::ProcessUserInput(uint8 goDown, uint8 goUp, uint8 optionSelected, u
 					SaveSettings();
 				} else if (m_nCurrScreen == MENUPAGE_DISPLAY_SETTINGS) {
 					m_PrefsBrightness = 256;
+#ifdef GTA_OGC
+					m_PrefsLOD = 0.925f;
+#else
 					m_PrefsLOD = 1.2f;
+#endif
 #ifdef LEGACY_MENU_OPTIONS
 					m_PrefsVsync = true;
 #endif
@@ -5924,6 +5969,7 @@ CMenuManager::UnloadTextures()
 {
 #ifdef GTA_OGC
 	gPhase = "menu-unloadtex";
+	UnloadController();
 #endif
 	if (m_nCurrScreen == MENUPAGE_SOUND_SETTINGS)
 		DMAudio.StopFrontEndTrack();
@@ -5931,24 +5977,13 @@ CMenuManager::UnloadTextures()
 	DMAudio.PlayFrontEndSound(SOUND_FRONTEND_MENU_STARTING, 0);
 	DMAudio.ChangeMusicMode(MUSICMODE_GAME);
 #ifdef GTA_OGC
-	// The frontend textures load once per boot and are never freed.
-	//
-	// The freeze has one reproducible shape: open, close and reopen, and it is
-	// the SECOND open that stops — which says the close leaves state the
-	// reload cannot survive, not that either half is wrong on its own.
-	// Debugging which piece of state that is costs a boot per attempt; not
-	// having a second load costs 1.3MB, held for the run.
-	//
-	// That 1.3MB comes out of the streamer, permanently, so it is not free:
-	// see the reserve note in CStreaming::Init for what being short does. If
-	// the world starts showing far LOD shells that never resolve, this is the
-	// first thing to weigh against MakeSpaceFor.
-	//
-	// ponytail: the honest fix is finding the leaked state; this removes the
-	// second load entirely, which is a smaller diff and a bounded cost.
-	m_OnlySaveMenu = false;
-	CUserDisplay::PlaceName.ProcessAfterFrontEndShutDown();
-	return;
+	// Menu TXDs are larger than the free gameplay headroom at full quality.
+	// Load them after MakeSpaceFor evicts streamed world models, then release
+	// them here so the world can stream back when gameplay resumes.
+	if(gFrontendControllerClump){
+		RpClumpDestroy(gFrontendControllerClump);
+		gFrontendControllerClump = nil;
+	}
 #endif
 	if (m_bSpritesLoaded) {
 		printf("REMOVE frontend\n");
@@ -6247,13 +6282,41 @@ const char* controllerTypesPaths[] = {
 };
 
 #ifdef GTA_OGC
+enum GameCubeControllerRoute
+{
+	GCC_ROUTE_HORIZONTAL_LEFT,
+	GCC_ROUTE_HORIZONTAL_RIGHT,
+	GCC_ROUTE_DIAGONAL_LEFT,
+	GCC_ROUTE_DIAGONAL_RIGHT,
+	GCC_ROUTE_UP_RIGHT,
+	GCC_ROUTE_DOWN_RIGHT,
+	GCC_ROUTE_DOWN_LEFT,
+	GCC_ROUTE_DOWN_CENTRE,
+};
+
 struct GameCubeControllerCallout
 {
-	const char *text;
+	const char *textKey;
 	RwV3d anchor;
 	float labelY;
-	bool rightColumn;
+	GameCubeControllerRoute route;
 };
+
+static bool
+ControllerCalloutIsRight(const GameCubeControllerCallout &callout)
+{
+	return callout.route == GCC_ROUTE_HORIZONTAL_RIGHT ||
+	    callout.route == GCC_ROUTE_DIAGONAL_RIGHT ||
+	    callout.route == GCC_ROUTE_UP_RIGHT ||
+	    callout.route == GCC_ROUTE_DOWN_RIGHT;
+}
+
+static bool
+ControllerCalloutIsHorizontal(const GameCubeControllerCallout &callout)
+{
+	return callout.route == GCC_ROUTE_HORIZONTAL_LEFT ||
+	    callout.route == GCC_ROUTE_HORIZONTAL_RIGHT;
+}
 
 static void
 DrawControllerSegment(float x1, float y1, float x2, float y2, float width,
@@ -6271,27 +6334,14 @@ DrawControllerSegment(float x1, float y1, float x2, float y2, float width,
 }
 
 static void
-DrawControllerArrow(float x1, float y1, float x2, float y2, int32 alpha)
+DrawControllerLeader(const float (*points)[2], uint32 count, int32 alpha)
 {
-	CRGBA shadow(0, 0, 0, alpha);
 	CRGBA line(255, 150, 225, alpha);
-	DrawControllerSegment(x1 + 1.0f, y1 + 1.0f, x2 + 1.0f, y2 + 1.0f,
-	    SCREEN_SCALE_X(1.8f), shadow);
-	DrawControllerSegment(x1, y1, x2, y2, SCREEN_SCALE_X(0.9f), line);
-
-	float dx = x2 - x1;
-	float dy = y2 - y1;
-	float length = Sqrt(dx * dx + dy * dy);
-	if (length < 0.01f)
-		return;
-	dx /= length;
-	dy /= length;
-	float baseX = x2 - dx * SCREEN_SCALE_X(7.0f);
-	float baseY = y2 - dy * SCREEN_SCALE_Y(7.0f);
-	float px = -dy * SCREEN_SCALE_X(3.5f);
-	float py = dx * SCREEN_SCALE_Y(3.5f);
-	CSprite2d::Draw2DPolygon(baseX + px, baseY + py, x2, y2,
-	    baseX - px, baseY - py, x2, y2, line);
+	for(uint32 i = 0; i + 1 < count; i++){
+		DrawControllerSegment(points[i][0], points[i][1],
+		    points[i + 1][0], points[i + 1][1],
+		    SCREEN_SCALE_X(1.15f), line);
+	}
 }
 
 static bool
@@ -6319,41 +6369,282 @@ ProjectControllerAnchor(RwFrame *frame, const RwV3d &anchor, float *x, float *y)
 }
 
 static void
-DrawControllerCallout(RwFrame *frame, const GameCubeControllerCallout &callout,
-	int32 alpha)
+DrawControllerShadowEllipse(float centreX, float centreY, float radiusX,
+	float radiusY, int32 alpha)
 {
-	const float labelX = callout.rightColumn ? 625.0f : 15.0f;
-	const float lineX = callout.rightColumn ? 455.0f : 185.0f;
-	float screenX, screenY;
-	float labelScreenX = MENU_X_LEFT_ALIGNED(labelX);
-	float labelScreenY = MENU_Y(callout.labelY);
-	if (ProjectControllerAnchor(frame, callout.anchor, &screenX, &screenY))
-		DrawControllerArrow(MENU_X_LEFT_ALIGNED(lineX), labelScreenY + MENU_Y(5.0f),
-		    screenX, screenY, alpha);
+	const int32 slices = 24;
+	for (int32 i = 0; i < slices; i++) {
+		float topT = -1.0f + 2.0f * i / slices;
+		float bottomT = -1.0f + 2.0f * (i + 1) / slices;
+		float middleT = (topT + bottomT) * 0.5f;
+		float halfWidth = radiusX * Sqrt(Max(0.0f, 1.0f - middleT * middleT));
+		CSprite2d::DrawRect(CRect(
+		    MENU_X_LEFT_ALIGNED(centreX - halfWidth), MENU_Y(centreY + topT * radiusY),
+		    MENU_X_LEFT_ALIGNED(centreX + halfWidth), MENU_Y(centreY + bottomT * radiusY)),
+		    CRGBA(0, 0, 0, alpha));
+	}
+}
 
-	wchar text[96];
-	AsciiToUnicode(callout.text, text);
-	if (callout.rightColumn)
-		CFont::SetRightJustifyOn();
-	else
+static void
+DrawControllerShadow(int32 alpha)
+{
+	// The model has real normals for button relief, but RenderWare's frontend
+	// light does not cast shadows. Three translucent ellipses give the pad the
+	// grounded silhouette of the reference without adding another texture.
+	DrawControllerShadowEllipse(326.0f, 375.0f, 134.0f, 40.0f, 16 * alpha / 255);
+	DrawControllerShadowEllipse(329.0f, 377.0f, 125.0f, 34.0f, 22 * alpha / 255);
+	DrawControllerShadowEllipse(332.0f, 379.0f, 116.0f, 27.0f, 30 * alpha / 255);
+}
+
+static CRGBA
+ControllerBadgeColour(const char *key, int32 alpha)
+{
+	if (strcmp(key, "GCL_SPR") == 0 || strcmp(key, "GCL_ACC") == 0)
+		return CRGBA(0, 180, 170, alpha);
+	if (strcmp(key, "GCL_ATK") == 0 || strcmp(key, "GCL_FIR") == 0)
+		return CRGBA(225, 25, 35, alpha);
+	if (strcmp(key, "GCL_CAM") == 0)
+		return CRGBA(245, 180, 0, alpha);
+	if (strcmp(key, "GCL_ENT") == 0)
+		return CRGBA(65, 90, 230, alpha);
+	return CRGBA(205, 210, 225, alpha);
+}
+
+static wchar
+ControllerBadgeLetter(const char *key)
+{
+	if (strcmp(key, "GCL_LFO") == 0 || strcmp(key, "GCL_LM2") == 0 ||
+	    strcmp(key, "GCL_LVC") == 0)
+		return 'L';
+	if (strcmp(key, "GCL_RFO") == 0 || strcmp(key, "GCL_RM2") == 0 ||
+	    strcmp(key, "GCL_RVC") == 0)
+		return 'R';
+	if (strcmp(key, "GCL_ENT") == 0) return 'Z';
+	if (strcmp(key, "GCL_JMP") == 0 || strcmp(key, "GCL_BRK") == 0 ||
+	    strcmp(key, "GCL_NAY") == 0) return 'Y';
+	if (strcmp(key, "GCL_CRH") == 0 || strcmp(key, "GCL_HBR") == 0) return 'X';
+	if (strcmp(key, "GCL_SPR") == 0 || strcmp(key, "GCL_ACC") == 0 ||
+	    strcmp(key, "GCL_NAA") == 0) return 'A';
+	if (strcmp(key, "GCL_ATK") == 0 || strcmp(key, "GCL_FIR") == 0) return 'B';
+	if (strcmp(key, "GCL_CAM") == 0) return 'C';
+	if (strcmp(key, "GCL_WEP") == 0 || strcmp(key, "GCL_DPV") == 0) return 'D';
+	return 'S';
+}
+
+static void
+GetControllerCardBounds(float labelX, bool centre, wchar *text,
+	float *left, float *right)
+{
+	float textWidth = CFont::GetStringWidth(text, true);
+	if (centre) {
+		*left = labelX - textWidth * 0.5f - MENU_X(4.0f);
+		*right = labelX + textWidth * 0.5f + MENU_X(4.0f);
+	} else {
+		// Badge, four-pixel gap, text, four-pixel end cap. Nothing else.
+		*left = labelX - MENU_X(28.0f);
+		// Include the font's one-pixel drop shadow and antialias fringe. The
+		// measured advance alone clips the final glyph even though its maths is
+		// technically exact.
+		*right = labelX + textWidth + MENU_X(8.0f);
+	}
+}
+
+static void
+DrawControllerCard(const GameCubeControllerCallout &callout, float labelY,
+	bool centre, float left, float right, int32 alpha)
+{
+	float top = labelY - MENU_Y(2.0f);
+	float bottom = labelY + MENU_Y(19.0f);
+	CRGBA border(255, 115, 220, alpha);
+	CSprite2d::DrawRect(CRect(left, top, right, bottom),
+	    CRGBA(12, 5, 22, 190 * alpha / 255));
+	CSprite2d::DrawRect(CRect(left, top, right, top + MENU_Y(1.0f)), border);
+	CSprite2d::DrawRect(CRect(left, bottom - MENU_Y(1.0f), right, bottom), border);
+	CSprite2d::DrawRect(CRect(left, top, left + MENU_X(1.0f), bottom), border);
+	CSprite2d::DrawRect(CRect(right - MENU_X(1.0f), top, right, bottom), border);
+
+	if (!centre) {
+		float badgeLeft = left + MENU_X(1.0f);
+		float badgeRight = left + MENU_X(24.0f);
+		float badgeTop = top + MENU_Y(1.0f);
+		float badgeBottom = bottom - MENU_Y(1.0f);
+		CSprite2d::DrawRect(CRect(badgeLeft, badgeTop, badgeRight, badgeBottom),
+		    ControllerBadgeColour(callout.textKey, alpha));
+		wchar icon[2] = { ControllerBadgeLetter(callout.textKey), 0 };
+		// FONT_STANDARD draws a fixed 32*scaleX quad even though its advance is
+		// proportional. Centre that real quad; centring by GetStringWidth puts
+		// every one-letter glyph visibly to the right.
+		const float glyphWidth = MENU_X(10.88f); // 32 * controller scale 0.34
+		CFont::SetCentreOff();
 		CFont::SetRightJustifyOff();
+		CFont::SetDropShadowPosition(1);
+		CFont::PrintString((badgeLeft + badgeRight - glyphWidth) * 0.5f -
+		    MENU_X(0.5f), labelY, icon);
+		CFont::SetDropShadowPosition(0);
+	}
+}
+
+static void
+DrawControllerCallout(RwFrame *frame, const GameCubeControllerCallout &callout,
+	float labelScreenY, int32 alpha, bool drawLeader)
+{
+	float screenX, screenY;
+	if (!ProjectControllerAnchor(frame, callout.anchor, &screenX, &screenY))
+		return;
+
+	bool rightColumn = ControllerCalloutIsRight(callout);
+	bool centre = callout.route == GCC_ROUTE_DOWN_CENTRE;
+	// Both text columns have one fixed left edge. Besides looking deliberate,
+	// this keeps short labels from growing long leaders merely because their
+	// right edges were aligned with longer labels.
+	const float labelX = centre ? screenX : (rightColumn ? 530.0f : 40.0f);
+	float labelScreenX = MENU_X_LEFT_ALIGNED(labelX);
+	if (centre)
+		labelScreenX = screenX;
+	wchar *text = TheText.Get(callout.textKey);
+	if (!centre) {
+		// The coloured badge already names the physical button. Keep only the
+		// translated action in the card instead of printing "R  R: ...".
+		wchar *action = text;
+		while (*action && *action != ':')
+			action++;
+		if (*action == ':') {
+			action++;
+			while (*action == ' ')
+				action++;
+			text = action;
+		}
+	}
+	float cardLeft, cardRight;
+	GetControllerCardBounds(labelScreenX, centre, text, &cardLeft, &cardRight);
+	if (rightColumn && cardRight > MENU_X_LEFT_ALIGNED(634.0f)) {
+		float shift = cardRight - MENU_X_LEFT_ALIGNED(634.0f);
+		labelScreenX -= shift;
+		cardLeft -= shift;
+		cardRight -= shift;
+	}
+	float lineStartX = rightColumn ? cardLeft : cardRight;
+	float lineY = labelScreenY + MENU_Y(5.5f);
+	float points[4][2];
+	uint32 pointCount = 0;
+	switch (callout.route) {
+	case GCC_ROUTE_HORIZONTAL_LEFT:
+	case GCC_ROUTE_HORIZONTAL_RIGHT: {
+		// Collision resolution may move a card away from its projected button.
+		// Keep the leader horizontal whenever it still meets the card; at an
+		// extreme tilt, add one orthogonal bridge so it never floats detached.
+		float cardTop = labelScreenY - MENU_Y(2.0f);
+		float cardBottom = labelScreenY + MENU_Y(19.0f);
+		if (screenY >= cardTop && screenY <= cardBottom) {
+			points[0][0] = lineStartX; points[0][1] = screenY;
+			points[1][0] = screenX;   points[1][1] = screenY;
+			pointCount = 2;
+		} else {
+			float cardY = (cardTop + cardBottom) * 0.5f;
+			// The right column has a dedicated routing gutter beyond the 3D
+			// silhouette. Never put a vertical bridge over Z, Y or X merely
+			// because the projected anchors moved while the pad was tilted.
+			float elbowX = rightColumn ? MENU_X_LEFT_ALIGNED(474.0f) :
+			    screenX - MENU_X(18.0f);
+			points[0][0] = lineStartX; points[0][1] = cardY;
+			points[1][0] = elbowX;    points[1][1] = cardY;
+			points[2][0] = elbowX;    points[2][1] = screenY;
+			points[3][0] = screenX;   points[3][1] = screenY;
+			pointCount = 4;
+		}
+		break;
+	}
+	case GCC_ROUTE_DIAGONAL_LEFT:
+	case GCC_ROUTE_DIAGONAL_RIGHT: {
+		// A/B: from the button, a short diagonal heads right and then the
+		// leader finishes as one straight horizontal run into the card.
+		float elbowX = screenX + MENU_X(18.0f);
+		points[0][0] = lineStartX; points[0][1] = lineY;
+		points[1][0] = elbowX;     points[1][1] = lineY;
+		points[2][0] = screenX;    points[2][1] = screenY;
+		pointCount = 3;
+		break;
+	}
+	case GCC_ROUTE_UP_RIGHT:
+	case GCC_ROUTE_DOWN_RIGHT:
+		// R and C: viewed from the button, travel vertically first and make
+		// one 90-degree turn into a straight rightward run.
+		points[0][0] = lineStartX; points[0][1] = lineY;
+		points[1][0] = screenX;    points[1][1] = lineY;
+		points[2][0] = screenX;    points[2][1] = screenY;
+		pointCount = 3;
+		break;
+	case GCC_ROUTE_DOWN_LEFT:
+		points[0][0] = lineStartX; points[0][1] = lineY;
+		points[1][0] = screenX;   points[1][1] = lineY;
+		points[2][0] = screenX;   points[2][1] = screenY;
+		pointCount = 3;
+		break;
+	case GCC_ROUTE_DOWN_CENTRE:
+		points[0][0] = screenX; points[0][1] = labelScreenY - MENU_Y(3.0f);
+		points[1][0] = screenX; points[1][1] = screenY;
+		pointCount = 2;
+		break;
+	}
+	if (drawLeader) {
+		DrawControllerLeader(points, pointCount, alpha);
+		return;
+	}
+	DrawControllerCard(callout, labelScreenY, centre, cardLeft, cardRight, alpha);
+
+	if (centre) {
+		CFont::SetRightJustifyOff();
+		CFont::SetCentreOn();
+	} else {
+		CFont::SetCentreOff();
+		CFont::SetRightJustifyOff();
+	}
 	CFont::PrintString(labelScreenX, labelScreenY, text);
 }
 
+static void
+ResolveControllerLabelColumn(const GameCubeControllerCallout *callouts,
+	float *labelYs, uint32 count, bool rightColumn)
+{
+	const float minimumSpacing = MENU_Y(28.0f);
+	int32 next = -1;
+	for (int32 i = count - 1; i >= 0; i--) {
+		if (callouts[i].route == GCC_ROUTE_DOWN_CENTRE ||
+		    ControllerCalloutIsRight(callouts[i]) != rightColumn)
+			continue;
+		if (next >= 0 && labelYs[i] > labelYs[next] - minimumSpacing)
+			labelYs[i] = labelYs[next] - minimumSpacing;
+		next = i;
+	}
+
+	// Preserve the whole resolved column if a maximum tilt reaches the menu.
+	const float top = MENU_Y(188.0f);
+	if (next >= 0 && labelYs[next] < top) {
+		float shift = top - labelYs[next];
+		for (uint32 i = 0; i < count; i++)
+			if (callouts[i].route != GCC_ROUTE_DOWN_CENTRE &&
+			    ControllerCalloutIsRight(callouts[i]) == rightColumn)
+				labelYs[i] += shift;
+	}
+}
+
 static RwFrame *
-RenderGameCubeController(void)
+RenderGameCubeController(int32 alpha)
 {
 	if (gFrontendControllerClump == nil)
 		return nil;
 
-	int16 stickY = CPad::GetPad(0)->GetLeftStickY();
+	int16 stickY = CPad::GetPad(0)->GetRightStickY();
 	float targetTilt = Abs(stickY) < 12 ? 0.0f : stickY * (35.0f / 128.0f);
 	if (targetTilt < -35.0f) targetTilt = -35.0f;
 	if (targetTilt >  35.0f) targetTilt =  35.0f;
 	gFrontendControllerTilt += (targetTilt - gFrontendControllerTilt) * 0.18f;
 
 	RwFrame *frame = RpClumpGetFrame(gFrontendControllerClump);
-	const RwV3d position = { 0.0f, -0.62f, 4.25f };
+	// 7.20 is exactly 25% smaller in perspective than the previous 5.40.
+	// 12.5% larger than the original framing (user-tuned): camera distance
+	// scaled by 1/1.125, y offset with it so the screen anchor holds.
+	const RwV3d position = { 0.0f, -0.55f, 6.40f };
 	const RwV3d tiltAxis = { 1.0f, 0.0f, 0.0f };
 	RwFrameTransform(frame, RwFrameGetMatrix(RwCameraGetFrame(Scene.camera)),
 	    rwCOMBINEREPLACE);
@@ -6363,20 +6654,58 @@ RenderGameCubeController(void)
 	RwFrameRotate(frame, &tiltAxis, -90.0f + gFrontendControllerTilt,
 	    rwCOMBINEPRECONCAT);
 	RwFrameUpdateObjects(frame);
+	uint32 oldCullMode, oldZTest, oldZWrite, oldVertexAlpha, oldShadeMode;
+	void *oldTextureRaster;
+	RwRenderStateGet(rwRENDERSTATECULLMODE, &oldCullMode);
+	RwRenderStateGet(rwRENDERSTATEZTESTENABLE, &oldZTest);
+	RwRenderStateGet(rwRENDERSTATEZWRITEENABLE, &oldZWrite);
+	RwRenderStateGet(rwRENDERSTATEVERTEXALPHAENABLE, &oldVertexAlpha);
+	RwRenderStateGet(rwRENDERSTATETEXTURERASTER, &oldTextureRaster);
+	RwRenderStateGet(rwRENDERSTATESHADEMODE, &oldShadeMode);
+	DrawControllerShadow(alpha);
 
-	RwRGBAReal ambient = { 0.78f, 0.78f, 0.78f, 1.0f };
-	SetAmbientColours(&ambient);
+	// Camera-relative studio light: a cool fill keeps the purple shell legible
+	// while a warm key from above-left reveals its authored button relief.
+	RwRGBAReal oldAmbient = pAmbient->color;
+	RwRGBAReal oldDirect = pDirect->color;
+	uint32 oldDirectFlags = pDirect->getFlags();
+	RwFrame *directFrame = RpLightGetFrame(pDirect);
+	RwMatrix oldDirectMatrix = *RwFrameGetMatrix(directFrame);
+	RwMatrix keyMatrix = oldDirectMatrix;
+	const RwMatrix *cameraMatrix = RwFrameGetMatrix(RwCameraGetFrame(Scene.camera));
+	keyMatrix.at.x = 0.350456f * cameraMatrix->right.x -
+	    0.450586f * cameraMatrix->up.x + 0.821068f * cameraMatrix->at.x;
+	keyMatrix.at.y = 0.350456f * cameraMatrix->right.y -
+	    0.450586f * cameraMatrix->up.y + 0.821068f * cameraMatrix->at.y;
+	keyMatrix.at.z = 0.350456f * cameraMatrix->right.z -
+	    0.450586f * cameraMatrix->up.z + 0.821068f * cameraMatrix->at.z;
+	const RwRGBAReal fill = { 0.52f, 0.50f, 0.58f, 1.0f };
+	const RwRGBAReal key = { 0.58f, 0.54f, 0.48f, 1.0f };
+	RpLightSetColor(pAmbient, &fill);
+	RpLightSetColor(pDirect, &key);
+	RwFrameTransform(directFrame, &keyMatrix, rwCOMBINEREPLACE);
+	RpLightSetFlags(pDirect, oldDirectFlags | rpLIGHTLIGHTATOMICS);
 	RwRenderStateSet(rwRENDERSTATECULLMODE, (void*)rwCULLMODECULLNONE);
 	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)TRUE);
 	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)TRUE);
 	RpClumpRender(gFrontendControllerClump);
+	RwRenderStateSet(rwRENDERSTATECULLMODE, (void*)oldCullMode);
+	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)oldZTest);
+	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)oldZWrite);
+	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)oldVertexAlpha);
+	RwRenderStateSet(rwRENDERSTATETEXTURERASTER, oldTextureRaster);
+	RwRenderStateSet(rwRENDERSTATESHADEMODE, (void*)oldShadeMode);
+	RwFrameTransform(directFrame, &oldDirectMatrix, rwCOMBINEREPLACE);
+	RpLightSetColor(pAmbient, &oldAmbient);
+	RpLightSetColor(pDirect, &oldDirect);
+	RpLightSetFlags(pDirect, oldDirectFlags);
 	return frame;
 }
 
 static void
 PrintGameCubeController(bool onFoot, int32 mode, int32 alpha)
 {
-	RwFrame *frame = RenderGameCubeController();
+	RwFrame *frame = RenderGameCubeController(alpha);
 	if (frame == nil)
 		return;
 
@@ -6387,47 +6716,46 @@ PrintGameCubeController(bool onFoot, int32 mode, int32 alpha)
 	const char *buttonA;
 	const char *buttonY;
 	if (onFoot) {
-		leftTrigger = "L: centralizar | click: olhar tras";
-		rightTrigger = "R: mirar | click: atirar";
-		stick = "Analogico: mover | menu: inclinar";
-		dpad = "D-pad < >: trocar armas";
-		buttonA = "A: sprint";
-		buttonY = "Y: pular";
+		leftTrigger = "GCL_LFO";
+		rightTrigger = "GCL_RFO";
+		stick = "GCL_MOV";
+		dpad = "GCL_WEP";
+		buttonA = "GCL_SPR";
+		buttonY = "GCL_JMP";
 	} else {
-		stick = "Analogico: dirigir | menu: inclinar";
-		dpad = "D-pad: < > radio | cima buzina | baixo missao";
+		stick = "GCL_DRV";
+		dpad = "GCL_DPV";
 		if (mode == 1) {
-			leftTrigger = "L: freio analogico | click: re";
-			rightTrigger = "R: acelerar analogico | click: max";
-			buttonA = "A: livre neste modo";
-			buttonY = "Y: livre neste modo";
+			leftTrigger = "GCL_LM2";
+			rightTrigger = "GCL_RM2";
+			buttonA = "GCL_NAA";
+			buttonY = "GCL_NAY";
 		} else {
-			leftTrigger = "L: olhar esq. | click: atirar";
-			rightTrigger = "R: olhar dir. | click: atirar";
-			buttonA = "A: acelerar";
-			buttonY = "Y: frear / re";
+			leftTrigger = "GCL_LVC";
+			rightTrigger = "GCL_RVC";
+			buttonA = "GCL_ACC";
+			buttonY = "GCL_BRK";
 		}
 	}
 
 	GameCubeControllerCallout callouts[] = {
-		{ leftTrigger,             { -0.82f, 0.12f,  0.59f }, 198.0f, false },
-		{ stick,                   { -0.75f, 0.42f,  0.23f }, 234.0f, false },
-		{ dpad,                    { -0.38f, 0.38f, -0.34f }, 270.0f, false },
-		{ "C: camera livre",      {  0.38f, 0.34f, -0.34f }, 306.0f, false },
-		{ "START: pausa",         {  0.00f, 0.27f,  0.25f }, 342.0f, false },
-		{ rightTrigger,            {  0.82f, 0.12f,  0.59f }, 198.0f, true  },
-		{ onFoot ? "Z: entrar/sair | pegar" : "Z: entrar / sair",
-		                              {  0.84f, 0.23f,  0.68f }, 226.0f, true  },
-		{ buttonY,                 {  0.70f, 0.41f,  0.50f }, 254.0f, true  },
-		{ onFoot ? "X: abaixar" : "X: freio de mao",
-		                              {  1.02f, 0.41f,  0.29f }, 282.0f, true  },
-		{ buttonA,                 {  0.75f, 0.42f,  0.23f }, 310.0f, true  },
-		{ onFoot ? "B: ataque / atirar" : "B: atirar",
-		                              {  0.49f, 0.40f,  0.12f }, 338.0f, true  },
+		{ leftTrigger, { -0.82f, 0.12f,  0.70f },   0.0f, GCC_ROUTE_HORIZONTAL_LEFT },
+		{ stick,       { -0.75f, 0.42f,  0.23f }, 280.0f, GCC_ROUTE_HORIZONTAL_LEFT },
+		{ dpad,        { -0.38f, 0.38f, -0.34f }, 398.0f, GCC_ROUTE_DOWN_LEFT },
+		{ "GCL_PAU", {  0.00f, 0.27f,  0.25f }, 428.0f, GCC_ROUTE_DOWN_CENTRE },
+		{ rightTrigger,{  0.82f, 0.12f,  0.70f }, 192.0f, GCC_ROUTE_UP_RIGHT },
+		{ "GCL_ENT", {  0.84f, 0.23f,  0.68f }, 226.0f, GCC_ROUTE_HORIZONTAL_RIGHT },
+		{ buttonY,     {  0.70f, 0.41f,  0.50f }, 254.0f, GCC_ROUTE_HORIZONTAL_RIGHT },
+		{ onFoot ? "GCL_CRH" : "GCL_HBR",
+		                  {  1.02f, 0.41f,  0.29f }, 282.0f, GCC_ROUTE_HORIZONTAL_RIGHT },
+		{ buttonA,     {  0.75f, 0.42f,  0.23f }, 310.0f, GCC_ROUTE_DIAGONAL_RIGHT },
+		{ onFoot ? "GCL_ATK" : "GCL_FIR",
+		                  {  0.49f, 0.40f,  0.12f }, 338.0f, GCC_ROUTE_DIAGONAL_RIGHT },
+		{ "GCL_CAM", {  0.38f, 0.34f, -0.34f }, 366.0f, GCC_ROUTE_DOWN_RIGHT },
 	};
 
 	CFont::SetFontStyle(FONT_LOCALE(FONT_STANDARD));
-	CFont::SetScale(MENU_X(0.28f), MENU_Y(0.56f));
+	CFont::SetScale(MENU_X(0.34f), MENU_Y(0.76f));
 	CFont::SetDropColor(CRGBA(0, 0, 0, alpha));
 	CFont::SetDropShadowPosition(1);
 	CFont::SetColor(CRGBA(255, 255, 255, alpha));
@@ -6436,8 +6764,25 @@ PrintGameCubeController(bool onFoot, int32 mode, int32 alpha)
 	CFont::SetBackgroundOff();
 	CFont::SetPropOn();
 	CFont::SetWrapx(SCREEN_WIDTH);
+	CFont::SetDropShadowPosition(0);
+	float labelYs[ARRAY_SIZE(callouts)];
+	for (uint32 i = 0; i < ARRAY_SIZE(callouts); i++) {
+		float screenX, screenY;
+		if (ControllerCalloutIsHorizontal(callouts[i]) &&
+		    ProjectControllerAnchor(frame, callouts[i].anchor, &screenX, &screenY))
+			labelYs[i] = screenY - MENU_Y(5.5f);
+		else
+			labelYs[i] = MENU_Y(callouts[i].labelY);
+	}
+	ResolveControllerLabelColumn(callouts, labelYs, ARRAY_SIZE(callouts), false);
+	ResolveControllerLabelColumn(callouts, labelYs, ARRAY_SIZE(callouts), true);
+	// Leaders first, labels second: no later arrow is allowed to cut through
+	// text that was already printed.
 	for (uint32 i = 0; i < ARRAY_SIZE(callouts); i++)
-		DrawControllerCallout(frame, callouts[i], alpha);
+		DrawControllerCallout(frame, callouts[i], labelYs[i], alpha, true);
+	for (uint32 i = 0; i < ARRAY_SIZE(callouts); i++)
+		DrawControllerCallout(frame, callouts[i], labelYs[i], alpha, false);
+	CFont::SetCentreOff();
 	CFont::SetRightJustifyOff();
 	CFont::SetDropShadowPosition(0);
 }
@@ -7148,14 +7493,25 @@ CMenuManager::PrintController(void)
 
 
 void
-CMenuManager::LoadController(int8 type)
+CMenuManager::UnloadController(void)
 {
 #ifdef GTA_OGC
-	if (gFrontendControllerClump) {
+	if(gFrontendControllerClump){
 		RpClumpDestroy(gFrontendControllerClump);
 		gFrontendControllerClump = nil;
 	}
-#else
+#endif
+	for(int i = MENUSPRITE_CONTROLLER; i <= MENUSPRITE_ARROWS4; i++)
+		m_aFrontEndSprites[i].Delete();
+	int frontendController = CTxdStore::FindTxdSlot("frontend_controller");
+	if(frontendController != -1)
+		CTxdStore::RemoveTxd(frontendController);
+}
+
+void
+CMenuManager::LoadController(int8 type)
+{
+#ifndef GTA_OGC
 	switch (type)
 	{
 	case CONTROLLER_DUALSHOCK2:
@@ -7172,14 +7528,8 @@ CMenuManager::LoadController(int8 type)
 	}
 #endif
 
-	// Unload current textures
-	for (int i = MENUSPRITE_CONTROLLER; i <= MENUSPRITE_ARROWS4; i++)
-		m_aFrontEndSprites[i].Delete();
-
-	// Unload txd
+	UnloadController();
 	int frontend_controller = CTxdStore::FindTxdSlot("frontend_controller");
-	if (frontend_controller != -1)
-		CTxdStore::RemoveTxd(frontend_controller);
 
 	// Find the new txd to load
 	bool bTxdMissing = true;

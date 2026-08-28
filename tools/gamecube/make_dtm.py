@@ -9,6 +9,8 @@ from pathlib import Path
 FPS = 60
 HEADER_SIZE = 256
 PAD_SIZE = 8
+FLIGHT_START_SECONDS = 300
+FLIGHT_MOVIE_SKIP_INPUTS = 2
 
 
 def pad(*, start=False, a=False, b=False, x=False, y=False, z=False,
@@ -27,12 +29,23 @@ def pad(*, start=False, a=False, b=False, x=False, y=False, z=False,
 	return bytes((buttons0, buttons1, 0, 0, stick_x, stick_y, c_x, c_y))
 
 
-def make_inputs(seconds):
+def make_inputs(seconds, flight=False):
 	inputs = []
 	for frame in range(seconds * FPS):
-		# Press A once a second through the frontend, loading screens and intro.
-		# Once gameplay is active these harmless pulses merely make Tommy sprint.
-		a = frame >= 8 * FPS and frame < 70 * FPS and frame % FPS < 2
+		if flight:
+			flying = frame >= FLIGHT_START_SECONDS * FPS
+			# The movie player drains the press before normal game input starts.
+			# Keeping this at the start of the recording makes the long flight
+			# harness independent of the opening movie's duration.
+			inputs.append(pad(start=frame < FLIGHT_MOVIE_SKIP_INPUTS,
+				a=flying, up=flying))
+			continue
+		# Press A once a second through every frontend/loading/cutscene segment.
+		# The opening sequence lasts well beyond 70 seconds on GameCube; stopping
+		# the pulses there left later scenes running and made the traversal test
+		# look stuck with player controls intentionally disabled. Once gameplay is
+		# active these harmless pulses merely make Tommy sprint.
+		a = frame >= 8 * FPS and frame % FPS < 2
 		up = frame >= 45 * FPS
 		phase = frame % (14 * FPS)
 		left = up and 6 * FPS <= phase < 7 * FPS
@@ -41,13 +54,13 @@ def make_inputs(seconds):
 	return inputs
 
 
-def make_header(input_count):
+def make_header(input_count, game_id=b"GBLPGL", wii_executable=True):
 	header = bytearray(HEADER_SIZE)
 	header[0:4] = b"DTM\x1a"
-	# Dolphin identifies this executable as ID-reVC and stores the six-byte
-	# movie/save-state game id as ID-reV. A zero id makes playback abort at boot.
-	header[4:10] = b"ID-reV"
-	header[10] = 1  # Wii executable.
+	# The canonical disc image identifies itself as GBLPGL. Dolphin rejects a
+	# movie whose six-byte id belongs to the old standalone-DOL test executable.
+	header[4:10] = game_id
+	header[10] = int(wii_executable)
 	header[11] = 1  # GameCube controller in port 1.
 	struct.pack_into("<Q", header, 13, input_count)  # frameCount
 	struct.pack_into("<Q", header, 21, input_count)  # inputCount
@@ -77,11 +90,17 @@ def self_test():
 	assert inputs[45 * FPS + 2] == pad(up=True)
 	assert inputs[48 * FPS] == pad(a=True, up=True, left=True)
 	assert inputs[48 * FPS + 2] == pad(up=True, left=True)
+	flight = make_inputs(FLIGHT_START_SECONDS + 1, flight=True)
+	assert flight[0] == pad(start=True)
+	assert flight[FLIGHT_MOVIE_SKIP_INPUTS - 1] == pad(start=True)
+	assert flight[FLIGHT_MOVIE_SKIP_INPUTS] == pad()
+	assert flight[FLIGHT_START_SECONDS * FPS - 1] == pad()
+	assert flight[FLIGHT_START_SECONDS * FPS] == pad(a=True, up=True)
 
 	header = make_header(len(inputs))
 	assert len(header) == HEADER_SIZE
 	assert header[:4] == b"DTM\x1a"
-	assert header[4:10] == b"ID-reV"
+	assert header[4:10] == b"GBLPGL"
 	assert header[10:12] == bytes((1, 1))
 	assert struct.unpack_from("<Q", header, 13)[0] == len(inputs)
 	assert struct.unpack_from("<Q", header, 21)[0] == len(inputs)
@@ -93,6 +112,10 @@ def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("output", nargs="?", type=Path)
 	parser.add_argument("--seconds", type=int, default=240)
+	parser.add_argument("--game-id", default="GBLPGL")
+	parser.add_argument("--gamecube-disc", action="store_true")
+	parser.add_argument("--flight", action="store_true",
+	    help=f"hold A + stick forward after {FLIGHT_START_SECONDS}s")
 	parser.add_argument("--self-test", action="store_true")
 	args = parser.parse_args()
 	if args.self_test:
@@ -102,9 +125,18 @@ def main():
 		parser.error("output is required unless --self-test is used")
 	if args.seconds < 1:
 		parser.error("--seconds must be positive")
+	if args.flight and args.seconds <= FLIGHT_START_SECONDS:
+		parser.error(f"--flight requires more than {FLIGHT_START_SECONDS} seconds")
+	try:
+		game_id = args.game_id.encode("ascii")
+	except UnicodeEncodeError:
+		parser.error("--game-id must be ASCII")
+	if len(game_id) != 6:
+		parser.error("--game-id must be exactly six ASCII characters")
 
-	inputs = make_inputs(args.seconds)
-	args.output.write_bytes(make_header(len(inputs)) + b"".join(inputs))
+	inputs = make_inputs(args.seconds, args.flight)
+	args.output.write_bytes(make_header(
+		len(inputs), game_id, not args.gamecube_disc) + b"".join(inputs))
 	print(f"wrote {args.output}: {len(inputs)} inputs at {FPS} Hz")
 
 

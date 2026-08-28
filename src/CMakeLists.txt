@@ -59,9 +59,19 @@ else()
         # Tremor: fixed-point Vorbis. The Gekko has a fast FPU but the
         # reference libvorbis leans on doubles, and integer decode is what
         # consoles use. dkp-pacman -S ppc-libvorbisidec.
+        set(REVC_THEORA_ROOT "/opt/devkitpro/portlibs/ppc" CACHE PATH
+            "PowerPC portlibs root containing include/theora and lib/libtheoradec.a")
+        if(NOT EXISTS "${REVC_THEORA_ROOT}/include/theora/theoradec.h" OR
+           NOT EXISTS "${REVC_THEORA_ROOT}/lib/libtheoradec.a")
+            message(FATAL_ERROR
+                "ppc-libtheora missing. Install ppc-libtheora or configure "
+                "-DREVC_THEORA_ROOT=<extracted portlibs/ppc root>.")
+        endif()
         target_include_directories(${EXECUTABLE} PRIVATE
-            /opt/devkitpro/portlibs/ppc/include)
+            /opt/devkitpro/portlibs/ppc/include
+            "${REVC_THEORA_ROOT}/include")
         target_link_libraries(${EXECUTABLE} PRIVATE
+            "${REVC_THEORA_ROOT}/lib/libtheoradec.a"
             /opt/devkitpro/portlibs/ppc/lib/libvorbisidec.a
             /opt/devkitpro/portlibs/ppc/lib/libogg.a)
     endif()

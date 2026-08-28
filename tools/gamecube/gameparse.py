@@ -10,11 +10,15 @@ Usage: gameparse.py <img> <dir> [limit]
 """
 import struct
 import sys
+import zlib
 
 SECTOR = 2048
 ID_STRUCT, ID_EXTENSION, ID_TEXTURENATIVE, ID_TEXDICTIONARY = 1, 3, 0x15, 0x16
 GXFMT_CMPR = 0xE
+GXFMT_CI8 = 0x9
 HEADER = 88
+TXD_MAGIC = b'GCTXDZ1\0'
+TXD_HEADER = struct.Struct('<8sII')
 
 
 class Fail(Exception):
@@ -58,7 +62,8 @@ def read_native(s, end):
         raise Fail('dims %dx%d' % (tw, th))
     gxfmt = h[87]
     size = s.u32()
-    expect = tw * th // 2 if gxfmt == GXFMT_CMPR else tw * th * 2
+    expect = (tw * th // 2 if gxfmt == GXFMT_CMPR else
+              tw * th + 512 if gxfmt == GXFMT_CI8 else tw * th * 2)
     if size != expect:
         raise Fail('payload %d != expected %d' % (size, expect))
     s.p += size
@@ -94,6 +99,21 @@ def read_dict(buf):
     return n
 
 
+def unpack_entry(buf):
+    if not buf.startswith(TXD_MAGIC):
+        return buf
+    _magic, raw_size, packed_size = TXD_HEADER.unpack_from(buf)
+    start = TXD_HEADER.size
+    end = start + packed_size
+    if end > len(buf):
+        raise Fail('packed TXD overruns IMG entry')
+    raw = zlib.decompress(buf[start:end])
+    if len(raw) != raw_size:
+        raise Fail('packed TXD expanded to %d, expected %d' %
+                   (len(raw), raw_size))
+    return raw
+
+
 def main():
     img_path, dir_path = sys.argv[1], sys.argv[2]
     limit = int(sys.argv[3]) if len(sys.argv) > 3 else 0
@@ -108,6 +128,7 @@ def main():
         img.seek(off * SECTOR)
         buf = img.read(size * SECTOR)
         try:
+            buf = unpack_entry(buf)
             read_dict(buf)
             ok += 1
         except Fail as e:

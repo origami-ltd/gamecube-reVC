@@ -17,6 +17,8 @@
 #include "main.h"
 #include "MBlur.h"
 #include "postfx.h"
+#include "screendroplets.h"
+#include "Particle.h"
 #include "custompipes.h"
 #include "RwHelper.h"
 #include "Text.h"
@@ -92,6 +94,12 @@
 	#define POSTFX_SELECTORS
 #endif	
 
+#ifdef SCREEN_DROPLETS
+	#define WATER_DROPLETS_SELECTOR MENUACTION_CFO_SELECT, "FED_WDP", { new CCFOSelect((int8*)&ScreenDroplets::ms_quality, "Graphics", "WaterDrops", waterDropOpts, ARRAY_SIZE(waterDropOpts), false, WaterDropsAfterChange) }, 0, 0, MENUALIGN_LEFT,
+#else
+	#define WATER_DROPLETS_SELECTOR
+#endif
+
 #ifdef INVERT_LOOK_FOR_PAD
 	#define INVERT_PAD_SELECTOR MENUACTION_CFO_SELECT, "FEC_ILU", { new CCFOSelect((int8*)&CPad::bInvertLook4Pad, "Controller", "InvertPad", off_on, 2, false) }, 0, 0, MENUALIGN_LEFT,
 #else
@@ -106,6 +114,17 @@
 
 const char *filterNames[] = { "FEM_NON", "FEM_SIM", "FEM_NRM", "FEM_MOB" };
 const char *off_on[] = { "FEM_OFF", "FEM_ON" };
+#ifdef SCREEN_DROPLETS
+const char *waterDropOpts[] = { "FEM_OFF", "FEM_LOW", "FEM_MED", "FEM_HIG" };
+
+void WaterDropsAfterChange(int8 before, int8 after)
+{
+	(void)before;
+	ScreenDroplets::Clear();
+	if(after != ScreenDroplets::QUALITY_HIGH)
+		CParticle::RemovePSystem(PARTICLE_WATERDROP);
+}
+#endif
 
 void RestoreDefGraphics(int8 action) {
 	if (action != FEOPTION_ACTION_SELECT)
@@ -141,6 +160,10 @@ void RestoreDefGraphics(int8 action) {
 		FrontEndMenuManager.m_PrefsUseWideScreen = false;
 		FrontEndMenuManager.m_nDisplayVideoMode = FrontEndMenuManager.m_nPrefsVideoMode;
 		CMBlur::BlurOn = false;
+		#ifdef SCREEN_DROPLETS
+			ScreenDroplets::ms_quality = ScreenDroplets::QUALITY_HIGH;
+			ScreenDroplets::Clear();
+		#endif
 		FrontEndMenuManager.SaveSettings();
 	#endif
 }
@@ -160,8 +183,13 @@ void RestoreDefDisplay(int8 action) {
 	#endif
 	#ifdef GRAPHICS_MENU_OPTIONS // otherwise Frontend will handle those
 		FrontEndMenuManager.m_PrefsBrightness = 256;
+#ifdef GTA_OGC
+		FrontEndMenuManager.m_PrefsLOD = 0.925f;
+		CRenderer::ms_lodDistScale = 0.925f;
+#else
 		FrontEndMenuManager.m_PrefsLOD = 1.2f;
 		CRenderer::ms_lodDistScale = 1.2f;
+#endif
 		FrontEndMenuManager.m_PrefsShowSubtitles = false;
 		FrontEndMenuManager.m_PrefsShowLegends = true;
 		FrontEndMenuManager.m_PrefsRadarMode = 0;
@@ -843,6 +871,7 @@ CMenuScreenCustom aScreens[] = {
 #elif defined LEGACY_MENU_OPTIONS
 		MENUACTION_TRAILS,		"FED_TRA", { nil, SAVESLOT_NONE, MENUPAGE_GRAPHICS_SETTINGS }, 0, 0, MENUALIGN_LEFT,
 #endif
+		WATER_DROPLETS_SELECTOR
 		// re3.cpp inserts here pipeline selectors if neo/neo.txd exists and EXTENDED_PIPELINES defined
 		MENUACTION_CFO_DYNAMIC,	"FET_DEF", { new CCFODynamic(nil, nil, nil, nil, RestoreDefGraphics) }, 320, 0, MENUALIGN_CENTER,
 		MENUACTION_GOBACK,		"FEDS_TB", {nil, SAVESLOT_NONE, MENUPAGE_NONE}, 320, 0, MENUALIGN_CENTER,

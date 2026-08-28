@@ -17,11 +17,15 @@
 #include "PlayerInfo.h"
 #include "Pools.h"
 #include "CarCtrl.h"
+#include "Font.h"
+#include "Sprite2d.h"
+#include "gcmovie.h"
 #ifdef EXTENDED_PIPELINES
 #include "custompipes.h"
 #endif
 
 #include <gccore.h>
+#include <aesndlib.h>
 #include <ogc/machine/processor.h>
 #include <ogc/usbgecko.h>
 #include <ogc/dvd.h>
@@ -492,6 +496,10 @@ gcInstallPanicHandler(void)
 void
 gcFatalPark(const char *tag, const char *msg)
 {
+	// OSReport first: the park screen is only pixels, and log silence has
+	// been misread as a freeze more than once. This line lets host-side
+	// monitors catch every park without a screenshot.
+	fprintf(stderr, "FATAL %s %s\n", tag, msg);
 	char stack[220];
 	int n = 0;
 	u32 sp = (u32)(uintptr_t)__builtin_frame_address(0);
@@ -915,7 +923,7 @@ IsForegroundApp(void)
 // Physical gate of a GameCube stick, in PAD_Stick units. Tune per pad if a
 // worn stick still cannot reach full deflection.
 #define GC_STICK_RANGE    72
-#define GC_SUBSTICK_RANGE 56
+#define GC_SUBSTICK_RANGE 59
 
 static inline int32
 gcStickScale(int v, int range)
@@ -936,18 +944,24 @@ CapturePad(RwInt32 padID)
 
 	PAD_ScanPads();
 	u16 buttons = PAD_ButtonsHeld(padID);
+	PADStatus clamped[PAD_CHANMAX] = {};
+	for(int i = 0; i < PAD_CHANMAX; i++)
+		clamped[i].err = PAD_ERR_NO_CONTROLLER;
+	clamped[padID].err = PAD_ERR_NONE;
+	clamped[padID].stickX = PAD_StickX(padID);
+	clamped[padID].stickY = PAD_StickY(padID);
+	clamped[padID].substickX = PAD_SubStickX(padID);
+	clamped[padID].substickY = PAD_SubStickY(padID);
+	PAD_Clamp(clamped);
 	// The game scales its stick axes against +-128 (see CPad, which multiplies
-	// normalised input by 128), but a GameCube stick only reaches about +-72
-	// at the physical gate and the C-stick about +-56 — PAD_StickX is
-	// calibrated, not full-scale. Passing those straight through meant a fully
-	// deflected stick asked for barely half speed and the player never ran at
-	// maximum on analog alone. Scale to the range the game expects, clamp, and
-	// keep the calibration knob visible: real pads vary and a worn stick reads
-	// lower still.
-	state.LeftStickX  =  gcStickScale(PAD_StickX(padID),    GC_STICK_RANGE);
-	state.LeftStickY  = -gcStickScale(PAD_StickY(padID),    GC_STICK_RANGE);
-	state.RightStickX =  gcStickScale(PAD_SubStickX(padID), GC_SUBSTICK_RANGE);
-	state.RightStickY = -gcStickScale(PAD_SubStickY(padID), GC_SUBSTICK_RANGE);
+	// normalised input by 128), while PAD_Clamp outputs the physical gate's
+	// smaller range (Nintendo's 15-unit dead zone plus octagonal-gate
+	// correction). Scale that dead-zoned, gate-corrected vector to the full
+	// range so diagonal direction and maximum walking/camera speed survive.
+	state.LeftStickX  =  gcStickScale(clamped[padID].stickX,    GC_STICK_RANGE);
+	state.LeftStickY  = -gcStickScale(clamped[padID].stickY,    GC_STICK_RANGE);
+	state.RightStickX =  gcStickScale(clamped[padID].substickX, GC_SUBSTICK_RANGE);
+	state.RightStickY = -gcStickScale(clamped[padID].substickY, GC_SUBSTICK_RANGE);
 	state.LeftShoulder2 = PAD_TriggerL(padID);
 	state.RightShoulder2 = PAD_TriggerR(padID);
 	state.LeftShoulder1 = (buttons & PAD_TRIGGER_L) ? 255 : 0;
@@ -962,6 +976,89 @@ CapturePad(RwInt32 padID)
 	state.Circle = (buttons & PAD_BUTTON_B) ? 255 : 0;
 	state.Square = (buttons & PAD_BUTTON_X) ? 255 : 0;
 	state.Triangle = (buttons & PAD_BUTTON_Y) ? 255 : 0;
+}
+
+static void
+showPortCredit(void)
+{
+	static wchar line1[24], line2[24], line3[32];
+	AsciiToUnicode("a port by", line1);
+	AsciiToUnicode("ERASMO BELLUMAT", line2);
+	AsciiToUnicode("for Nintendo GameCube", line3);
+
+	// Five seconds at 60 Hz: 0.5s in, 4s held, 0.5s out. A button starts a
+	// short fade instead of cutting to the next frame.
+	int skipFrames = 0, skipAlpha = 0;
+	for(int i = 0; i < 300; i++){
+		int alpha = i < 30 ? i*255/29 :
+		    i >= 270 ? (299-i)*255/29 : 255;
+		PAD_ScanPads();
+		bool skip = false;
+		for(int pad = 0; pad < PAD_CHANMAX; pad++)
+			skip |= PAD_ButtonsDown(pad) != 0;
+		if(skip && skipFrames == 0){
+			skipFrames = 15;
+			skipAlpha = alpha;
+		}
+		if(skipFrames)
+			alpha = skipAlpha*(skipFrames-1)/14;
+
+		if(DoRWStuffStartOfFrame(0, 0, 0, 0, 0, 0, 255)){
+			CSprite2d::SetRecipNearClip();
+			CSprite2d::InitPerFrame();
+			CFont::InitPerFrame();
+			DefinedState();
+			CSprite2d::DrawRect(CRect(0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT),
+			    CRGBA(0, 0, 0, 255));
+
+			CFont::SetBackgroundOff();
+			CFont::SetJustifyOff();
+			CFont::SetRightJustifyOff();
+			CFont::SetCentreOn();
+			CFont::SetCentreSize(SCREEN_WIDTH);
+			CFont::SetPropOn();
+			CFont::SetDropShadowPosition(0);
+			CFont::SetAlphaFade(255.0f);
+
+			// font2 is Rage Italic; FONT_HEADING selects Pricedown in font1.
+			CFont::SetFontStyle(FONT_BANK);
+			CFont::SetScale(SCREEN_SCALE_X(1.0f), SCREEN_SCALE_Y(1.45f));
+			CFont::SetColor(CRGBA(207, 134, 204, alpha));
+			CFont::PrintString(SCREEN_WIDTH * 0.5f, SCREEN_SCALE_Y(188.0f), line1);
+
+			CFont::SetFontStyle(FONT_HEADING);
+			CFont::SetScale(SCREEN_SCALE_X(1.15f), SCREEN_SCALE_Y(1.65f));
+			CFont::SetColor(CRGBA(60, 144, 248, alpha));
+			CFont::PrintString(SCREEN_WIDTH * 0.5f, SCREEN_SCALE_Y(215.0f), line2);
+
+			CFont::SetFontStyle(FONT_BANK);
+			CFont::SetScale(SCREEN_SCALE_X(1.0f), SCREEN_SCALE_Y(1.45f));
+			CFont::SetColor(CRGBA(207, 134, 204, alpha));
+			CFont::PrintString(SCREEN_WIDTH * 0.5f, SCREEN_SCALE_Y(242.0f), line3);
+			CFont::DrawFonts();
+			DoRWStuffEndOfFrame();
+		}
+		VIDEO_WaitVSync();
+		if(skipFrames && --skipFrames == 0)
+			break;
+	}
+	// Restore CFont::Initialise's defaults so this one-off card cannot leak
+	// layout state into the splash or frontend.
+	CFont::SetScale(1.0f, 1.0f);
+	CFont::SetSlantRefPoint(SCREEN_WIDTH, 0.0f);
+	CFont::SetSlant(0.0f);
+	CFont::SetColor(CRGBA(255, 255, 255, 0));
+	CFont::SetJustifyOff();
+	CFont::SetCentreOff();
+	CFont::SetWrapx(SCREEN_WIDTH);
+	CFont::SetCentreSize(SCREEN_WIDTH);
+	CFont::SetBackgroundOff();
+	CFont::SetBackGroundOnlyTextOff();
+	CFont::SetPropOn();
+	CFont::SetFontStyle(FONT_BANK);
+	CFont::SetRightJustifyWrap(0.0f);
+	CFont::SetAlphaFade(255.0f);
+	CFont::SetDropShadowPosition(0);
 }
 
 int
@@ -1069,6 +1166,11 @@ main(int, char *[])
 	if(RsEventHandler(rsRWINITIALIZE, nil) == rsEVENTERROR){
 		gcFatalPark("RENDERWARE", "rsRWINITIALIZE failed\n");
 	}
+	// psInitConsole's console_init re-attached stdout to the boot XFB, and the
+	// FMVs present into that same buffer — every printf during a movie drew
+	// console glyphs over the picture. Re-route to OSReport now that RW owns
+	// the screen; the log and USB Gecko get the text instead of the frames.
+	SYS_STDIO_Report(TRUE);
 
 	{
 		RwRect r;
@@ -1138,6 +1240,46 @@ main(int, char *[])
 			break;
 
 		case GS_INIT_ONCE: {
+			// Port credit first, then both movies, then normal game init and
+			// the existing splash. One AESND lifetime across both movies:
+			// resetting the DSP between consecutive streams left the second
+			// voice in a broken high-pitch state. Reset once before the game's
+			// audio backend starts.
+			showPortCredit();
+			{
+				bool titlesPresent, openingPresent;
+				{
+					DVD_FS_GUARD;
+					FILE *titles = fopen("dvd:/movies/titles.ogv", "rb");
+					titlesPresent = titles != nil;
+					if(titles)
+						fclose(titles);
+					FILE *opening = fopen("dvd:/movies/opening.ogv", "rb");
+					openingPresent = opening != nil;
+					if(opening)
+						fclose(opening);
+				}
+				if(titlesPresent){
+					AESND_Init();
+					AESND_Pause(false);
+					// titles.ogv is the Rockstar logo reel; opening.ogv follows
+					// with the Vice City montage when present.
+					bool titlesPlayed = PlayGameCubeMovie("dvd:/movies/titles.ogv",
+					    framebuffer, videoMode->fbWidth, videoMode->xfbHeight,
+					    VIDEO_GetFrameBufferSize(videoMode));
+					bool openingPlayed = !openingPresent || (titlesPlayed &&
+					    PlayGameCubeMovie("dvd:/movies/opening.ogv", framebuffer,
+					        videoMode->fbWidth, videoMode->xfbHeight,
+					        VIDEO_GetFrameBufferSize(videoMode)));
+					AESND_Pause(true);
+					AESND_Reset();
+					if(!titlesPlayed)
+						gcFatalPark("FMV", "titles.ogv read/decode failed; check OSReport\n");
+					if(!openingPlayed)
+						gcFatalPark("FMV", "opening.ogv read/decode failed; check OSReport\n");
+				}else
+					printf("FMV: image has no movies; continuing to splash\n");
+			}
 			printf("GS_INIT_ONCE: CGame::InitialiseOnceAfterRW\n");
 			LoadingScreen(nil, nil, "loadsc0");
 			if(!CGame::InitialiseOnceAfterRW()){

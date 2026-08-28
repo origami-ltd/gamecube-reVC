@@ -25,6 +25,8 @@ import shutil
 import subprocess
 import sys
 
+MINI_DVD_BYTES = 1_459_978_240
+
 # Read straight off the card by CTxdStore rather than out of gta3.img, so
 # repack_img.py never sees them.
 LOOSE_TXD_DIRS = ("models", "txd")
@@ -48,6 +50,64 @@ GCC_TXD_IMAGES = (("gc_controller", "gamecube_controller.tga"),
                   ("fe_arrows3", "fe_blank.tga"),
                   ("fe_arrows4", "fe_blank.tga"))
 
+# These two languages come from the user's install rather than the editable
+# utils/gxt sources. Add port-only labels to the staged copy so selecting one
+# on an ISO cannot turn a new menu row into a blank string.
+STAGED_GXT_LABELS = {
+    "portuguese.gxt": (
+        ("FED_WDP", "GOTAS DE CHUVA"),
+        ("GCL_LFO", "L: Centralizar / clique: Olhar para trás"),
+        ("GCL_RFO", "R: Mirar / clique: Atirar"),
+        ("GCL_MOV", "Alavanca: Mover"),
+        ("GCL_WEP", "Direcional: Armas"),
+        ("GCL_SPR", "A: Correr"),
+        ("GCL_JMP", "Y: Pular"),
+        ("GCL_DRV", "Alavanca: Dirigir"),
+        ("GCL_DPV", "Direcional: Rádio / Buzina / Missão"),
+        ("GCL_LM2", "L: Freio / clique: Ré"),
+        ("GCL_RM2", "R: Acelerar / clique: Máximo"),
+        ("GCL_NAA", "A: Não atribuído"),
+        ("GCL_NAY", "Y: Não atribuído"),
+        ("GCL_LVC", "L: Olhar à esquerda / clique: Atirar"),
+        ("GCL_RVC", "R: Olhar à direita / clique: Atirar"),
+        ("GCL_ACC", "A: Acelerar"),
+        ("GCL_BRK", "Y: Freio / Ré"),
+        ("GCL_PAU", "START: Pausa"),
+        ("GCL_ENT", "Z: Entrar / Sair"),
+        ("GCL_CRH", "X: Agachar"),
+        ("GCL_HBR", "X: Freio de mão"),
+        ("GCL_ATK", "B: Atacar / Atirar"),
+        ("GCL_FIR", "B: Atirar"),
+        ("GCL_CAM", "C: Câmera livre / Mirar"),
+    ),
+    "russian.gxt": (
+        ("FED_WDP", "КАПЛИ ДОЖДЯ"),
+        ("GCL_LFO", "L: Центр / нажатие: взгляд назад"),
+        ("GCL_RFO", "R: Прицел / нажатие: огонь"),
+        ("GCL_MOV", "Стик: Движение"),
+        ("GCL_WEP", "Крестовина: Оружие"),
+        ("GCL_SPR", "A: Бег"),
+        ("GCL_JMP", "Y: Прыжок"),
+        ("GCL_DRV", "Стик: Руление"),
+        ("GCL_DPV", "Крестовина: Радио / Гудок / Миссия"),
+        ("GCL_LM2", "L: Тормоз / нажатие: задний ход"),
+        ("GCL_RM2", "R: Газ / нажатие: максимум"),
+        ("GCL_NAA", "A: Не назначено"),
+        ("GCL_NAY", "Y: Не назначено"),
+        ("GCL_LVC", "L: Взгляд влево / нажатие: огонь"),
+        ("GCL_RVC", "R: Взгляд вправо / нажатие: огонь"),
+        ("GCL_ACC", "A: Газ"),
+        ("GCL_BRK", "Y: Тормоз / Задний ход"),
+        ("GCL_PAU", "START: Пауза"),
+        ("GCL_ENT", "Z: Войти / Выйти"),
+        ("GCL_CRH", "X: Присесть"),
+        ("GCL_HBR", "X: Ручной тормоз"),
+        ("GCL_ATK", "B: Атака / Огонь"),
+        ("GCL_FIR", "B: Огонь"),
+        ("GCL_CAM", "C: Свободная камера / Прицел"),
+    ),
+}
+
 
 def convert_txd(txdconv, src, dst, max_dim=None):
     cmd = [txdconv]
@@ -65,8 +125,13 @@ def main():
     ap.add_argument("--out", required=True, help="staging directory for the card")
     ap.add_argument("--txdconv", required=True)
     ap.add_argument("--audio", help="converted audio directory (from convert_audio.py)")
+    ap.add_argument("--theora-encoder",
+                    help="Xiph encoder_example; also accepted via THEORA_ENCODER_EXAMPLE")
+    ap.add_argument("--preencoded-movies",
+                    help="directory containing opening.ogv and titles.ogv")
     ap.add_argument("--max-dim", type=int, help="cap texture axes, passed to txdconv")
-    ap.add_argument("--size-mb", type=int, default=1500,
+    ap.add_argument("--size-mb", type=float,
+                    default=MINI_DVD_BYTES / 1048576.0,
                     help="target disc size, for the fit report")
     ap.add_argument("--keep-sfx-raw", action="store_true",
                     help="keep the unpacked sample bank for an SD-only build")
@@ -88,6 +153,78 @@ def main():
         shutil.copytree(src, dst, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("gta3.img", "gta3.dir",
                                                      "*.bak", "._*"))
+
+    # The stock PC movies cannot be decoded by the console backend. Transcode
+    # both original opening parts to the bounded GameCube stream: Rockstar's
+    # logo first, then Vice City's title montage. Missing either is fatal so a
+    # release ISO cannot silently ship half the opening.
+    movies_dir = next((os.path.join(args.game, name)
+                       for name in os.listdir(args.game)
+                       if name.lower() == "movies" and
+                       os.path.isdir(os.path.join(args.game, name))), None)
+    logo_movie = None
+    titles_movie = None
+    if movies_dir:
+        logo_movie = next((os.path.join(movies_dir, name)
+                           for name in os.listdir(movies_dir)
+                           if name.lower() == "logo.mpg"), None)
+        titles_movie = next((os.path.join(movies_dir, name)
+                             for name in os.listdir(movies_dir)
+                             if name.lower() == "gtatitles.mpg"), None)
+    if logo_movie is None:
+        sys.exit("missing opening FMV: <game>/movies/logo.mpg")
+    if titles_movie is None:
+        sys.exit("missing opening FMV: <game>/movies/gtatitles.mpg")
+    encode_fmv = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "encode_fmv.py")
+    encoder_arg = (["--encoder-example", args.theora_encoder]
+                   if args.theora_encoder else [])
+    # A reused staging tree must not keep the retired MPEG payloads. Besides
+    # wasting disc space, their presence makes release inspection ambiguous.
+    for legacy_name in ("opening.gcmv", "titles.gcmv"):
+        legacy_movie = os.path.join(args.out, "movies", legacy_name)
+        if os.path.exists(legacy_movie):
+            os.unlink(legacy_movie)
+    opening_movie = os.path.join(args.out, "movies", "opening.ogv")
+    titles_output = os.path.join(args.out, "movies", "titles.ogv")
+    if args.preencoded_movies:
+        for name, output in (("opening.ogv", opening_movie),
+                             ("titles.ogv", titles_output)):
+            source = os.path.join(args.preencoded_movies, name)
+            if not os.path.isfile(source):
+                sys.exit("missing pre-encoded FMV: " + source)
+            os.makedirs(os.path.dirname(output), exist_ok=True)
+            print("reuse %s" % name, flush=True)
+            if not os.path.exists(output) or not os.path.samefile(source, output):
+                shutil.copy2(source, output)
+    else:
+        # The console plays titles.ogv FIRST and its comments define it as the
+        # Rockstar logo reel; opening.ogv follows with the Vice City montage.
+        # This mapping was swapped, which played the montage before the logo.
+        print("encode logo FMV (titles.ogv)", flush=True)
+        subprocess.run([sys.executable, encode_fmv] + encoder_arg +
+                       [logo_movie, titles_output],
+                       check=True)
+        print("encode title-montage FMV (opening.ogv)", flush=True)
+        subprocess.run([sys.executable, encode_fmv] + encoder_arg +
+                       [titles_movie, opening_movie],
+                       check=True)
+
+    # Repo GXT files contain the port-specific GameCube labels. They must win
+    # over the stock PC text copied above or the new keys render as blanks.
+    repo_text = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "..", "gamefiles", "TEXT")
+    if os.path.isdir(repo_text):
+        shutil.copytree(repo_text, os.path.join(args.out, "text"),
+                        dirs_exist_ok=True)
+    gxtpatch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "gxtpatch.py")
+    for filename, labels in STAGED_GXT_LABELS.items():
+        staged_gxt = os.path.join(args.out, "text", filename)
+        if os.path.isfile(staged_gxt):
+            for key, text in labels:
+                subprocess.run([sys.executable, gxtpatch, "--add", staged_gxt,
+                                key, text], check=True)
 
     converted = failed = 0
     for sub in LOOSE_TXD_DIRS:
@@ -118,6 +255,63 @@ def main():
                     os.remove(tmp)
                 failed += 1
                 print("  FAILED %s/%s — its textures will be missing" % (sub, name))
+
+    # The world archive is intentionally excluded from copytree above because
+    # every embedded PC TXD must be converted before the console streams it.
+    source_img = os.path.join(args.game, "models", "gta3.img")
+    source_dir = os.path.join(args.game, "models", "gta3.dir")
+    if not os.path.isfile(source_img) or not os.path.isfile(source_dir):
+        sys.exit("missing source world archive: <game>/models/gta3.img + gta3.dir")
+    staged_img = os.path.join(args.out, "models", "gta3.img")
+    staged_dir = os.path.join(args.out, "models", "gta3.dir")
+    next_img, next_dir = staged_img + ".new", staged_dir + ".new"
+    repack = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "repack_img.py")
+    cmd = [sys.executable, repack]
+    if args.max_dim:
+        cmd += ["--max-dim", str(args.max_dim)]
+    cmd += ["--static-ide-root", os.path.join(args.out, "data")]
+    cmd += [source_img, source_dir, next_img, next_dir, args.txdconv]
+    print("repack gta3.img", flush=True)
+    subprocess.run(cmd, check=True)
+    os.replace(next_img, staged_img)
+    os.replace(next_dir, staged_dir)
+
+    # Keep world TXDs whole, as in the last playable 20 August build. Splitting
+    # these dictionaries moved DVD reads into first render and made geometry
+    # appear in front of the player. The native GX payload remains exact and
+    # full-resolution; only its load boundary changes back to one TXD.
+    sidecar_root = os.path.join(args.out, "models", "gctex")
+    shutil.rmtree(sidecar_root, ignore_errors=True)
+    os.makedirs(sidecar_root)
+
+    # Some original DFFs deliberately reference a texture owned by a different
+    # TXD. Desktop RenderWare searches globally; the compact GameCube demand
+    # dictionaries need the same exact native chunks available without keeping
+    # every donor dictionary resident. This shared bundle is lossless and tiny.
+    from extract_txd_sidecars import (selected_texture_chunks, texture_chunks,
+                                      write_bundle)
+    shared_chunks = selected_texture_chunks(staged_img, staged_dir, (
+        ("ocmiamistrip9", "tallhousewall3_256"),
+        ("northbuild", "topwallac1_256"),
+        ("dynpostbx", "white64"),
+        ("lod_starsmall", "orangeLOD"),
+    ))
+    shared_count = write_bundle(os.path.join(sidecar_root, "shared.gtb"),
+                                shared_chunks)
+    print("shared: %d textures" % shared_count, flush=True)
+
+    # DEFAULT.DAT merges these two loose dictionaries into the runtime
+    # "generic" TXD. Bundle the same lossless native chunks so dictionary-only
+    # plants can be released and restored when a later DFF references them.
+    generic_chunks = []
+    for loose in (os.path.join(args.out, "models", "generic", "wheels.txd"),
+                  os.path.join(args.out, "models", "generic.txd")):
+        with open(loose, "rb") as source:
+            generic_chunks.extend(texture_chunks(source.read()))
+    generic_count = write_bundle(os.path.join(sidecar_root, "generic.gtb"),
+                                 generic_chunks)
+    print("generic: %d textures" % generic_count, flush=True)
 
     # neo/ — the neo pipeline assets (env/rim/gloss tweak tables and
     # neo.txd) ship with the reVC source, not with the PC game, which is why
@@ -190,11 +384,11 @@ def main():
             total += os.path.getsize(os.path.join(root, f))
     mb = total / 1048576.0
     print("\nloose txd converted: %d, failed: %d" % (converted, failed))
-    print("card contents      : %.0f MB of %d MB" % (mb, args.size_mb))
+    print("card contents      : %.1f MiB of %.1f MiB" % (mb, args.size_mb))
     if mb > args.size_mb:
-        print("OVER BUDGET by %.0f MB" % (mb - args.size_mb))
+        print("OVER BUDGET by %.1f MiB" % (mb - args.size_mb))
         return 1
-    print("headroom           : %.0f MB" % (args.size_mb - mb))
+    print("headroom           : %.1f MiB" % (args.size_mb - mb))
     return 0
 
 

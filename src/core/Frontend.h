@@ -866,6 +866,7 @@ public:
 	// uint8 GetNumberOfMenuOptions();
 #ifdef GAMEPAD_MENU
 	void LoadController(int8 type);
+	void UnloadController(void);
 	void PrintController(void);
 #endif
 };

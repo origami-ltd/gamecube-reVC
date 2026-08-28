@@ -8,6 +8,13 @@ class CParticleObject;
 class ScreenDroplets
 {
 public:
+	enum Quality {
+		QUALITY_OFF,
+		QUALITY_LOW,
+		QUALITY_MEDIUM,
+		QUALITY_HIGH
+	};
+
 	enum {
 		MAXDROPS = 2000,
 		MAXDROPSMOVING = 700
@@ -37,6 +44,7 @@ public:
 
 	static bool ms_enabled;
 	static bool ms_movingEnabled;
+	static int8 ms_quality;
 
 	static ScreenDrop ms_drops[MAXDROPS];
 	static int ms_numDrops;
@@ -67,6 +75,8 @@ public:
 	static void FillScreen(int n);
 	static void FillScreenMoving(float amount, bool isBlood = false);
 	static void RegisterSplash(CParticleObject *pobj);
+	static bool SmallDropsEnabled(void) { return ms_quality != QUALITY_OFF; }
+	static bool LargeDropsEnabled(void) { return ms_quality == QUALITY_HIGH; }
 
 	static void ProcessCameraMovement(void);
 	static void SprayDrops(void);

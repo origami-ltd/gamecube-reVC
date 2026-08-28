@@ -39,6 +39,19 @@ def hardlink_tree(source, destination):
                 shutil.copy2(src, dst)
 
 
+def dolphin_uses_image(image):
+    """Do not replace a disc image while Dolphin is reading it."""
+    try:
+        commands = subprocess.run(
+            ["ps", "-axo", "command="], check=True,
+            stdout=subprocess.PIPE, text=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    image = os.path.abspath(image)
+    return any("/Dolphin " in command and image in command
+               for command in commands.splitlines())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, help="prepared game data root")
@@ -57,15 +70,29 @@ def main():
     if os.path.getsize(args.gbi) != 32768:
         sys.exit("gbi.hdr must occupy the 16-sector ISO system area")
 
+    output = os.path.abspath(args.out)
+    if dolphin_uses_image(output):
+        sys.exit(f"refusing to rebuild an ISO used by Dolphin: {output}")
+
     parent = os.path.dirname(os.path.abspath(args.root))
     work = tempfile.mkdtemp(prefix=".revc-iso-", dir=parent)
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    fd, image_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(output)}.", suffix=".building.iso",
+        dir=os.path.dirname(output))
+    os.close(fd)
+    os.unlink(image_path)
     try:
         hardlink_tree(os.path.abspath(args.root), work)
         boot_dol = os.path.join(work, "revc.dol")
+        # hardlink_tree deliberately shares unchanged assets with the staging
+        # tree, but the boot DOL is replaced on every build.  Unlink it first so
+        # copy2 cannot overwrite the staging tree's hardlink in place.
+        if os.path.exists(boot_dol):
+            os.unlink(boot_dol)
         shutil.copy2(args.dol, boot_dol)
-        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         command = [
-            "hdiutil", "makehybrid", "-ov", "-o", os.path.abspath(args.out),
+            "hdiutil", "makehybrid", "-ov", "-o", image_path,
             "-iso", "-joliet", "-iso-volume-name", "REVC",
             "-joliet-volume-name", "REVC", "-no-emul-boot",
             "-eltorito-boot", boot_dol, work,
@@ -81,7 +108,7 @@ def main():
         dol_sectors = (os.path.getsize(args.dol) + 511) // 512
         if dol_sectors > 0xFFFF:
             sys.exit("DOL is too large for the El Torito sector-count field")
-        with open(args.gbi, "rb") as source, open(args.out, "r+b") as image:
+        with open(args.gbi, "rb") as source, open(image_path, "r+b") as image:
             image.seek(EL_TORITO_BOOT_RECORD_SECTOR * ISO_SECTOR_BYTES +
                        EL_TORITO_CATALOG_POINTER)
             catalog_sector_data = image.read(4)
@@ -92,19 +119,36 @@ def main():
             image.write(struct.pack("<H", dol_sectors))
             image.seek(0)
             image.write(source.read())
-        size = os.path.getsize(args.out)
-        with open(args.out, "rb") as image:
+        payload_size = os.path.getsize(image_path)
+        if payload_size > MINI_DVD_BYTES:
+            sys.exit(f"ISO is {payload_size - MINI_DVD_BYTES} bytes over mini-DVD capacity")
+        # Dolphin and real DVD reads are 32 KiB aligned. hdiutil stops at the
+        # last ISO sector, so a valid final file can still make the last aligned
+        # read cross EOF. GameCube discs have a fixed physical size: pad to it.
+        with open(image_path, "r+b") as image:
+            image.truncate(MINI_DVD_BYTES)
+        size = os.path.getsize(image_path)
+        with open(image_path, "rb") as image:
             image.seek(0x8001)
             if image.read(5) != b"CD001":
                 sys.exit("ISO validation failed: primary volume descriptor missing")
             image.seek(catalog_sector * ISO_SECTOR_BYTES + EL_TORITO_SECTOR_COUNT)
             if struct.unpack("<H", image.read(2))[0] != dol_sectors:
                 sys.exit("ISO validation failed: boot DOL length is wrong")
-        if size > MINI_DVD_BYTES:
-            sys.exit(f"ISO is {size - MINI_DVD_BYTES} bytes over mini-DVD capacity")
-        print(f"PASS: {args.out} ({size} bytes, "
-              f"{MINI_DVD_BYTES - size} bytes free)")
+            image.seek(MINI_DVD_BYTES - 1)
+            if image.read(1) != b"\0":
+                sys.exit("ISO validation failed: final disc byte is not readable padding")
+        if size != MINI_DVD_BYTES:
+            sys.exit(f"ISO validation failed: {size} != {MINI_DVD_BYTES} bytes")
+        # The canonical ISO changes only after the new image has passed every
+        # validation.  Existing readers retain the old inode instead of seeing
+        # hdiutil truncate and rewrite the file underneath them.
+        os.replace(image_path, output)
+        print(f"PASS: {output} ({size} bytes, "
+              f"{MINI_DVD_BYTES - payload_size} bytes padding)")
     finally:
+        if os.path.exists(image_path):
+            os.unlink(image_path)
         shutil.rmtree(work)
 
 
