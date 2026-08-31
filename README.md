@@ -95,13 +95,19 @@ repacks `gta3.img` and produces the card layout the game reads.
 
 1. Build the SD card tree (see [Game data](#game-data)).
 2. Point Dolphin's Wii SD card at it: `Config → Wii → SD Card Settings`,
-   then either set the SD card image to one containing the tree, or enable
-   folder sync targeting the tree.
+   then either set the SD card image to one whose **root** holds the tree's
+   contents, or enable folder sync targeting the tree itself (the sync root
+   becomes the card root). Either way the card must end up with
+   `/models/gta3.img` at the top level.
 3. Open `build/wii/src/reVC.dol` in Dolphin.
 
 ### Wii (Homebrew Channel)
 
-1. Copy the built SD card tree to the root of a FAT32 SD card.
+1. Generate the SD card tree (see [Game data](#game-data)) and copy its
+   **contents** — the `anim/`, `audio/`, `data/`, `models/`, `text/` and
+   remaining folders `build_sd.py` produced — directly to the **root** of a
+   FAT32 SD card. The game reads them from the root: the card must contain
+   `/models/gta3.img`, not `/sd-tree/models/gta3.img`.
 2. Copy `build/wii/src/reVC.dol` to the card as `apps/reVC/boot.dol`.
 3. Launch reVC from the Homebrew Channel.
 
