@@ -208,7 +208,10 @@ convertImage(Image *img, const char *name, const char *mask,
 	// Small textures stay RGB5A3 outright: at 64px and below CMPR saves a
 	// few KB total while its 4x4 blocks butcher soft effect gradients —
 	// the additive rain drip drew its DXT block edges as a square halo.
-	bool cmpr = !gradientAlpha && (w > 64 || h > 64);
+	bool cmpr = !gradientAlpha;
+	// (No small-size floor: the reference card tree compresses even 16px
+	// textures, and a 64px RGB5A3 floor inflated the archive from 174MB
+	// to 207MB, enough to put the streamer into permanent eviction thrash.)
 	int align = cmpr ? 7 : 3;
 	int tw = (w + align) & ~align;
 	int th = (h + align) & ~align;
