@@ -11,6 +11,7 @@
 #include "RwHelper.h"
 #include "Camera.h"
 #include "MBlur.h"
+#include "Timer.h"
 #include "postfx.h"
 
 #ifdef GTA_OGC
