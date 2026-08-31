@@ -456,11 +456,10 @@ CPostFX::GetBackBuffer(RwCamera *cam)
 void
 CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blur, int32 type, uint32 bluralpha)
 {
-	// The menu, the ini and the save all toggle CMBlur::BlurOn; this class
-	// read its own MotionBlurOn, which nothing ever wrote — so the trails
-	// path was unreachable and the Trails option did nothing. One source of
-	// truth, sampled where it is consumed.
-	MotionBlurOn = CMBlur::BlurOn;
+	// MotionBlurOn is owned by the FED_MBL menu option (a CCFOSelect writes
+	// straight through an int8* — which is why a grep for writes never finds
+	// one). Do NOT sync it from CMBlur::BlurOn here: that overrode the
+	// user's menu choice with the legacy trails flag every frame.
 	PUSH_RENDERGROUP("CPostFX::Render");
 
 	if(pFrontBuffer == nil)
