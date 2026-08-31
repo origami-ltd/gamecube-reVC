@@ -1005,17 +1005,12 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 		}
 	}
 
-#ifdef GTA_OGC
-	// Same LOD hysteresis as SetupEntityVisibility (see the comment there):
-	// a big-building shell sitting on its own distance boundary flipped
-	// between atomics (or into nothing) every frame — the distant façades
-	// still "blinking dark" after the world-light fix, because their far
-	// shells are exactly the geometry at these thresholds. Once on screen,
-	// keep drawing it until it is a tenth further than the appear distance.
-	RpAtomic *a = mi->GetFirstAtomicFromDistance(ent->m_rwObject ? dist*0.9f : dist);
-#else
+	// NO hysteresis here, deliberately: biasing this pick desyncs it from
+	// the raw-dist "hide the shell under an opaque non-LOD" test above, and
+	// in the overlap band the far shell drew on top of the detailed
+	// interior, alternating — measured as texture blinking in the Ocean
+	// View lobby. The two decisions must use the same distance.
 	RpAtomic *a = mi->GetFirstAtomicFromDistance(dist);
-#endif
 	if(a){
 		if(ent->m_rwObject == nil)
 			ent->CreateRwObject();
