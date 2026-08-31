@@ -84,10 +84,17 @@ environment variable to its root.
 This repository contains no game assets. A legally owned copy of Grand
 Theft Auto: Vice City is required.
 
-Copy the game installation into the git-ignored [`assets/`](assets/) folder
-and generate the SD card tree with `tools/gamecube/build_sd.py` (see
-`--help` for arguments). The script converts textures to GX-native formats,
-repacks `gta3.img` and produces the card layout the game reads.
+Copy the game installation to `assets/GTAVC` (the [`assets/`](assets/)
+folder is git-ignored) and run:
+
+```bash
+python3 build.py sd         # SD card tree -> assets/sd-tree
+```
+
+This builds the ahead-of-time texture converter for your machine, converts
+every texture to GX-native formats, repacks `gta3.img` and lays out the
+card tree the game reads (`tools/gamecube/build_sd.py` does the asset
+work; `--game`, `--out`, `--audio` and `--movies` override the defaults).
 
 ## Running
 

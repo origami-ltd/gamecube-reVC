@@ -50,6 +50,18 @@ def read_dir(path):
     return out
 
 
+def unpack_txd(record):
+    """Trim a sector-padded IMG record to its actual RenderWare chunk.
+
+    IMG entries are stored in whole 2048-byte sectors; the real chunk length
+    lives in the RW header (u32 type, u32 size, u32 version — payload starts
+    after the 12-byte header)."""
+    if len(record) < 12:
+        return record
+    total = int.from_bytes(record[4:8], 'little') + 12
+    return record[:total] if 12 <= total <= len(record) else record
+
+
 def sectors(n):
     return (n + SECTOR - 1) // SECTOR
 

@@ -270,7 +270,8 @@ def main():
     cmd = [sys.executable, repack]
     if args.max_dim:
         cmd += ["--max-dim", str(args.max_dim)]
-    cmd += ["--static-ide-root", os.path.join(args.out, "data")]
+    # --static-ide-root belongs to the iso-hardening branch's repack (static
+    # DFF pre-instancing); this branch's repack_img.py does not take it.
     cmd += [source_img, source_dir, next_img, next_dir, args.txdconv]
     print("repack gta3.img", flush=True)
     subprocess.run(cmd, check=True)
