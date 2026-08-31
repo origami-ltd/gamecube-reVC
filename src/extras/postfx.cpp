@@ -323,6 +323,10 @@ CPostFX::RenderOverlayShader(RwCamera *cam, int32 r, int32 g, int32 b, int32 a)
 			RwIm2DVertexSetIntRGBA(&Vertex[i], tr, tg, tb, 255);
 		RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDONE);
 		RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDONE);
+		// TWICE, like the trails path's two additive draws and the PC
+		// colour-filter shader's doubled tint: one pass was half the
+		// filter, faint enough to read as "no effect without trails".
+		RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
 		RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
 		RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDSRCALPHA);
 		RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDINVSRCALPHA);
@@ -452,6 +456,11 @@ CPostFX::GetBackBuffer(RwCamera *cam)
 void
 CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blur, int32 type, uint32 bluralpha)
 {
+	// The menu, the ini and the save all toggle CMBlur::BlurOn; this class
+	// read its own MotionBlurOn, which nothing ever wrote — so the trails
+	// path was unreachable and the Trails option did nothing. One source of
+	// truth, sampled where it is consumed.
+	MotionBlurOn = CMBlur::BlurOn;
 	PUSH_RENDERGROUP("CPostFX::Render");
 
 	if(pFrontBuffer == nil)
