@@ -6641,9 +6641,11 @@ RenderGameCubeController(int32 alpha)
 	gFrontendControllerTilt += (targetTilt - gFrontendControllerTilt) * 0.18f;
 
 	RwFrame *frame = RpClumpGetFrame(gFrontendControllerClump);
-	// 10% larger again (user-tuned): camera distance scaled by 1/1.10 from
-	// the previous 6.40, y offset with it so the screen anchor holds.
-	const RwV3d position = { 0.0f, -0.50f, 5.82f };
+	// 25% larger again (user-tuned): camera distance 5.82/1.25. The y offset
+	// deliberately does NOT compensate this time — at the closer distance the
+	// same -0.50 sits ~25% lower on screen, which is the other half of the
+	// request ("aumenta 25% e desce 25%").
+	const RwV3d position = { 0.0f, -0.50f, 4.66f };
 	const RwV3d tiltAxis = { 1.0f, 0.0f, 0.0f };
 	RwFrameTransform(frame, RwFrameGetMatrix(RwCameraGetFrame(Scene.camera)),
 	    rwCOMBINEREPLACE);
@@ -7585,6 +7587,18 @@ CMenuManager::LoadController(int8 type)
 		gcFatalPark("FRONTEND3D", "FRONTEND_GCC.DFF is not a valid clump");
 		return;
 	}
+	// The plain pad, permanently: strip every material texture from the
+	// clump. Prelight and material colour carry the plastic look; with no
+	// texture bound, no baked-in logo art can ever come back.
+	RpClumpForAllAtomics(gFrontendControllerClump,
+	    [](RpAtomic *atomic, void*) -> RpAtomic* {
+		RpGeometryForAllMaterials(RpAtomicGetGeometry(atomic),
+		    [](RpMaterial *material, void*) -> RpMaterial* {
+			RpMaterialSetTexture(material, nil);
+			return material;
+		    }, nil);
+		return atomic;
+	    }, nil);
 	gFrontendControllerTilt = 0.0f;
 #endif
 }
