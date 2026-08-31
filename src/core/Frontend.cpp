@@ -6641,10 +6641,9 @@ RenderGameCubeController(int32 alpha)
 	gFrontendControllerTilt += (targetTilt - gFrontendControllerTilt) * 0.18f;
 
 	RwFrame *frame = RpClumpGetFrame(gFrontendControllerClump);
-	// 7.20 is exactly 25% smaller in perspective than the previous 5.40.
-	// 12.5% larger than the original framing (user-tuned): camera distance
-	// scaled by 1/1.125, y offset with it so the screen anchor holds.
-	const RwV3d position = { 0.0f, -0.55f, 6.40f };
+	// 10% larger again (user-tuned): camera distance scaled by 1/1.10 from
+	// the previous 6.40, y offset with it so the screen anchor holds.
+	const RwV3d position = { 0.0f, -0.50f, 5.82f };
 	const RwV3d tiltAxis = { 1.0f, 0.0f, 0.0f };
 	RwFrameTransform(frame, RwFrameGetMatrix(RwCameraGetFrame(Scene.camera)),
 	    rwCOMBINEREPLACE);
