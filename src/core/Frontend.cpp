@@ -7585,6 +7585,24 @@ CMenuManager::LoadController(int8 type)
 		gcFatalPark("FRONTEND3D", "FRONTEND_GCC.DFF is not a valid clump");
 		return;
 	}
+	// The pad ships UNTEXTURED: every material drops its texture and takes
+	// the shell colour, so nothing printed on the source model — brands,
+	// decals, anything — can ever reach the screen. Shape comes from the
+	// studio lights in RenderGameCubeController.
+	RpClumpForAllAtomics(gFrontendControllerClump,
+	    [](RpAtomic *atomic, void *) -> RpAtomic* {
+		RpGeometry *geo = RpAtomicGetGeometry(atomic);
+		RpGeometrySetFlags(geo,
+		    RpGeometryGetFlags(geo) | rpGEOMETRYMODULATEMATERIALCOLOR);
+		RpGeometryForAllMaterials(geo,
+		    [](RpMaterial *mat, void *) -> RpMaterial* {
+			static const RwRGBA shell = { 90, 70, 129, 255 };
+			RpMaterialSetTexture(mat, nil);
+			RpMaterialSetColor(mat, &shell);
+			return mat;
+		}, nil);
+		return atomic;
+	}, nil);
 	gFrontendControllerTilt = 0.0f;
 #endif
 }
