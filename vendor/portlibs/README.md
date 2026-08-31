@@ -1,7 +1,10 @@
-Vendored PowerPC build dependencies so a fresh clone builds without hunting
-packages:
+# vendor/portlibs/
 
-- `cmake/` — the Wii toolchain shim (stands in for devkitPro's wii-cmake
-  package; still requires a devkitPro install for `ogc-common.cmake`).
-- `ppc/` — libtheora built for PowerPC/GameCube (FMV decode). Theora is
-  BSD-licensed by the Xiph.Org Foundation.
+PowerPC build dependencies bundled so the project builds from a fresh clone:
+
+- `cmake/` — Wii toolchain file used by `build.py` for the Wii target.
+  It requires a devkitPro installation (`DEVKITPRO` environment variable)
+  for `ogc-common.cmake`.
+- `ppc/` — libtheora headers and static libraries built for
+  PowerPC/GameCube, used for FMV decoding. Theora is developed by the
+  Xiph.Org Foundation and is BSD-licensed.

@@ -366,4 +366,5 @@ src/extras/GitSHA1.cpp
 /toolchain/
 
 # Game-derived data (Rockstar IP) lives here, never in the public repo.
-assets/
+assets/*
+!assets/README.md

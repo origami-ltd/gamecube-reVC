@@ -1,54 +1,55 @@
 # reVC — GameCube
 
-A port of Grand Theft Auto: Vice City to the **Nintendo GameCube**, built on
-the reVC reverse-engineered engine. It is a real GameCube game, not a "runs
-on Wii hardware" shortcut: the heap is clamped to the console's **24MB MEM1**,
-audio sample storage lives in the **16MB ARAM**, and nothing ever touches the
-Wii's MEM2 — even the Wii development build enforces the same limits, so what
-runs in the dev loop is what real hardware gets.
+A Nintendo GameCube port of Grand Theft Auto: Vice City, based on the
+reverse-engineered engine from [mrxenginner/reVC](https://github.com/mrxenginner/reVC).
 
-> **Work in progress.** The game currently boots and plays **via SD card**
-> (Wii homebrew loader or Dolphin). Generating a mini-DVD **ISO that boots on
-> a real GameCube is still giving us trouble** — the ISO9660 path works under
-> Dolphin but real-hardware boot is not there yet. Contributions welcome.
+The port targets real GameCube hardware constraints: the heap is limited to
+the console's 24 MB of MEM1, audio sample storage uses the 16 MB ARAM, and
+MEM2 (Wii-only memory) is never used — including in the Wii development
+build, which enforces the same limits.
 
-## What's inside (architecture)
+## Status
 
-- **Renderer** — a native **GX backend for librw** (`vendor/librw/src/gx`).
-  Textures are converted ahead of time to GameCube-native formats (CMPR /
-  RGB5A3) at **full original quality — no downscaling, ever**; memory
-  pressure is handled by eviction and streaming, never by degrading assets.
-  World geometry is quantised to packed int16 vertex streams, static meshes
-  can replay as GP display lists, and lighting runs through hand-built TEV
-  stages (prelight + timecycle ambient, neo env/rim/lightmap extras).
-- **Audio** — streams are **Ogg Vorbis decoded with Tremor** (fixed-point,
-  console-friendly) on a **dedicated decode thread** so a decode chunk never
-  bites the game frame; a starved voice plays silence instead of replaying
-  stale buffers. Mixing is AESND's 32 hardware-fed voices (28 generic + a
-  reserved police-radio voice + streams); mission speech (IMA ADPCM) is
-  cached in **ARAM** through a 16MB shim — the only Arena2 use in the port.
-  FMVs decode through Theora at native rate.
-- **Filesystem/streaming** — a from-scratch ISO9660 driver (`dvdfs`) plus
-  libfat SD support, one mutex per mount, sector-aligned DMA reads, and a
-  streaming layer tuned against the 24MB wall (LRU model eviction, no-refade
-  snaps so eviction churn is invisible).
-- **Frontend** — GameCube-native controls page with a real 3D controller
-  model, per-action button badges in the physical button colours, and help
-  boxes that name the buttons this port actually binds.
+Work in progress.
+
+- The game boots and plays from an **SD card** (Wii homebrew loader, or
+  Dolphin).
+- Generating a mini-DVD **ISO that boots on a real GameCube does not work
+  yet**. The ISO9660 path runs under Dolphin, but real-hardware disc boot is
+  an open problem.
+
+## Architecture
+
+- **Renderer** — a native GX backend for librw
+  (`vendor/librw/src/gx`). Textures are converted ahead of time to
+  GameCube-native formats (CMPR / RGB5A3) at full original quality; memory
+  pressure is handled by streaming and eviction, not by reducing asset
+  quality. World geometry is quantised to packed int16 vertex streams,
+  static meshes can be replayed as GP display lists, and lighting is
+  implemented with TEV stages (prelight plus timecycle ambient, with
+  optional env-map, rim-light and lightmap stages).
+- **Audio** — streamed music, radio and speech are Ogg Vorbis, decoded with
+  Tremor (fixed-point) on a dedicated thread so decoding never interrupts
+  the game frame. Mixing uses AESND's 32 hardware voices. Mission speech
+  (IMA ADPCM) is cached in ARAM. FMVs are decoded with Theora.
+- **Filesystem and streaming** — an ISO9660 driver written for this port
+  (`src/skel/gamecube/dvdfs.c`) plus libfat SD support, with sector-aligned
+  DMA reads and a streaming layer tuned for the 24 MB memory budget.
+- **Frontend** — a GameCube controls page with a 3D controller model, and
+  help boxes that display the port's actual button bindings as coloured
+  GameCube button badges.
 
 ## Building
 
-Dependencies you install once:
+Requirements:
 
-1. **[devkitPro](https://devkitpro.org/wiki/Getting_Started)** with the
-   GameCube/Wii packages (`gamecube-dev` / `wii-dev` groups): devkitPPC,
-   libogc, cmake support files.
-2. **CMake ≥ 3.13**, **Ninja** and **Python 3** (devkitPro's installer can
-   provide cmake/ninja; any system install works too).
+1. [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the
+   GameCube/Wii packages (`gamecube-dev` / `wii-dev`).
+2. CMake ≥ 3.13, Ninja and Python 3.
 
-Everything else is vendored in this repository (librw with the GX backend,
-xiph ogg/opus/opusfile submodules, a PowerPC libtheora build plus the Wii
-toolchain shim under `vendor/portlibs/`).
+All other build dependencies are included in the repository (the librw fork
+with the GX backend, the xiph ogg/opus/opusfile submodules, and a PowerPC
+libtheora build with a Wii toolchain file under `vendor/portlibs/`).
 
 ```bash
 git clone --recursive https://github.com/origami-ltd/gamecube-reVC.git
@@ -57,49 +58,67 @@ python3 build.py            # GameCube DOL -> build/cube/src/reVC.dol
 python3 build.py wii        # Wii dev DOL  -> build/wii/src/reVC.dol
 ```
 
-The same command works on macOS, Linux and Windows.
+The same commands work on macOS, Linux and Windows.
 
-### Game data
+## Game data
 
-You must own Grand Theft Auto: Vice City. Copy your installation into the
-git-ignored **`assets/`** folder and build the SD card tree with
-`tools/gamecube/build_sd.py` (it converts every texture to GX-native format,
-repacks `gta3.img`, and lays out the card the game expects — run it with
-`--help` for the arguments). **No Rockstar data ships in this repository**,
-and `assets/` is ignored so none can slip in.
+This repository contains no game assets. A legally owned copy of Grand
+Theft Auto: Vice City is required.
+
+Copy the game installation into the git-ignored [`assets/`](assets/) folder
+and generate the SD card tree with `tools/gamecube/build_sd.py` (see
+`--help` for arguments). The script converts textures to GX-native formats,
+repacks `gta3.img` and produces the card layout the game reads.
+
+## Running
+
+### Dolphin
+
+1. Build the SD card tree (see [Game data](#game-data)).
+2. Point Dolphin's Wii SD card at it: `Config → Wii → SD Card Settings`,
+   then either set the SD card image to one containing the tree, or enable
+   folder sync targeting the tree.
+3. Open `build/wii/src/reVC.dol` in Dolphin.
+
+### Wii (Homebrew Channel)
+
+1. Copy the built SD card tree to the root of a FAT32 SD card.
+2. Copy `build/wii/src/reVC.dol` to the card as `apps/reVC/boot.dol`.
+3. Launch reVC from the Homebrew Channel.
+
+### GameCube
+
+Real-hardware disc boot is not functional yet — see [Status](#status).
 
 ## Credits
 
-- **[reVC / re3](https://github.com/GTAmodding/re3)** — the reverse-engineered
-  engine this port stands on.
-- **[librw](https://github.com/aap/librw)** by aap — the RenderWare
-  reimplementation; our fork adds the GameCube GX backend.
-- **[dca3](https://gitlab.com/skmp/dca3-game)** by skmp and contributors —
-  the Dreamcast GTA III port whose approach corrected this port's direction.
-  Concrete debts: `tools/gamecube/repack_img.py` is modelled on dca3's
-  imgtool; `tools/gamecube/txdconv.cpp` follows its ahead-of-time native
-  texture conversion; `tools/gamecube/dffcensus.cpp` reproduces its packed
-  native-geometry cost analysis; the pre-instanced static DFF format and the
-  small-allocation heap discipline in `vendor/librw/src/gx/gxraster.cpp`
-  reach the same conclusions dca3 proved first.
-- **[Polyphase Engine](https://github.com/Polyphase-Labs/Polyphase-Engine)** —
-  a proven GX forward renderer we used as the reference for the GX channel
-  and TEV layout in `vendor/librw/src/gx/gx.cpp` (see the channel-layout
-  comments crediting it inline).
-- **GameCube controller 3D model** by
-  [Cory Richards](https://sketchfab.com/3d-models/gamecube-controller-21983501bac64993ac09cdc7936ffdf2),
-  licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) —
-  converted to RenderWare format for the controls page
-  (`tools/gamecube/assets/`, licence preserved alongside).
-- **Xiph.Org** — ogg, opus, opusfile, Tremor and theora.
-- **devkitPro / libogc / AESND** — the toolchain and runtime that make
-  homebrew GameCube work possible.
+- [mrxenginner/reVC](https://github.com/mrxenginner/reVC) — the
+  reverse-engineered Vice City engine this port is based on.
+- [librw](https://github.com/aap/librw) by aap — the RenderWare
+  reimplementation. [This port's fork](https://github.com/origami-ltd/gamecube-librw)
+  adds the GameCube GX backend.
+- [dca3](https://gitlab.com/skmp/dca3-game) by skmp and contributors — the
+  Dreamcast GTA III port. Specific derivations:
+  `tools/gamecube/repack_img.py` is modelled on dca3's imgtool;
+  `tools/gamecube/txdconv.cpp` follows its ahead-of-time native texture
+  conversion; `tools/gamecube/dffcensus.cpp` reproduces its packed
+  native-geometry cost analysis; the pre-instanced static DFF format and
+  allocation strategies in `vendor/librw/src/gx/gxraster.cpp` follow
+  conclusions established by dca3.
+- [Polyphase Engine](https://github.com/Polyphase-Labs/Polyphase-Engine) —
+  reference for the GX channel and TEV configuration in
+  `vendor/librw/src/gx/gx.cpp`, credited inline where used.
+- [GameCube controller 3D model](https://sketchfab.com/3d-models/gamecube-controller-21983501bac64993ac09cdc7936ffdf2)
+  by Cory Richards, licensed
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Converted to
+  RenderWare format in `tools/gamecube/assets/`, licence file included.
+- [Xiph.Org](https://xiph.org/) — ogg, opus, opusfile, Tremor and theora.
+- [devkitPro](https://devkitpro.org/) — devkitPPC, libogc and AESND.
 
 ## License
 
-The port's own contributions are released under the
-[MIT License with Proof-of-Usage Condition (MIT-PoU)](LICENSE.md).
-Upstream components keep their original licenses (librw is MIT by aap; the
-xiph libraries are BSD; reVC code remains under its upstream terms). This
-project distributes **no** Rockstar-owned assets; you need your own copy of
-Vice City to play.
+The port's original contributions are licensed under the
+[MIT License with Proof-of-Usage Condition (MIT-PoU)](LICENSE.md). Upstream
+components keep their original licenses: librw is MIT (aap), the xiph
+libraries are BSD, and code inherited from reVC remains under its upstream
+terms.
