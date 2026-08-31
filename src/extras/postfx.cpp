@@ -332,6 +332,18 @@ CPostFX::RenderOverlayShader(RwCamera *cam, int32 r, int32 g, int32 b, int32 a)
 			mult[i] = (1.0f - k)/d;
 			add[i] = 0.0f;
 		}
+		// The gain curve is steep, so the ONE-integer steps of the smoothed
+		// tint became ~5% whole-frame luma jumps — the lobby floor pulsing
+		// again, by a third mechanism. Low-pass the final gains in float;
+		// the timecycle drift they follow is minutes-slow anyway.
+		{
+			static float sm[3] = { 1.0f, 1.0f, 1.0f };
+			float a = Min(1.0f, CTimer::GetTimeStep()*0.05f);
+			for(int i = 0; i < 3; i++){
+				sm[i] += (mult[i] - sm[i])*a;
+				mult[i] = sm[i];
+			}
+		}
 		rw::gx::setIm2DConstMulAdd(mult, add);
 		RwRenderStateSet(rwRENDERSTATETEXTURERASTER, pBackBuffer);
 		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
