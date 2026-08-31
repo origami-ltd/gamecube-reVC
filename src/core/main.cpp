@@ -2195,16 +2195,30 @@ Idle(void *arg)
 		gxSimUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 	}
 	{
-		// Fade telemetry heartbeat (see VisibilityPlugins.cpp): are fading
-		// entities entering the lists, and is the fade pass drawing them?
+		// Field heartbeat, 5s: the three reported symptoms as numbers.
+		// FADE — fading entities inserted/drawn (pop-in fix);
+		// FT   — frame pacing: worst frame and spike counts (stutter fix);
+		// AUD  — silence chunks served to starved voices + chunks decoded
+		//        off-thread (menu-static fix + decode-thread liveness).
 		extern unsigned gFadeIns, gFadeDraws;
+		extern unsigned gxFrameUs;
+		extern unsigned gStreamStarvedTotal, gStreamDecPumps;
 		static u64 lastFadeBeat;
+		static unsigned ftFrames, ftWorst, ftOver25, ftOver40;
+		ftFrames++;
+		if(gxFrameUs > ftWorst) ftWorst = gxFrameUs;
+		if(gxFrameUs > 25000) ftOver25++;
+		if(gxFrameUs > 40000) ftOver40++;
 		u64 now = gettime();
 		if(lastFadeBeat == 0 || ticks_to_millisecs(now - lastFadeBeat) > 5000){
 			lastFadeBeat = now;
-			printf("FADE ins=%u draw=%u\n", gFadeIns, gFadeDraws);
+			printf("FADE ins=%u draw=%u | FT n=%u worst=%ums >25=%u >40=%u | AUD strv=%u dec=%u\n",
+			    gFadeIns, gFadeDraws, ftFrames, ftWorst/1000,
+			    ftOver25, ftOver40,
+			    gStreamStarvedTotal, gStreamDecPumps);
 			gFadeIns = 0;
 			gFadeDraws = 0;
+			ftFrames = 0; ftWorst = 0; ftOver25 = 0; ftOver40 = 0;
 		}
 	}
 #else

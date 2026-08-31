@@ -153,6 +153,8 @@ static uint32   gNumSamples;
 static bool8  gPackedSfx;
 
 // Stream-decode thread state; the machinery lives next to gStreams below.
+unsigned gStreamStarvedTotal;   // silence chunks served to starved voices
+unsigned gStreamDecPumps;       // chunks decoded by the decode thread
 static lwp_t gStreamDecThread = LWP_THREAD_NULL;
 static mutex_t gStreamLock[MAX_STREAMS];
 static volatile bool8 gStreamDecQuit;
@@ -1471,8 +1473,10 @@ gcStreamDecMain(void *)
 			if(!st->playing || st->paused || st->bufReady || st->eof)
 				continue;
 			GcStreamGuard g(gStreamLock[i]);
-			if(st->playing && !st->paused && !st->bufReady && !st->eof)
+			if(st->playing && !st->paused && !st->bufReady && !st->eof){
 				gcStreamPump(st);
+				gStreamDecPumps++;
+			}
 		}
 		usleep(4000);
 	}
@@ -1510,6 +1514,7 @@ gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 		    __attribute__((aligned(32)));
 		AESND_SetVoiceBuffer(pb, gStreamSilence, STREAM_CHUNK_BYTES);
 		st->starved++;
+		gStreamStarvedTotal++;
 	}
 }
 
