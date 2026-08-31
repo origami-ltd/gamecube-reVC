@@ -131,6 +131,15 @@ static GcChannel gChannels[MAXCHANNELS + MAX2DCHANNELS];
 // (AudioManager reads <=1 as "no hardware" and terminates itself).
 enum { GC_CHANNEL_VOICES = MAX_VOICES - MAX_STREAMS };
 
+// Two channels start OUTSIDE the engine's volume-ranked cull and so cannot
+// be capped by GetMaximumSupportedChannels: CHANNEL_PLAYER_VEHICLE_ENGINE
+// sits at m_nActiveSamples (the engine's own -- in cAudioManager::Initialise
+// reserves that slot from what we report), and the police radio lives at the
+// FIXED slot CHANNEL_POLICE_RADIO (43) — which had no voice at all, so the
+// first patrol car near the player parked the game with channel-no-voice.
+// One voice is held back for the police radio; the generics get the rest.
+enum { GC_GENERIC_VOICES = GC_CHANNEL_VOICES - 1 };
+
 // AESND has no "is this voice still going" query, so the voice tells us. The
 // callback runs on the audio thread and only ever clears the flag, which is
 // why a plain volatile bool is enough — there is no read-modify-write to race.
@@ -478,11 +487,20 @@ cSampleManager::Initialise(void)
 #endif
 
 	// Only as many as the budget allows: allocating all 44 slots would eat
-	// every voice and leave the streams none.
-	for(int32 i = 0; i < GC_CHANNEL_VOICES; i++){
+	// every voice and leave the streams none. Generics first, then the one
+	// held-back voice goes to the police radio's fixed slot (see
+	// GC_GENERIC_VOICES above).
+	for(int32 i = 0; i < GC_GENERIC_VOICES; i++){
 		gChannels[i].voice = AESND_AllocateVoiceWithArg(gcVoiceCallback, &gChannels[i]);
 		if(gChannels[i].voice)
 			AESND_SetVoiceStop(gChannels[i].voice, true);
+	}
+	{
+		GcChannel *pc = &gChannels[CHANNEL_POLICE_RADIO];
+		if(pc->voice == nil)
+			pc->voice = AESND_AllocateVoiceWithArg(gcVoiceCallback, pc);
+		if(pc->voice)
+			AESND_SetVoiceStop(pc->voice, true);
 	}
 
 	// Not fatal when the bank is absent. The card does not carry audio yet,
@@ -2449,7 +2467,9 @@ cSampleManager::SetSpeakerConfig(int32 nConfig)
 uint32
 cSampleManager::GetMaximumSupportedChannels(void)
 {
-	return GC_CHANNEL_VOICES;
+	// Generics only: the police radio's reserved voice must not be part of
+	// what the engine's volume cull is allowed to spend (GC_GENERIC_VOICES).
+	return GC_GENERIC_VOICES;
 }
 
 uint32
