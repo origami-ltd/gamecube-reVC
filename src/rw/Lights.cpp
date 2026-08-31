@@ -31,31 +31,56 @@ RwRGBAReal DirectionalLightColour;
 #define USEBLURCOLORS CMBlur::BlurOn
 #endif
 
+#ifdef GTA_OGC
+// CCoronas::LightsMult dims the whole world while the sun/moon corona is
+// visible — and "visible" is a per-frame line-of-sight ray that flip-flops
+// when the corona sits half-behind geometry at the horizon. Visible frames
+// pull -0.06/step, blocked frames recover +0.03/step, so around dawn and
+// dusk the multiplier oscillates a few percent and EVERY prelit surface in
+// the world pulses 3-4 luma with it: the "texturas piscando escuro" on the
+// Ocean View lobby floor, building walls and distant façades, at clock
+// times 05:4x and 22:1x in every report. Low-pass the multiplier where it
+// is consumed: the intended slow exposure dim survives, the ray's per-frame
+// dither cannot reach the lights any more.
+static float
+gcSmoothLightsMult(void)
+{
+	static float smooth = 1.0f;
+	float k = Min(1.0f, CTimer::GetTimeStep()*0.05f);
+	smooth += (CCoronas::LightsMult - smooth) * k;
+	return smooth;
+}
+#define LIGHTSMULT gcSmoothLightsMult()
+#else
+#define LIGHTSMULT CCoronas::LightsMult
+#endif
+
 void
 SetLightsWithTimeOfDayColour(RpWorld *)
 {
 	CVector vec1, vec2, vecsun;
 	RwMatrix mat;
+	float lightsMult = LIGHTSMULT;   // sampled once: the smoother must step once per frame
 
 	if(pAmbient){
 		if(USEBLURCOLORS){
-			AmbientLightColourForFrame.red = CTimeCycle::GetAmbientRed_Bl() * CCoronas::LightsMult;
-			AmbientLightColourForFrame.green = CTimeCycle::GetAmbientGreen_Bl() * CCoronas::LightsMult;
-			AmbientLightColourForFrame.blue = CTimeCycle::GetAmbientBlue_Bl() * CCoronas::LightsMult;
+			AmbientLightColourForFrame.red = CTimeCycle::GetAmbientRed_Bl() * lightsMult;
+			AmbientLightColourForFrame.green = CTimeCycle::GetAmbientGreen_Bl() * lightsMult;
+			AmbientLightColourForFrame.blue = CTimeCycle::GetAmbientBlue_Bl() * lightsMult;
 		}else{
-			AmbientLightColourForFrame.red = CTimeCycle::GetAmbientRed() * CCoronas::LightsMult;
-			AmbientLightColourForFrame.green = CTimeCycle::GetAmbientGreen() * CCoronas::LightsMult;
-			AmbientLightColourForFrame.blue = CTimeCycle::GetAmbientBlue() * CCoronas::LightsMult;
+			AmbientLightColourForFrame.red = CTimeCycle::GetAmbientRed() * lightsMult;
+			AmbientLightColourForFrame.green = CTimeCycle::GetAmbientGreen() * lightsMult;
+			AmbientLightColourForFrame.blue = CTimeCycle::GetAmbientBlue() * lightsMult;
 		}
 
 		if(USEBLURCOLORS){
-			AmbientLightColourForFrame_PedsCarsAndObjects.red = CTimeCycle::GetAmbientRed_Obj_Bl() * CCoronas::LightsMult;
-			AmbientLightColourForFrame_PedsCarsAndObjects.green = CTimeCycle::GetAmbientGreen_Obj_Bl() * CCoronas::LightsMult;
-			AmbientLightColourForFrame_PedsCarsAndObjects.blue = CTimeCycle::GetAmbientBlue_Obj_Bl() * CCoronas::LightsMult;
+			AmbientLightColourForFrame_PedsCarsAndObjects.red = CTimeCycle::GetAmbientRed_Obj_Bl() * lightsMult;
+			AmbientLightColourForFrame_PedsCarsAndObjects.green = CTimeCycle::GetAmbientGreen_Obj_Bl() * lightsMult;
+			AmbientLightColourForFrame_PedsCarsAndObjects.blue = CTimeCycle::GetAmbientBlue_Obj_Bl() * lightsMult;
 		}else{
-			AmbientLightColourForFrame_PedsCarsAndObjects.red = CTimeCycle::GetAmbientRed_Obj() * CCoronas::LightsMult;
-			AmbientLightColourForFrame_PedsCarsAndObjects.green = CTimeCycle::GetAmbientGreen_Obj() * CCoronas::LightsMult;
-			AmbientLightColourForFrame_PedsCarsAndObjects.blue = CTimeCycle::GetAmbientBlue_Obj() * CCoronas::LightsMult;
+			AmbientLightColourForFrame_PedsCarsAndObjects.red = CTimeCycle::GetAmbientRed_Obj() * lightsMult;
+			AmbientLightColourForFrame_PedsCarsAndObjects.green = CTimeCycle::GetAmbientGreen_Obj() * lightsMult;
+			AmbientLightColourForFrame_PedsCarsAndObjects.blue = CTimeCycle::GetAmbientBlue_Obj() * lightsMult;
 		}
 
 		if(CWeather::LightningFlash && !CCullZones::CamNoRain()){
@@ -71,9 +96,9 @@ SetLightsWithTimeOfDayColour(RpWorld *)
 	}
 
 	if(pDirect){
-		DirectionalLightColourForFrame.red = CTimeCycle::GetDirectionalRed() * CCoronas::LightsMult;
-		DirectionalLightColourForFrame.green = CTimeCycle::GetDirectionalGreen() * CCoronas::LightsMult;
-		DirectionalLightColourForFrame.blue = CTimeCycle::GetDirectionalBlue() * CCoronas::LightsMult;
+		DirectionalLightColourForFrame.red = CTimeCycle::GetDirectionalRed() * lightsMult;
+		DirectionalLightColourForFrame.green = CTimeCycle::GetDirectionalGreen() * lightsMult;
+		DirectionalLightColourForFrame.blue = CTimeCycle::GetDirectionalBlue() * lightsMult;
 		RpLightSetColor(pDirect, &DirectionalLightColourForFrame);
 
 		vecsun = CTimeCycle::m_VectorToSun[CTimeCycle::m_CurrentStoredValue];
