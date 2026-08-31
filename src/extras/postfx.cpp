@@ -466,13 +466,37 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 		return;
 	}
 
-	if(type == MOTION_BLUR_LIGHT_SCENE){
-		SmoothColor(red, green, blue, blur);
-		red = AvgRed;
-		green = AvgGreen;
-		blue = AvgBlue;
-		blur = AvgAlpha;
+	// Every type, not just LIGHT_SCENE: the blur colour flickers (the
+	// comment above SmoothColor is the engine admitting it), and on this
+	// backend the overlay is two ADDITIVE fullscreen draws of the captured
+	// frame tinted by that colour — a two-unit flicker lands as a ~+4 luma
+	// blink across every bright texel on screen. Measured frame-by-frame in
+	// the Dolphin dump: the checkered lobby floor and lit façades pulsing
+	// between two exact states. The smoothing window is the cure the engine
+	// already ships; apply it to the path that amplifies the flicker most.
+#ifdef GTA_OGC
+	{
+		// Field probe for the flicker itself: raw blur-colour min/max since
+		// the last line, one short gecko line every ~5s. Confirms (or
+		// acquits) the oscillation source with numbers from a play session.
+		extern void GeckoLog(const char *msg);
+		static uint32 lo = 0xFFFFFFFF, hi, n;
+		uint32 sum = red + green + blue;
+		if(sum < lo) lo = sum;
+		if(sum > hi) hi = sum;
+		if(++n >= 300){
+			char line[32];
+			snprintf(line, sizeof(line), "BLR %u-%u t%d", lo, hi, type);
+			GeckoLog(line);
+			lo = 0xFFFFFFFF; hi = 0; n = 0;
+		}
 	}
+#endif
+	SmoothColor(red, green, blue, blur);
+	red = AvgRed;
+	green = AvgGreen;
+	blue = AvgBlue;
+	blur = AvgAlpha;
 
 	if(NeedBackBuffer())
 		GetBackBuffer(cam);
