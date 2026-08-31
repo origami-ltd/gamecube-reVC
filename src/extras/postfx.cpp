@@ -313,23 +313,32 @@ CPostFX::RenderOverlayShader(RwCamera *cam, int32 r, int32 g, int32 b, int32 a)
 		return;
 	}
 	{
+		// Match the trails path's colour EXACTLY, minus its ghosting. That
+		// path feeds its own output back (the front capture includes last
+		// frame's overlay), so on a static scene it converges per channel to
+		//   F = S·(1-k) / (1 - 2·t·(1+k)),   k = 30/255,  t = tint/255
+		// (one alpha-30 pass at colour 2t plus two additive passes at t).
+		// Apply that steady-state gain in ONE direct-write pass through the
+		// same two-stage mult-add TEV the MOBILE filter uses: identical
+		// grade with Motion Blur on or off, and nothing temporal to flicker.
 		float f = Intensity;
-		int tr = Min((int)(r*f), 255);
-		int tg = Min((int)(g*f), 255);
-		int tb = Min((int)(b*f), 255);
+		const float k = 30.0f/255.0f;
+		float tc[3] = { r*f/255.0f, g*f/255.0f, b*f/255.0f };
+		float mult[3], add[3];
+		for(int i = 0; i < 3; i++){
+			float d = 1.0f - 2.0f*tc[i]*(1.0f + k);
+			if(d < 0.45f)
+				d = 0.45f;   // caps the gain near 2, where the EFB clamps anyway
+			mult[i] = (1.0f - k)/d;
+			add[i] = 0.0f;
+		}
+		rw::gx::setIm2DConstMulAdd(mult, add);
 		RwRenderStateSet(rwRENDERSTATETEXTURERASTER, pBackBuffer);
-		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)TRUE);
+		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
 		for(int i = 0; i < 4; i++)
-			RwIm2DVertexSetIntRGBA(&Vertex[i], tr, tg, tb, 255);
-		RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDONE);
-		RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDONE);
-		// TWICE, like the trails path's two additive draws and the PC
-		// colour-filter shader's doubled tint: one pass was half the
-		// filter, faint enough to read as "no effect without trails".
+			RwIm2DVertexSetIntRGBA(&Vertex[i], 255, 255, 255, 255);
 		RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
-		RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
-		RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDSRCALPHA);
-		RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDINVSRCALPHA);
+		rw::gx::clearIm2DOverride();
 	}
 	return;
 #endif
