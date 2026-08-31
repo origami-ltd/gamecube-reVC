@@ -2194,6 +2194,19 @@ Idle(void *arg)
 		CGame::Process();
 		gxSimUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 	}
+	{
+		// Fade telemetry heartbeat (see VisibilityPlugins.cpp): are fading
+		// entities entering the lists, and is the fade pass drawing them?
+		extern unsigned gFadeIns, gFadeDraws;
+		static u64 lastFadeBeat;
+		u64 now = gettime();
+		if(lastFadeBeat == 0 || ticks_to_millisecs(now - lastFadeBeat) > 5000){
+			lastFadeBeat = now;
+			printf("FADE ins=%u draw=%u\n", gFadeIns, gFadeDraws);
+			gFadeIns = 0;
+			gFadeDraws = 0;
+		}
+	}
 #else
 	gPhase = "process";
 	CGame::Process();

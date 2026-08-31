@@ -887,7 +887,10 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 			return VIS_INVISIBLE;
 
 		if(!ent->GetIsOnScreen() || ent->IsEntityOccluded()){
-			mi->m_alpha = 255;
+			// GTA_OGC: do NOT complete the fade here. m_alpha is shared by
+			// every instance of the model, and one offscreen lamppost was
+			// snapping all its onscreen siblings to full opacity — the
+			// "pop-in with no fade". Freeze mid-fade; it resumes on screen.
 			return VIS_OFFSCREEN;
 		}
 
@@ -938,7 +941,7 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 		return VIS_INVISIBLE;
 
 	if(!ent->GetIsOnScreen() || ent->IsEntityOccluded()){
-		mi->m_alpha = 255;
+		// See above: never let an offscreen instance finish the shared fade.
 		return VIS_OFFSCREEN;
 	}else{
 		CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);
@@ -1013,7 +1016,7 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 			RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
 		mi->IncreaseAlpha();
 		if(!ent->IsVisible() || !ent->GetIsOnScreenComplex() || ent->IsEntityOccluded()){
-			mi->m_alpha = 255;
+			// Shared-alpha pop fix, same as SetupEntityVisibility.
 			return VIS_INVISIBLE;
 		}
 
@@ -1057,7 +1060,7 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 		RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
 	mi->IncreaseAlpha();
 	if(!ent->IsVisible() || !ent->GetIsOnScreenComplex() || ent->IsEntityOccluded()){
-		mi->m_alpha = 255;
+		// Shared-alpha pop fix, same as SetupEntityVisibility.
 		return VIS_INVISIBLE;
 	}
 	CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);

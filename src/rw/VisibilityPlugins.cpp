@@ -93,11 +93,21 @@ CVisibilityPlugins::InitAlphaEntityList(void)
 #endif
 }
 
+#ifdef GTA_OGC
+// Fade telemetry: the pop-in report says streamed models appear with no
+// fade. ins counts entities entering the alpha lists, draw counts fading
+// entities actually rendered — the pair says which half is broken.
+unsigned gFadeIns, gFadeDraws;
+#endif
+
 bool
 CVisibilityPlugins::InsertEntityIntoSortedList(CEntity *e, float dist)
 {
 #ifdef FIX_BUGS
 	if (!e->m_rwObject) return true;
+#endif
+#ifdef GTA_OGC
+	gFadeIns++;
 #endif
 
 	AlphaObjectInfo item;
@@ -230,6 +240,10 @@ CVisibilityPlugins::RenderFadingEntities(CLinkList<AlphaObjectInfo> &list)
 			RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, FALSE);
 
 		if(e->bDistanceFade){
+#ifdef GTA_OGC
+			extern unsigned gFadeDraws;
+			gFadeDraws++;
+#endif
 			DeActivateDirectional();
 			SetAmbientColours();
 			e->bImBeingRendered = true;

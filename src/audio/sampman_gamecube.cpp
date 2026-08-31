@@ -151,6 +151,17 @@ static uint32   gNumSamples;
 // independently seekable delta/byte-shuffled DEFLATE block. The original SD
 // layout with sfx.raw remains supported for development cards.
 static bool8  gPackedSfx;
+
+// Stream-decode thread state; the machinery lives next to gStreams below.
+static lwp_t gStreamDecThread = LWP_THREAD_NULL;
+static mutex_t gStreamLock[MAX_STREAMS];
+static volatile bool8 gStreamDecQuit;
+static void *gcStreamDecMain(void *);
+struct GcStreamGuard {
+	mutex_t m;
+	GcStreamGuard(mutex_t mm) : m(mm) { LWP_MutexLock(m); }
+	~GcStreamGuard() { LWP_MutexUnlock(m); }
+};
 static uint32 gPackedSfxBytes;
 static uint32 gPackedSfxDataStart;
 enum { GC_SFX_PACK_HEADER = 16, GC_SFX_PACK_ENTRY = 8 };
@@ -489,6 +500,23 @@ cSampleManager::Initialise(void)
 
 	gcLoadTrackLengths();
 
+	{
+		static bool8 locksInit;
+		if(!locksInit){
+			locksInit = TRUE;
+			for(int32 i = 0; i < MAX_STREAMS; i++)
+				LWP_MutexInit(&gStreamLock[i], true);
+		}
+	}
+	if(gStreamDecThread == LWP_THREAD_NULL){
+		gStreamDecQuit = FALSE;
+		// Above the game thread so a ready chunk preempts rendering, below
+		// the CdStream worker so model loads keep the disc.
+		if(LWP_CreateThread(&gStreamDecThread, gcStreamDecMain, nil, nil,
+		    64*1024, 72) != 0)
+			gStreamDecThread = LWP_THREAD_NULL;
+	}
+
 	_bSampmanInitialised = TRUE;
 	gcAudioSelfTest();          // no-op unless dvd:/audiotest.txt is present
 	return TRUE;
@@ -499,6 +527,11 @@ cSampleManager::Terminate(void)
 {
 	if(!_bSampmanInitialised)
 		return;
+	if(gStreamDecThread != LWP_THREAD_NULL){
+		gStreamDecQuit = TRUE;
+		LWP_JoinThread(gStreamDecThread, nil);
+		gStreamDecThread = LWP_THREAD_NULL;
+	}
 	for(int32 i = 0; i < (int32)ARRAY_SIZE(gChannels); i++){
 		if(gChannels[i].voice){
 			AESND_FreeVoice(gChannels[i].voice);
@@ -1422,6 +1455,30 @@ struct GcStream {
 };
 static GcStream gStreams[MAX_STREAMS];
 
+// Stream decode moved off the game thread: one worker owns every gcStreamPump
+// so a Vorbis chunk never bites the frame. The per-stream recursive mutex
+// serialises the pump against Start/Stop/Preload/Pause from the game thread;
+// the AESND callback stays lock-free on the same bufReady contract as before.
+// Lock ORDER everywhere: stream mutex first, DVD_FS_GUARD inside.
+static void gcStreamPump(GcStream *st);
+
+static void *
+gcStreamDecMain(void *)
+{
+	while(!gStreamDecQuit){
+		for(int32 i = 0; i < MAX_STREAMS; i++){
+			GcStream *st = &gStreams[i];
+			if(!st->playing || st->paused || st->bufReady || st->eof)
+				continue;
+			GcStreamGuard g(gStreamLock[i]);
+			if(st->playing && !st->paused && !st->bufReady && !st->eof)
+				gcStreamPump(st);
+		}
+		usleep(4000);
+	}
+	return nil;
+}
+
 static void
 gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 {
@@ -1444,8 +1501,16 @@ gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 		// real end of the sound.
 		st->playing = FALSE;
 		AESND_SetVoiceStop(pb, true);
-	}else
+	}else{
+		// Starved. Replaying the stale chunk machine-gunned 84ms of old
+		// audio in a loop — the "radio static" heard the first time the
+		// menu opens, while its TXD loads monopolise the FS lock and the
+		// pump cannot refill. A dropout must SOUND like a dropout.
+		static uint8 gStreamSilence[STREAM_CHUNK_BYTES]
+		    __attribute__((aligned(32)));
+		AESND_SetVoiceBuffer(pb, gStreamSilence, STREAM_CHUNK_BYTES);
 		st->starved++;
+	}
 }
 
 // Tremor pulls straight from the file. Tremor is the fixed-point Vorbis
@@ -1795,7 +1860,7 @@ gcStreamDecode(GcStream *st, uint8 *dst)
 
 
 // Keep one decoded chunk ahead of the DSP. The callback consumes it with a
-// pointer swap; this refills on the game thread, where file reads belong.
+// pointer swap; this refills on the decode thread (gcStreamDecMain).
 static void
 gcStreamPump(GcStream *st)
 {
@@ -1892,8 +1957,9 @@ cSampleManager::Service(void)
 			gcDiscardChannelPcm(c);
 	}
 	gcReleaseIdleFrontendPcm();
-	for(int32 i = 0; i < MAX_STREAMS; i++)
-		gcStreamPump(&gStreams[i]);
+	// Streams are pumped by the decode thread now (gcStreamDecMain) — a
+	// Vorbis chunk on this thread was a 10-16ms bite out of every eighth
+	// frame, the metronome behind "constant stutters".
 	gxAudioUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 
 	// AHB: the audio system's own heartbeat, to the card every ~5s. One line
@@ -2072,6 +2138,9 @@ cSampleManager::SetChannel3DDistances(uint32 nChannel, float fMax, float fMin)
 void
 cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 {
+	if(nStream >= MAX_STREAMS)
+		return;
+	GcStreamGuard sg(gStreamLock[nStream]);
 	gStreamPreloading = TRUE;
 	bool8 ok = StartStreamedFile(nFile, 0, nStream);
 	gStreamPreloading = FALSE;
@@ -2090,6 +2159,7 @@ cSampleManager::PauseStream(bool8 nPauseFlag, uint8 nStream)
 {
 	if(nStream >= MAX_STREAMS)
 		return;
+	GcStreamGuard sg(gStreamLock[nStream]);
 	GcStream *st = &gStreams[nStream];
 	st->paused = nPauseFlag;
 	if(st->voice)
@@ -2101,6 +2171,7 @@ cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 {
 	if(nStream >= MAX_STREAMS)
 		return;
+	GcStreamGuard sg(gStreamLock[nStream]);
 	GcStream *st = &gStreams[nStream];
 	st->paused = FALSE;
 	// Re-arm rather than merely un-stop: see gcStreamArm.
@@ -2112,6 +2183,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 {
 	if(nStream >= MAX_STREAMS)
 		return FALSE;
+	GcStreamGuard sg(gStreamLock[nStream]);
 	GcStream *st = &gStreams[nStream];
 	u64 tOpen = gettime();
 	StopStreamedFile(nStream);
@@ -2285,6 +2357,7 @@ cSampleManager::StopStreamedFile(uint8 nStream)
 {
 	if(nStream >= MAX_STREAMS)
 		return;
+	GcStreamGuard sg(gStreamLock[nStream]);
 	GcStream *st = &gStreams[nStream];
 	if(st->vfOpen){
 		char gl[32];
