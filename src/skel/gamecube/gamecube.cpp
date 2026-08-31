@@ -924,12 +924,33 @@ IsForegroundApp(void)
 // worn stick still cannot reach full deflection.
 #define GC_STICK_RANGE    72
 #define GC_SUBSTICK_RANGE 59
+#define GC_STICK_DEAD     15
 
-static inline int32
-gcStickScale(int v, int range)
+// libogc's PAD_Clamp squeezes the vector into Nintendo's octagon (cardinal
+// 72 but only 40 per axis at the diagonal), so a full diagonal came out at
+// 78% magnitude — under the game's run threshold. Full speed existed only
+// on the four cardinals. Radial deadzone + radial rescale instead: the
+// direction is preserved exactly and every heading can reach the full 128.
+static inline void
+gcStickRadial(int x, int y, int range, int16 *outX, int16 *outY)
 {
-	int r = v * 128 / range;
-	return r > 127 ? 127 : r < -127 ? -127 : r;
+	float mag = sqrtf((float)(x*x + y*y));
+	if(mag <= (float)GC_STICK_DEAD){
+		*outX = 0;
+		*outY = 0;
+		return;
+	}
+	float scale = (mag - GC_STICK_DEAD) * 128.0f /
+	    ((range - GC_STICK_DEAD) * mag);
+	float ox = x * scale, oy = y * scale;
+	float m2 = ox*ox + oy*oy;
+	if(m2 > 127.0f*127.0f){
+		float s = 127.0f / sqrtf(m2);
+		ox *= s;
+		oy *= s;
+	}
+	*outX = (int16)ox;
+	*outY = (int16)oy;
 }
 
 void
@@ -944,24 +965,17 @@ CapturePad(RwInt32 padID)
 
 	PAD_ScanPads();
 	u16 buttons = PAD_ButtonsHeld(padID);
-	PADStatus clamped[PAD_CHANMAX] = {};
-	for(int i = 0; i < PAD_CHANMAX; i++)
-		clamped[i].err = PAD_ERR_NO_CONTROLLER;
-	clamped[padID].err = PAD_ERR_NONE;
-	clamped[padID].stickX = PAD_StickX(padID);
-	clamped[padID].stickY = PAD_StickY(padID);
-	clamped[padID].substickX = PAD_SubStickX(padID);
-	clamped[padID].substickY = PAD_SubStickY(padID);
-	PAD_Clamp(clamped);
-	// The game scales its stick axes against +-128 (see CPad, which multiplies
-	// normalised input by 128), while PAD_Clamp outputs the physical gate's
-	// smaller range (Nintendo's 15-unit dead zone plus octagonal-gate
-	// correction). Scale that dead-zoned, gate-corrected vector to the full
-	// range so diagonal direction and maximum walking/camera speed survive.
-	state.LeftStickX  =  gcStickScale(clamped[padID].stickX,    GC_STICK_RANGE);
-	state.LeftStickY  = -gcStickScale(clamped[padID].stickY,    GC_STICK_RANGE);
-	state.RightStickX =  gcStickScale(clamped[padID].substickX, GC_SUBSTICK_RANGE);
-	state.RightStickY = -gcStickScale(clamped[padID].substickY, GC_SUBSTICK_RANGE);
+	// No PAD_Clamp: its octagon correction is what capped the diagonals
+	// (see gcStickRadial). Raw stick, radial deadzone, radial rescale.
+	int16 lx, ly, rx, ry;
+	gcStickRadial(PAD_StickX(padID), PAD_StickY(padID),
+	    GC_STICK_RANGE, &lx, &ly);
+	gcStickRadial(PAD_SubStickX(padID), PAD_SubStickY(padID),
+	    GC_SUBSTICK_RANGE, &rx, &ry);
+	state.LeftStickX  =  lx;
+	state.LeftStickY  = -ly;
+	state.RightStickX =  rx;
+	state.RightStickY = -ry;
 	state.LeftShoulder2 = PAD_TriggerL(padID);
 	state.RightShoulder2 = PAD_TriggerR(padID);
 	state.LeftShoulder1 = (buttons & PAD_TRIGGER_L) ? 255 : 0;
