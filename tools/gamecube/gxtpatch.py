@@ -74,6 +74,11 @@ def add(path, key, text):
     if any(e[0] == key8 for e in entries):
         return patch(path, key, text)
     new_str = text.encode("utf-16-le") + b"\x00\x00"
+    # The game's DecodeGxtFile walks chunks 4-aligned and only forgives a
+    # 2-byte zero tail; a TDAT grown by an odd word count shifts every later
+    # chunk off alignment and the whole file is refused at boot.
+    if len(new_str) % 4:
+        new_str += b"\x00\x00"
     entries.append((key8, tdat_size))
     entries.sort(key=lambda e: e[0])
     new_tkey = b"".join(struct.pack("<I", off) + k for k, off in entries)
