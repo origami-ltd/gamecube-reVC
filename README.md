@@ -41,24 +41,43 @@ Work in progress.
 
 ## Building
 
-Requirements:
-
-1. [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the
-   GameCube/Wii packages (`gamecube-dev` / `wii-dev`).
-2. CMake ≥ 3.13, Ninja and Python 3.
-
-All other build dependencies are included in the repository (the librw fork
-with the GX backend, the xiph ogg/opus/opusfile submodules, and a PowerPC
-libtheora build with a Wii toolchain file under `vendor/portlibs/`).
-
 ```bash
 git clone --recursive https://github.com/origami-ltd/gamecube-reVC.git
 cd gamecube-reVC
+python3 build.py --setup    # installs the dependencies for your OS
 python3 build.py            # GameCube DOL -> build/cube/src/reVC.dol
 python3 build.py wii        # Wii dev DOL  -> build/wii/src/reVC.dol
 ```
 
-The same commands work on macOS, Linux and Windows.
+The same commands work on macOS, Linux and Windows. `--setup` uses the
+system package manager (Homebrew, apt, pacman or winget) for CMake and
+Ninja, then installs [devkitPro](https://devkitpro.org/wiki/Getting_Started)
+with the `gamecube-dev` and `wii-dev` package groups. All other build
+dependencies are included in the repository (the librw fork with the GX
+backend, the xiph ogg/opus/opusfile submodules, and a PowerPC libtheora
+build with a Wii toolchain file under `vendor/portlibs/`).
+
+### Installing the dependencies manually
+
+Requirements: Python 3, CMake ≥ 3.13, Ninja, and devkitPro with the
+GameCube/Wii toolchains.
+
+- **macOS** — `brew install cmake ninja`, then install
+  [devkitPro pacman](https://github.com/devkitPro/pacman/releases)
+  (`.pkg` installer) and run
+  `sudo dkp-pacman -Sy gamecube-dev wii-dev`.
+- **Debian/Ubuntu** — `sudo apt-get install cmake ninja-build`, then run the
+  [devkitPro pacman bootstrap](https://apt.devkitpro.org/install-devkitpro-pacman)
+  and `sudo dkp-pacman -Sy gamecube-dev wii-dev`.
+- **Arch Linux** — `sudo pacman -S cmake ninja`, add the
+  [devkitPro repositories](https://devkitpro.org/wiki/devkitPro_pacman) to
+  `/etc/pacman.conf` and `sudo pacman -Sy gamecube-dev wii-dev`.
+- **Windows** — `winget install Kitware.CMake Ninja-build.Ninja`, then run
+  the [devkitPro installer](https://github.com/devkitPro/installer/releases)
+  and select the GameCube and Wii development packages.
+
+If devkitPro is installed somewhere non-standard, set the `DEVKITPRO`
+environment variable to its root.
 
 ## Game data
 
