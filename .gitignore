@@ -364,3 +364,6 @@ src/extras/GitSHA1.cpp
 # GameCube port: out-of-tree builds and toolchain payloads consolidated in-tree
 /build/
 /toolchain/
+
+# Game-derived data (Rockstar IP) lives here, never in the public repo.
+assets/

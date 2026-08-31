@@ -213,7 +213,7 @@ def main():
     # Repo GXT files contain the port-specific GameCube labels. They must win
     # over the stock PC text copied above or the new keys render as blanks.
     repo_text = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "..", "..", "gamefiles", "TEXT")
+                             "..", "..", "assets", "gamefiles", "TEXT")
     if os.path.isdir(repo_text):
         shutil.copytree(repo_text, os.path.join(args.out, "text"),
                         dirs_exist_ok=True)
@@ -319,7 +319,7 @@ def main():
     # Without neo/neo.txd the four pipeline rows never appear in Graphics
     # Setup at all (re3.cpp gates them on opening that file).
     repo_neo = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "..", "..", "gamefiles", "neo")
+                            "..", "..", "assets", "gamefiles", "neo")
     if os.path.isdir(repo_neo):
         print("copy neo", flush=True)
         shutil.copytree(repo_neo, os.path.join(args.out, "neo"),

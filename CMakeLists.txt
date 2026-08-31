@@ -97,7 +97,7 @@ endif()
 add_subdirectory(src)
 
 if(${PROJECT}_INSTALL)
-    install(DIRECTORY gamefiles/ DESTINATION ".")
+    install(DIRECTORY assets/gamefiles/ DESTINATION "." OPTIONAL)
     if(LIBRW_PLATFORM_NULL)
         set(platform "-null")
     elseif(LIBRW_PLATFORM_PS2)
