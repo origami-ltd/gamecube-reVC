@@ -111,14 +111,26 @@ CSimpleModelInfo::IncreaseAlpha(void)
 	// One step per model per frame, however many instances are on screen —
 	// see m_alphaFrame in the header. uint16 wrap every ~36min costs at most
 	// one skipped step on one frame.
-	if(m_alphaFrame == (uint16)CTimer::GetFrameCounter())
+	uint16 now = (uint16)CTimer::GetFrameCounter();
+	if(m_alphaFrame == now)
 		return;
-	m_alphaFrame = (uint16)CTimer::GetFrameCounter();
+	m_alphaFrame = now;
+	// Recently full? Then this is boundary jitter or churn, not an
+	// appearance — snap, do not re-fade (see m_fullFrame in the header).
+	if(m_alpha != 0xFF && (uint16)(now - m_fullFrame) <= 60){
+		m_alpha = 0xFF;
+		m_fullFrame = now;
+		return;
+	}
 #endif
 	if(m_alpha >= 0xEF)
 		m_alpha = 0xFF;
 	else
 		m_alpha += 0x10;
+#ifdef GTA_OGC
+	if(m_alpha == 0xFF)
+		m_fullFrame = now;
+#endif
 }
 
 float

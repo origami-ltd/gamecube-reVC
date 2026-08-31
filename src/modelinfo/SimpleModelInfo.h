@@ -18,6 +18,12 @@ public:
 	// two frames — the pop-in "with no fade". Stamp of the last frame the
 	// fade advanced, so it moves one step per model per frame.
 	uint16 m_alphaFrame;
+	// Last frame this model rendered at full alpha. A model below 255 that
+	// was FULL within the last second is not appearing — it is oscillating
+	// (draw-distance boundary jitter, streaming churn, time-cull flips; the
+	// osc probe measured cl_* props re-entering the fade 28 times in 5s).
+	// Those snap straight back; only a model unseen for a second fades.
+	uint16 m_fullFrame;
 #endif
 	uint16 m_firstDamaged   : 2; // 0: no damage model
 	                         // 1: 1 and 2 are damage models
