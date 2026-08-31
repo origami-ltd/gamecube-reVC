@@ -493,6 +493,100 @@ CFont::DrawButton(float x, float y)
 	if (x <= 0.0f || x > SCREEN_WIDTH || y <= 0.0f || y > SCREEN_HEIGHT)
 		return;
 
+#ifdef GTA_OGC
+	// The button-icon TXD never ships on this target, so the sprite path
+	// drew an untextured white square for every pad token. GameCube buttons
+	// are letters anyway: draw a badge in the physical button's colour with
+	// a white letter on top, the exact look of the gamepad-settings card
+	// (ControllerBadgeColour in Frontend.cpp). Which SYMBOL means which
+	// BUTTON is decided by the per-ACTION table in ControllerConfig.cpp;
+	// here each symbol is a fixed badge. ~A~ (L3) is repurposed as Z.
+	// DPad tokens draw a solid triangle instead of a letter.
+	if (PS2Symbol != BUTTON_NONE && PS2Symbol < MAX_BUTTON_ICONS) {
+		static const struct { char ch; uint8 r, g, b; }
+		gcBadge[MAX_BUTTON_ICONS] = {
+			{  0,  205,210,225 },	// BUTTON_UP        DPad, arrow glyph
+			{  0,  205,210,225 },	// BUTTON_DOWN
+			{  0,  205,210,225 },	// BUTTON_LEFT
+			{  0,  205,210,225 },	// BUTTON_RIGHT
+			{ 'A',   0,180,170 },	// CROSS    -> A
+			{ 'B', 225, 25, 35 },	// CIRCLE   -> B
+			{ 'X', 205,210,225 },	// SQUARE   -> X
+			{ 'Y', 205,210,225 },	// TRIANGLE -> Y
+			{ 'L', 205,210,225 },	// L1  -> L click
+			{ 'L', 205,210,225 },	// L2  -> L travel
+			{ 'Z',  65, 90,230 },	// L3  -> repurposed as Z
+			{ 'R', 205,210,225 },	// R1  -> R click
+			{ 'R', 205,210,225 },	// R2  -> R travel
+			{ 'C', 245,180,  0 },	// R3  -> C stick
+			{ 'C', 245,180,  0 },	// RSTICK_UP
+			{ 'C', 245,180,  0 },	// RSTICK_DOWN
+			{ 'C', 245,180,  0 },	// RSTICK_LEFT
+			{ 'C', 245,180,  0 },	// RSTICK_RIGHT
+		};
+		CRect rect;
+		rect.left = x;
+		rect.top = y + RenderState.scaleY * 2.0f;
+		rect.right = x + RenderState.scaleY * 17.0f;
+		rect.bottom = y + RenderState.scaleY * 19.0f;
+
+		// DrawRect/Draw2DPolygon drop the bound raster; the glyphs already
+		// buffered this batch still flush with whatever is bound at the end,
+		// so save and restore exactly like the sprite path did.
+		int vertexAlphaState;
+		void *raster;
+		RwRenderStateGet(rwRENDERSTATEVERTEXALPHAENABLE, &vertexAlphaState);
+		RwRenderStateGet(rwRENDERSTATETEXTURERASTER, &raster);
+
+		if (RenderState.bIsShadow) {
+			CSprite2d::DrawRect(rect, RenderState.color);
+		} else {
+			const uint8 a = RenderState.color.a;
+			CSprite2d::DrawRect(rect, CRGBA(gcBadge[PS2Symbol].r,
+			    gcBadge[PS2Symbol].g, gcBadge[PS2Symbol].b, a));
+			if (gcBadge[PS2Symbol].ch == 0) {
+				// DPad: solid triangle pointing the token's way.
+				const float cx = (rect.left + rect.right) * 0.5f;
+				const float cy = (rect.top + rect.bottom) * 0.5f;
+				const float h = RenderState.scaleY * 4.5f;
+				const CRGBA ink(35, 40, 50, a);
+				switch (PS2Symbol) {
+				case BUTTON_UP:
+					CSprite2d::Draw2DPolygon(cx, cy - h, cx - h, cy + h,
+					    cx + h, cy + h, cx, cy - h, ink); break;
+				case BUTTON_DOWN:
+					CSprite2d::Draw2DPolygon(cx, cy + h, cx + h, cy - h,
+					    cx - h, cy - h, cx, cy + h, ink); break;
+				case BUTTON_LEFT:
+					CSprite2d::Draw2DPolygon(cx - h, cy, cx + h, cy - h,
+					    cx + h, cy + h, cx - h, cy, ink); break;
+				default: // BUTTON_RIGHT
+					CSprite2d::Draw2DPolygon(cx + h, cy, cx - h, cy + h,
+					    cx - h, cy - h, cx + h, cy, ink); break;
+				}
+			}
+		}
+		RwRenderStateSet(rwRENDERSTATETEXTURERASTER, raster);
+		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void *)vertexAlphaState);
+
+		if (!RenderState.bIsShadow && gcBadge[PS2Symbol].ch != 0) {
+			// The letter goes through the same index transform the buffer
+			// pipeline applies before PrintChar (RenderFontBuffer): shift by
+			// space, then the half-texture remap. Raw ascii here drew the
+			// glyph 32 cells off.
+			wchar c = gcBadge[PS2Symbol].ch - ' ';
+			if (RenderState.bFontHalfTexture)
+				c = FindNewCharacter(c);
+			CRGBA prev = RenderState.color;
+			RenderState.color = CRGBA(255, 255, 255, prev.a);
+			const float w = RenderState.scaleX * GetCharacterWidth(c);
+			PrintChar(x + (RenderState.scaleY * 17.0f - w) * 0.5f, y, c);
+			RenderState.color = prev;
+		}
+	}
+	return;
+#endif
+
 	if (PS2Symbol != BUTTON_NONE) {
 		CRect rect;
 		rect.left = x;

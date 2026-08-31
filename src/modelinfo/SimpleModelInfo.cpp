@@ -1,6 +1,7 @@
 #include "common.h"
 
 #include "General.h"
+#include "Timer.h"
 #include "Camera.h"
 #include "Renderer.h"
 #include "ModelInfo.h"
@@ -106,6 +107,14 @@ CSimpleModelInfo::SetLodDistances(float *dist)
 void
 CSimpleModelInfo::IncreaseAlpha(void)
 {
+#ifdef GTA_OGC
+	// One step per model per frame, however many instances are on screen —
+	// see m_alphaFrame in the header. uint16 wrap every ~36min costs at most
+	// one skipped step on one frame.
+	if(m_alphaFrame == (uint16)CTimer::GetFrameCounter())
+		return;
+	m_alphaFrame = (uint16)CTimer::GetFrameCounter();
+#endif
 	if(m_alpha >= 0xEF)
 		m_alpha = 0xFF;
 	else

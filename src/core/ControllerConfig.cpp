@@ -2740,6 +2740,118 @@ const char *NintendoSwitchButtons[][MAX_CONTROLLERACTIONS] =
 
 void CControllerConfigManager::GetWideStringOfCommandKeys(uint16 action, wchar *text, uint16 leight)
 {
+#ifdef GTA_OGC
+	// The stock tables above translate per PS2 BUTTON, but this port binds
+	// per ACTION (the CPad GTA_OGC accessors), so help boxes showed the
+	// wrong button for almost everything: horn is DPad-up not X, radio is
+	// DPad-◄►, handbrake is X, sniper zoom is DPad-▲▼. One table per
+	// ACTION, mirroring the accessors; CFont::DrawButton turns each token
+	// into a GameCube badge (letter + physical button colour). ~A~ (L3, a
+	// button this pad does not have) is repurposed as the Z badge. Row 1 is
+	// controller setup 2, which differs only in accelerate/brake moving to
+	// the triggers (CURMODE in Pad.cpp is Mode==1 ? 1 : 0).
+	static const char *GameCubeButtons[2][MAX_CONTROLLERACTIONS] = {
+	{
+		"~O~",      // PED_FIREWEAPON               B
+		"~>~",      // PED_CYCLE_WEAPON_RIGHT       DPad right
+		"~<~",      // PED_CYCLE_WEAPON_LEFT        DPad left
+		"",         // GO_FORWARD                   (stick)
+		"",         // GO_BACK
+		"",         // GO_LEFT
+		"",         // GO_RIGHT
+		"~U~",      // PED_SNIPER_ZOOM_IN           DPad up
+		"~D~",      // PED_SNIPER_ZOOM_OUT          DPad down
+		"~A~",      // VEHICLE_ENTER_EXIT           Z
+		"",         // CAMERA_CHANGE_VIEW           deliberately unbound
+		"~T~",      // PED_JUMPING                  Y
+		"~X~",      // PED_SPRINT                   A
+		"~K~",      // PED_LOOKBEHIND               L click
+		"~Q~",      // PED_DUCK                     X
+		"~K~",      // PED_ANSWER_PHONE             L click
+		"~O~",      // VEHICLE_FIREWEAPON           B
+		"~X~",      // VEHICLE_ACCELERATE           A
+		"~T~",      // VEHICLE_BRAKE                Y
+		"~<~~>~",   // VEHICLE_CHANGE_RADIO_STATION DPad ◄►
+		"~U~",      // VEHICLE_HORN                 DPad up
+		"~D~",      // TOGGLE_SUBMISSIONS           DPad down (RightShock wire)
+		"~Q~",      // VEHICLE_HANDBRAKE            X
+		"",         // PED_1RST_PERSON_LOOK_LEFT
+		"",         // PED_1RST_PERSON_LOOK_RIGHT
+		"~K~",      // VEHICLE_LOOKLEFT             L travel
+		"~J~",      // VEHICLE_LOOKRIGHT            R travel
+		"~K~~J~",   // VEHICLE_LOOKBEHIND           L+R together
+		"~C~",      // VEHICLE_TURRETLEFT           C-stick
+		"~C~",      // VEHICLE_TURRETRIGHT
+		"~C~",      // VEHICLE_TURRETUP
+		"~C~",      // VEHICLE_TURRETDOWN
+		"~<~",      // PED_CYCLE_TARGET_LEFT        DPad left
+		"~>~",      // PED_CYCLE_TARGET_RIGHT       DPad right
+		"~K~",      // PED_CENTER_CAMERA_BEHIND_PLAYER  L travel
+		"~J~",      // PED_LOCK_TARGET              R travel
+		"",         // NETWORK_TALK
+		"",         // PED_1RST_PERSON_LOOK_UP
+		"",         // PED_1RST_PERSON_LOOK_DOWN
+		"",         // _CONTROLLERACTION_36
+		"",         // TOGGLE_DPAD
+		"",         // SWITCH_DEBUG_CAM_ON
+		"",         // TAKE_SCREEN_SHOT
+		"",         // SHOW_MOUSE_POINTER_TOGGLE
+		"",         // UNKNOWN_ACTION
+	},
+	{
+		"~O~",      // PED_FIREWEAPON               B
+		"~>~",      // PED_CYCLE_WEAPON_RIGHT
+		"~<~",      // PED_CYCLE_WEAPON_LEFT
+		"",         // GO_FORWARD
+		"",         // GO_BACK
+		"",         // GO_LEFT
+		"",         // GO_RIGHT
+		"~U~",      // PED_SNIPER_ZOOM_IN
+		"~D~",      // PED_SNIPER_ZOOM_OUT
+		"~A~",      // VEHICLE_ENTER_EXIT           Z
+		"",         // CAMERA_CHANGE_VIEW
+		"~T~",      // PED_JUMPING                  Y
+		"~X~",      // PED_SPRINT                   A
+		"~K~",      // PED_LOOKBEHIND               L click
+		"~Q~",      // PED_DUCK                     X
+		"~K~",      // PED_ANSWER_PHONE             L click
+		"~O~",      // VEHICLE_FIREWEAPON           B
+		"~J~",      // VEHICLE_ACCELERATE           R trigger (setup 2)
+		"~K~",      // VEHICLE_BRAKE                L trigger (setup 2)
+		"~<~~>~",   // VEHICLE_CHANGE_RADIO_STATION
+		"~U~",      // VEHICLE_HORN
+		"~D~",      // TOGGLE_SUBMISSIONS
+		"~Q~",      // VEHICLE_HANDBRAKE            X
+		"",         // PED_1RST_PERSON_LOOK_LEFT
+		"",         // PED_1RST_PERSON_LOOK_RIGHT
+		"~K~",      // VEHICLE_LOOKLEFT
+		"~J~",      // VEHICLE_LOOKRIGHT
+		"~K~~J~",   // VEHICLE_LOOKBEHIND
+		"~C~",      // VEHICLE_TURRETLEFT
+		"~C~",      // VEHICLE_TURRETRIGHT
+		"~C~",      // VEHICLE_TURRETUP
+		"~C~",      // VEHICLE_TURRETDOWN
+		"~<~",      // PED_CYCLE_TARGET_LEFT
+		"~>~",      // PED_CYCLE_TARGET_RIGHT
+		"~K~",      // PED_CENTER_CAMERA_BEHIND_PLAYER
+		"~J~",      // PED_LOCK_TARGET
+		"",         // NETWORK_TALK
+		"",         // PED_1RST_PERSON_LOOK_UP
+		"",         // PED_1RST_PERSON_LOOK_DOWN
+		"",         // _CONTROLLERACTION_36
+		"",         // TOGGLE_DPAD
+		"",         // SWITCH_DEBUG_CAM_ON
+		"",         // TAKE_SCREEN_SHOT
+		"",         // SHOW_MOUSE_POINTER_TOGGLE
+		"",         // UNKNOWN_ACTION
+	}};
+	if (action < MAX_CONTROLLERACTIONS) {
+		wchar wstr[16];
+		AsciiToUnicode(GameCubeButtons[CPad::GetPad(0)->Mode == 1 ? 1 : 0][action], wstr);
+		CMessages::WideStringCopy(text, wstr, leight);
+		return;
+	}
+#endif
 #ifdef DETECT_PAD_INPUT_SWITCH
 	if (CPad::GetPad(0)->IsAffectedByController) {
 		wchar wstr[16];

@@ -12,6 +12,13 @@ public:
 	float  m_lodDistances[3];
 	uint8  m_numAtomics;
 	uint8  m_alpha;
+#ifdef GTA_OGC
+	// m_alpha is per-MODEL but IncreaseAlpha was called once per visible
+	// INSTANCE per frame: ten lampposts finished the 16-step fade in under
+	// two frames — the pop-in "with no fade". Stamp of the last frame the
+	// fade advanced, so it moves one step per model per frame.
+	uint16 m_alphaFrame;
+#endif
 	uint16 m_firstDamaged   : 2; // 0: no damage model
 	                         // 1: 1 and 2 are damage models
 	                         // 2: 2 is damage model

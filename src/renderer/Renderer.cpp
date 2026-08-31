@@ -882,7 +882,6 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 		// that of an atomic for another draw distance.
 		if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 			RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
-		mi->IncreaseAlpha();
 		if(ent->m_rwObject == nil || !ent->bIsVisible)
 			return VIS_INVISIBLE;
 
@@ -891,8 +890,11 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 			// every instance of the model, and one offscreen lamppost was
 			// snapping all its onscreen siblings to full opacity — the
 			// "pop-in with no fade". Freeze mid-fade; it resumes on screen.
+			// IncreaseAlpha moved BELOW this check for the same reason: an
+			// offscreen instance must not advance the shared fade either.
 			return VIS_OFFSCREEN;
 		}
+		mi->IncreaseAlpha();
 
 		if(mi->m_alpha != 255){
 			CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);
@@ -936,14 +938,14 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 	RpAtomic *rwobj = (RpAtomic*)ent->m_rwObject;
 	if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 		RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
-	mi->IncreaseAlpha();
 	if(ent->m_rwObject == nil || !ent->bIsVisible)
 		return VIS_INVISIBLE;
 
 	if(!ent->GetIsOnScreen() || ent->IsEntityOccluded()){
-		// See above: never let an offscreen instance finish the shared fade.
+		// See above: never let an offscreen instance advance the shared fade.
 		return VIS_OFFSCREEN;
 	}else{
+		mi->IncreaseAlpha();
 		CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);
 		ent->bDistanceFade = true;
 		return VIS_OFFSCREEN;	// Why this?
@@ -1014,11 +1016,11 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 		// that of an atomic for another draw distance.
 		if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 			RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
-		mi->IncreaseAlpha();
 		if(!ent->IsVisible() || !ent->GetIsOnScreenComplex() || ent->IsEntityOccluded()){
 			// Shared-alpha pop fix, same as SetupEntityVisibility.
 			return VIS_INVISIBLE;
 		}
+		mi->IncreaseAlpha();
 
 		if(mi->m_alpha != 255){
 			CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);
@@ -1058,11 +1060,11 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 	RpAtomic *rwobj = (RpAtomic*)ent->m_rwObject;
 	if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 		RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
-	mi->IncreaseAlpha();
 	if(!ent->IsVisible() || !ent->GetIsOnScreenComplex() || ent->IsEntityOccluded()){
 		// Shared-alpha pop fix, same as SetupEntityVisibility.
 		return VIS_INVISIBLE;
 	}
+	mi->IncreaseAlpha();
 	CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);
 	ent->bDistanceFade = true;
 	return VIS_INVISIBLE;

@@ -968,6 +968,11 @@ CapturePad(RwInt32 padID)
 	state.RightShoulder1 = (buttons & PAD_TRIGGER_R) ? 255 : 0;
 	state.DPadUp = (buttons & PAD_BUTTON_UP) ? 255 : 0;
 	state.DPadDown = (buttons & PAD_BUTTON_DOWN) ? 255 : 0;
+	// main.scm polls RightShock (pad button 19, 19 call sites) to toggle
+	// taxi/vigilante submissions; nothing else reads RightShock under
+	// GTA_OGC, and DPad-down is otherwise idle in a vehicle — this is the
+	// "Direcional: Missão" the settings card already promises.
+	state.RightShock = state.DPadDown;
 	state.DPadLeft = (buttons & PAD_BUTTON_LEFT) ? 255 : 0;
 	state.DPadRight = (buttons & PAD_BUTTON_RIGHT) ? 255 : 0;
 	state.Start = (buttons & PAD_BUTTON_START) ? 255 : 0;

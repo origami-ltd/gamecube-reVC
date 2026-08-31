@@ -356,6 +356,24 @@ cMusicManager::ChangeMusicMode(uint8 mode)
 				m_aTracks[i].m_nLastPosCheckTimer = CTimer::GetTimeInMillisecondsPauseMode();
 			}
 #endif
+#ifdef GTA_OGC
+			// The stop that silences the radio normally happens in Service's
+			// mode transition, up to four audio frames later — and the menu's
+			// first TXD loads block the game thread before Service gets there,
+			// so the voice sat starving through the whole load, playing 84ms
+			// radio bursts against silence gaps: the "radio keeps threatening
+			// to play" of the first menu open. Stop it HERE, synchronously,
+			// the same shape the MUSICMODE_CUTSCENE case below already uses.
+			// After the rewind above, so the playing track keeps its position.
+			if (m_nMusicMode == MUSICMODE_GAME && SampleManager.IsStreamPlaying()) {
+				if (m_nPlayingTrack != NO_TRACK) {
+					RecordRadioStats();
+					m_aTracks[m_nPlayingTrack].m_nPosition = SampleManager.GetStreamedFilePosition();
+					m_aTracks[m_nPlayingTrack].m_nLastPosCheckTimer = CTimer::GetTimeInMillisecondsPauseMode();
+				}
+				SampleManager.StopStreamedFile();
+			}
+#endif
 
 			break;
 		case MUSICMODE_GAME:
