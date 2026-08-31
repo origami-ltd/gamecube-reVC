@@ -57,6 +57,7 @@ extern bool32 gxGlossEnable;
 extern float gxGlossMult;
 extern bool32 gxLightmapEnable;
 extern float gxLightmapBlend;
+extern bool32 gxOscLogEnable;
 } }
 
 // libogc enables external interrupts before the compiler-generated __eabi
@@ -1245,6 +1246,14 @@ main(int, char *[])
 #ifdef MULTISAMPLING
 			rw::gx::gxCopyFilterLevel = FrontEndMenuManager.m_nPrefsMSAALevel > 0;
 #endif
+			{
+				// The osc probe's card dump holds DVD_FS_GUARD; unguarded
+				// 5s card writes are the documented main-thread killer and
+				// they starve the vorbis decode thread the same way. Only
+				// measurement sessions (dvd:/autolog.txt) may write.
+				extern bool gLogToSd;
+				rw::gx::gxOscLogEnable = gLogToSd;
+			}
 		}
 		extern unsigned gxWaitRetrace;
 		// m_PrefsVsyncDisp, not m_PrefsVsync: the menu toggles Disp, and the
