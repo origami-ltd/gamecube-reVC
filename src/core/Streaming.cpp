@@ -1034,6 +1034,17 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 			if(mi->IsSimple() && !smi->m_isBigBuilding){
 				if(ms_aInfoForModel[streamId].m_flags & STREAMFLAGS_NOFADE)
 					smi->m_alpha = 255;
+#ifdef GTA_OGC
+				// Under the 24MB budget the streamer keeps evicting models
+				// still in view; every reload restarted the fade, and against
+				// a night sky a fade-in reads as the object blinking DARK for
+				// half a second — "textura piscando escuro, principalmente as
+				// distantes". A model that had an on-screen instance in the
+				// last ~2s (m_alphaFrame, stamped by IncreaseAlpha) snaps
+				// straight back to opaque; only genuinely new arrivals fade.
+				else if((uint16)((uint16)CTimer::GetFrameCounter() - smi->m_alphaFrame) < 120)
+					smi->m_alpha = 255;
+#endif
 				else
 					smi->m_alpha = 0;
 			}
