@@ -20,6 +20,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DKP_GROUPS = ["gamecube-dev", "wii-dev"]
+DKP_PACKAGES = ["ppc-libogg", "ppc-libvorbisidec"]
 
 
 def run(cmd, **kw):
@@ -40,14 +41,54 @@ def github_latest_asset(repo, match):
 def download(url, name):
     path = os.path.join(tempfile.gettempdir(), name)
     print(f"+ download {url}")
-    urllib.request.urlretrieve(url, path)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers)) \
+            as resp:
+        with open(path, "wb") as f:
+            f.write(resp.read())
     return path
 
 
-def dkp_install_groups(pacman="dkp-pacman", sudo=True):
-    cmd = (["sudo"] if sudo else []) + [pacman, "-Sy", "--noconfirm",
-                                        "--needed"] + DKP_GROUPS
+def dkp_install(pacman, packages, sudo=True):
+    """Install the given dkp package groups/packages with --needed."""
+    cmd = (["sudo"] if sudo else []) + [pacman, "-S", "--noconfirm",
+                                        "--needed"] + list(packages)
     run(cmd)
+
+
+def dkp_install_groups(pacman="dkp-pacman", sudo=True):
+    dkp_install(pacman, DKP_GROUPS, sudo=sudo)
+
+
+def devkitpro_installed():
+    """True if a usable devkitPro tree already exists (avoids reinstalling)."""
+    dkp = os.environ.get("DEVKITPRO") or "/opt/devkitpro"
+    return os.path.isfile(os.path.join(dkp, "cmake", "ogc-common.cmake"))
+
+
+def ensure_devkitpro_pacman():
+    """Bootstrap the devkitPro pacman repositories for non-apt RPM distros.
+
+    Fedora/other RPM distros install devkitPro through the system pacman
+    (there is no separate 'dkp-pacman' binary), so we make sure the dkp
+    repositories are present in /etc/pacman.conf, then initialise and sync
+    the keyring. The devkitPro package group install itself is left to
+    dkp_install_groups().
+    """
+    pacman_conf = "/etc/pacman.conf"
+    repos = [
+        ("[dkp-libs]\nSigLevel = Optional TrustAll\n"
+         "Server = https://pkg.devkitpro.org/packages\n"),
+        ("[dkp-linux]\nSigLevel = Optional TrustAll\n"
+         "Server = https://pkg.devkitpro.org/packages/linux/$arch/\n"),
+    ]
+    with open(pacman_conf, "r") as f:
+        content = f.read()
+    if "[dkp-libs]" not in content or "[dkp-linux]" not in content:
+        with open(pacman_conf, "a") as f:
+            f.write("\n" + "\n".join(repos))
+    run(["sudo", "pacman-key", "--init"])
+    run(["sudo", "pacman", "-Sy", "--noconfirm"])
 
 
 def setup_macos():
@@ -60,27 +101,67 @@ def setup_macos():
         pkg = download(url, name)
         run(["sudo", "installer", "-pkg", pkg, "-target", "/"])
     dkp_install_groups()
+    dkp_install("dkp-pacman", DKP_PACKAGES, sudo=False)
 
 
-def setup_linux():
-    if shutil.which("apt-get"):
-        run(["sudo", "apt-get", "install", "-y", "cmake", "ninja-build",
-             "wget"])
-        if not shutil.which("dkp-pacman"):
+def ensure_dkp_linux(cmd):
+    """Install the common deps with the given package manager command.
+
+    devkitPro itself is only bootstrapped when it is not already installed.
+    When it is already present we only install the PP C portlibs the build
+    links against (the dkp groups themselves are not re-installed to avoid
+    clashing with any user-added devkitPro repositories).
+    """
+    run(cmd)
+    installed = devkitpro_installed()
+    if not installed:
+        if shutil.which("apt-get"):
             script = download(
                 "https://apt.devkitpro.org/install-devkitpro-pacman",
                 "install-devkitpro-pacman")
             os.chmod(script, 0o755)
             run(["sudo", "bash", script])
-        dkp_install_groups()
+        else:
+            ensure_devkitpro_pacman()
+    else:
+        print("devkitPro already installed; skipping bootstrap")
+    pacman = "dkp-pacman" if shutil.which("dkp-pacman") else (
+        "pacman" if shutil.which("pacman") else None)
+    if not pacman:
+        return
+    if installed:
+        dkp_install(pacman, DKP_PACKAGES)
+    else:
+        dkp_install_groups(pacman=pacman)
+        dkp_install(pacman, DKP_PACKAGES)
+
+
+def setup_linux():
+    if shutil.which("apt-get"):
+        ensure_dkp_linux(["sudo", "apt-get", "install", "-y", "cmake",
+                          "ninja-build", "wget"])
+    elif shutil.which("dnf"):
+        ensure_dkp_linux(["sudo", "dnf", "install", "-y", "cmake",
+                          "ninja-build", "pacman"])
+    elif shutil.which("yum"):
+        ensure_dkp_linux(["sudo", "yum", "install", "-y", "cmake",
+                          "ninja-build", "pacman"])
     elif shutil.which("pacman"):
         run(["sudo", "pacman", "-S", "--needed", "--noconfirm", "cmake",
              "ninja"])
-        pacman = "dkp-pacman" if shutil.which("dkp-pacman") else "pacman"
-        if pacman == "pacman":
+        dkp = shutil.which("dkp-pacman")
+        if devkitpro_installed():
+            print("devkitPro already installed; skipping bootstrap")
+            dkp_install("pacman", DKP_PACKAGES)
+        elif dkp:
+            dkp_install_groups()
+            dkp_install("dkp-pacman", DKP_PACKAGES)
+        else:
             print("Add the devkitPro repositories to /etc/pacman.conf first "
                   "if this fails: https://devkitpro.org/wiki/devkitPro_pacman")
-        dkp_install_groups(pacman)
+            ensure_devkitpro_pacman()
+            dkp_install_groups(pacman="pacman")
+            dkp_install("pacman", DKP_PACKAGES)
     else:
         sys.exit("Neither apt-get nor pacman found; install devkitPro "
                  "manually: https://devkitpro.org/wiki/Getting_Started")
