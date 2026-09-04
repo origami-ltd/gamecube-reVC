@@ -306,7 +306,15 @@ def main():
     # "generic" TXD. Bundle the same lossless native chunks so dictionary-only
     # plants can be released and restored when a later DFF references them.
     generic_chunks = []
-    for loose in (os.path.join(args.out, "models", "generic", "wheels.txd"),
+    wheels_txd = os.path.join(args.out, "models", "generic", "wheels.txd")
+    if not os.path.exists(wheels_txd):
+        # Case-insensitive source trees (Windows/macOS VCs, or a zip that
+        # uppercased the extension) keep wheels.TXD; Linux needs the exact name.
+        for name in os.listdir(os.path.join(args.out, "models", "generic")):
+            if name.lower() == "wheels.txd":
+                wheels_txd = os.path.join(args.out, "models", "generic", name)
+                break
+    for loose in (wheels_txd,
                   os.path.join(args.out, "models", "generic.txd")):
         with open(loose, "rb") as source:
             generic_chunks.extend(texture_chunks(source.read()))
