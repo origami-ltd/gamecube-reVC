@@ -21,6 +21,10 @@ import urllib.request
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DKP_GROUPS = ["gamecube-dev", "wii-dev"]
 DKP_PACKAGES = ["ppc-libogg", "ppc-libvorbisidec"]
+THEORA_VERSION = "1.2.0"
+THEORA_TARBALL = f"libtheora-{THEORA_VERSION}.tar.xz"
+THEORA_URL = ("https://downloads.xiph.org/releases/theora/"
+              + THEORA_TARBALL)
 
 
 def run(cmd, **kw):
@@ -93,7 +97,8 @@ def ensure_devkitpro_pacman():
 
 def setup_macos():
     if shutil.which("brew"):
-        run(["brew", "install", "--quiet", "cmake", "ninja"])
+        run(["brew", "install", "--quiet", "cmake", "ninja", "libogg",
+             "libvorbis"])
     else:
         print("Homebrew not found; install cmake and ninja yourself.")
     if not shutil.which("dkp-pacman"):
@@ -102,6 +107,7 @@ def setup_macos():
         run(["sudo", "installer", "-pkg", pkg, "-target", "/"])
     dkp_install_groups()
     dkp_install("dkp-pacman", DKP_PACKAGES, sudo=False)
+    build_theora_encoder()
 
 
 def ensure_dkp_linux(cmd):
@@ -139,16 +145,21 @@ def ensure_dkp_linux(cmd):
 def setup_linux():
     if shutil.which("apt-get"):
         ensure_dkp_linux(["sudo", "apt-get", "install", "-y", "cmake",
-                          "ninja-build", "wget"])
+                          "ninja-build", "wget", "build-essential",
+                          "pkg-config", "libogg-dev", "libvorbis-dev"])
     elif shutil.which("dnf"):
         ensure_dkp_linux(["sudo", "dnf", "install", "-y", "cmake",
-                          "ninja-build", "pacman"])
+                          "ninja-build", "pacman", "gcc", "gcc-c++", "make",
+                          "pkgconf-pkg-config", "libogg-devel",
+                          "libvorbis-devel"])
     elif shutil.which("yum"):
         ensure_dkp_linux(["sudo", "yum", "install", "-y", "cmake",
-                          "ninja-build", "pacman"])
+                          "ninja-build", "pacman", "gcc", "gcc-c++", "make",
+                          "pkgconf-pkg-config", "libogg-devel",
+                          "libvorbis-devel"])
     elif shutil.which("pacman"):
         run(["sudo", "pacman", "-S", "--needed", "--noconfirm", "cmake",
-             "ninja"])
+             "ninja", "base-devel", "libogg", "libvorbis"])
         dkp = shutil.which("dkp-pacman")
         if devkitpro_installed():
             print("devkitPro already installed; skipping bootstrap")
@@ -165,6 +176,7 @@ def setup_linux():
     else:
         sys.exit("Neither apt-get nor pacman found; install devkitPro "
                  "manually: https://devkitpro.org/wiki/Getting_Started")
+    build_theora_encoder()
 
 
 def setup_windows():
@@ -277,6 +289,31 @@ def build_txdconv():
     return exe
 
 
+def build_theora_encoder():
+    """Host-compile Xiph libtheora's encoder_example.
+
+    build_sd.py transcodes the PC opening movies to Ogg Theora and needs
+    encoder_example (q8/q4 output stays stable even when the host FFmpeg has
+    no libtheora encoder). Fedora ships no encoder_example; the release
+    tarball's configure/make builds it against libogg and libvorbis. The
+    binary is installed with sudo so it is visible on PATH for any caller.
+    """
+    staged = os.path.join(ROOT, "build", "host", "libtheora-" + THEORA_VERSION)
+    exe = os.path.join(staged, "examples", "encoder_example")
+    if os.access(exe, os.X_OK):
+        return exe
+    archive = download(THEORA_URL, THEORA_TARBALL)
+    shutil.rmtree(staged, ignore_errors=True)
+    os.makedirs(os.path.dirname(staged), exist_ok=True)
+    shutil.unpack_archive(archive, os.path.dirname(staged))
+    run(["./configure", "--disable-shared"], cwd=staged)
+    run(["make", "-C", "lib"], cwd=staged)
+    run(["make", "-C", "examples", "encoder_example"], cwd=staged)
+    dest = "/usr/local/bin/encoder_example"
+    run(["sudo", "install", "-m", "0755", exe, dest])
+    return dest
+
+
 def build_sd(args):
     """Drive tools/gamecube/build_sd.py with assets/ conventions."""
     game = args.game or os.path.join(ROOT, "assets", "GTAVC")
@@ -288,12 +325,16 @@ def build_sd(args):
            os.path.join(ROOT, "tools", "gamecube", "build_sd.py"),
            "--game", game, "--out", out,
            "--txdconv", build_txdconv(), "--keep-sfx-raw"]
-    audio = args.audio or os.path.join(ROOT, "assets", "audio-ogg")
-    if os.path.isdir(audio):
-        cmd += ["--audio", audio]
     movies = args.movies or os.path.join(ROOT, "assets", "movies")
     if os.path.isdir(movies):
         cmd += ["--preencoded-movies", movies]
+    else:
+        encoder = build_theora_encoder()
+        if encoder:
+            cmd += ["--theora-encoder", encoder]
+    audio = args.audio or os.path.join(ROOT, "assets", "audio-ogg")
+    if os.path.isdir(audio):
+        cmd += ["--audio", audio]
     run(cmd)
     print(f"\n  SD card tree: {out}  (copy its CONTENTS to the card root)")
 
