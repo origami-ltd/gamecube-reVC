@@ -419,7 +419,7 @@ enum {
 	MAX_NUM_MISSION_SCRIPTS = 120,
 	MAX_NUM_BUILDING_SWAPS = 25,
 	MAX_NUM_INVISIBILITY_SETTINGS = 20,
-	MAX_NUM_STORED_LINES = 1024
+	MAX_NUM_STORED_LINES = 1   // debug lines never drawn on this build; 1024 was 32K of BSS
 };
 
 class CTheScripts

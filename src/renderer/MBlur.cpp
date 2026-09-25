@@ -113,6 +113,11 @@ CMBlur::MotionBlurOpen(RwCamera *cam)
 			BlurOn = false;
 #endif
 		
+#ifdef GTA_OGC
+		// B92: the 640x480 front buffer is 600K of MEM1 this port does not have; when its
+		// texels failed to allocate the overlay quad painted the whole view white (B90).
+		BlurOn = false;
+#endif
 		if ( BlurOn )
 		{
 			ms_bScaledBlur = false;
@@ -632,14 +637,6 @@ CMBlur::AddRenderFx(RwCamera *cam, RwRect *rect, float z, FxType type)
 	fxZ[pBufVertCount] = z;
 	fxType[pBufVertCount] = type;
 	pBufVertCount++;
-#ifdef GTA_OGC
-	{
-		// Queue/draw tallies for the heartbeat: the splash chain has five
-		// links and the missing-hydrant reports never said which one broke.
-		extern uint32 gFxQueued;
-		gFxQueued++;
-	}
-#endif
 
 	return true;
 }
@@ -897,11 +894,5 @@ CMBlur::OverlayRenderFx(RwCamera *cam, RwRaster *frontBuf)
 
 	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)FALSE);
 	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
-#ifdef GTA_OGC
-	{
-		extern uint32 gFxDrawn;
-		gFxDrawn += pBufVertCount;
-	}
-#endif
 	pBufVertCount = 0;
 }

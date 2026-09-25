@@ -494,19 +494,43 @@ CText::LoadMissionText(const char *MissionTableName)
 	if(!GetTextFilename(filename))
 		return false;
 
-	uint8 *fileData;
-	size_t fileSize;
-	CTimer::Suspend();
-	bool success = ReadTextFile(filename, fileData, fileSize);
-	CTimer::Resume();
-	if(!success)
+	// B122 (GameCube): read only the mission's own section. ReadTextFile
+	// pulled the whole 425K GXT into a temporary at every LOAD_MISSION_TEXT —
+	// on a 24MB console at gameplay that new[] failed and the mission text
+	// (subtitles) silently never loaded. The table offsets were validated at
+	// CText::Load; the file has not changed since.
+	uint16 idx = 0;
+	for(uint16 i = 1; i < MissionTextOffsets.size; i++)
+		if(memcmp(MissionTextOffsets.data[i].szMissionName, MissionTableName, GXT_NAME_SIZE) == 0){ idx = i; break; }
+	if(idx == 0)
 		return false;
+	size_t start = MissionTextOffsets.data[idx].offset;
+	size_t fileSize = 0;
+	uint8 *fileData = nil;
+	CTimer::Suspend();
+	CFileMgr::SetDir("TEXT");
+	int file = CFileMgr::OpenFile(filename, "rb");
+	bool success = file > 0 && CFileMgr::GetFileSize(file, &fileSize) && start < fileSize;
+	size_t end = idx + 1 < MissionTextOffsets.size ? MissionTextOffsets.data[idx + 1].offset : fileSize;
+	if(success && end > fileSize) end = fileSize;
+	if(success && end > start){
+		fileData = new(std::nothrow) uint8[end - start];
+		success = fileData != nil && CFileMgr::Seek(file, (int)start, SEEK_SET) &&   // Seek returns true on success
+		          CFileMgr::Read(file, (char*)fileData, end - start) == end - start;
+	}else
+		success = false;
+	if(file > 0) CFileMgr::CloseFile(file);
+	CFileMgr::SetDir("");
+	CTimer::Resume();
+	if(!success){ delete[] fileData; return false; }
 
 	CKeyArray stagedKeys;
 	CData stagedText;
 	char loadedName[8];
-	success = DecodeGxtMission(fileData, fileSize, MissionTextOffsets,
-	                           MissionTableName, stagedKeys, stagedText, loadedName);
+	GxtSection section;
+	success = ReadGxtSection(fileData, 0, end - start, MissionTextOffsets.data[idx].szMissionName, section) &&
+	          DecodeGxtSection(section, stagedKeys, stagedText);
+	memcpy(loadedName, MissionTextOffsets.data[idx].szMissionName, GXT_NAME_SIZE);
 	delete[] fileData;
 	if(!success)
 		return false;

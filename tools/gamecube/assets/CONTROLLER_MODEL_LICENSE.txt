@@ -8,7 +8,8 @@ Licensed under the Creative Commons Attribution 4.0 International license:
 https://creativecommons.org/licenses/by/4.0/
 
 The source GLB is preserved as gamecube_controller.glb. The generated
-gamecube_controller.dff contains the same complete static mesh converted to a
-RenderWare container for runtime GX instancing. gamecube_controller.tga is the
+gamecube_controller.dff contains the static mesh converted to a RenderWare
+container for runtime GX instancing, decimated from 25,564 to 9,000
+triangles by decimate_pad.py so it fits the GameCube's menu memory. gamecube_controller.tga is the
 embedded base-colour texture extracted losslessly for the native GX texture
 conversion step.

@@ -43,8 +43,360 @@ size_t gOgcHeapUsedAtInit;
 #endif
 
 #include <new>
+extern "C" { extern volatile const char *gMainWhere; }   // gamecube.cpp watchdog checkpoint
 
 bool CStreaming::ms_disableStreaming;
+#ifdef GTA_OGC
+// The staging pair is capped at 512K instead of sized to the largest file
+// (2044K, one interior TXD, held for the whole run). A TXD bigger than the
+// pair — 84 of them, every one an HD building or interior — streams through
+// it: the first fill arrives on channel 0 like any load, and CdPullStream
+// refills the pair in place from the disc as the dictionary parser consumes
+// it. Texels go to ARAM chunk by chunk (gxraster.cpp readNativeTexture), so
+// the file never exists whole in MEM1. Reads past the first fill are
+// synchronous on the main thread, as the blocking loader's always were.
+// ponytail: forward-only; the TXD reader never seeks back. No DFF is oversize.
+enum { STREAM_BUFFER_CAP_SECTORS = 256 };         // 512K total, 256K a channel
+static uint32 gPullCd;   // cd sector of the file whose first fill is in the pair
+class CdPullStream : public rw::Stream
+{
+	uint8 *pair, *win;
+	uint32 pairBytes, have, base, pos, fileBytes, sector;
+	int failed;
+	bool fill(void){
+		if(failed || base + have >= fileBytes) return false;
+		base += have;
+		uint32 n = fileBytes - base;
+		if(n > pairBytes) n = pairBytes;
+		uint32 sectors = (n + CDSTREAM_SECTOR_SIZE-1)/CDSTREAM_SECTOR_SIZE;
+		gMainWhere = "pull-read";
+		int tries = 0, status;
+		do{
+			if(++tries > 8){ failed = 1; return false; }
+			status = CdStreamRead(0, pair, sector, sectors);
+		}while(CdStreamSync(0) || status == STREAM_NONE);
+		gMainWhere = "pull-parse";
+		win = pair; sector += sectors; have = n;
+		return true;
+	}
+public:
+	// first: where the file's first fill sits inside the pair
+	void init(uint8 *pairStart, uint32 pairSize, uint8 *first, uint32 cdSector, uint32 total){
+		pair = pairStart; pairBytes = pairSize; win = first; fileBytes = total;
+		have = pairSize - (uint32)(first - pairStart);
+		if(have > total) have = total;
+		base = 0; pos = 0; failed = 0;
+		sector = cdSector + (have + CDSTREAM_SECTOR_SIZE-1)/CDSTREAM_SECTOR_SIZE;
+	}
+	uint32 write8(const void*, uint32) { return 0; }
+	uint32 read8(void *data, uint32 length){
+		uint8 *d = (uint8*)data;
+		uint32 got = 0;
+		while(length){
+			if(pos >= base + have && !fill()) break;
+			uint32 n = base + have - pos;
+			if(n > length) n = length;
+			memcpy(d, win + (pos - base), n);
+			d += n; pos += n; length -= n; got += n;
+		}
+		return got;
+	}
+	void seek(int32 offset, int32 whence = 1){
+		uint32 np = whence == 0 ? (uint32)offset : whence == 1 ? pos + offset : fileBytes - offset;
+		if(np < base){ failed = 1; printf("STREAM pull: backward seek %u < %u\n", np, base); return; }
+		pos = np;   // forward: read8 refills through whatever is skipped
+	}
+	uint32 tell(void) { return pos; }
+	bool eof(void) { return failed || pos >= fileBytes; }
+};
+
+// Hard floor on the real heap. The budget only counts what the streamer
+// itself loaded; entity clones, particles and RW frames allocate past it,
+// and B17 died on a 1K must-allocate at 400K free. Sampled once a frame in
+// Update; below it the per-frame loader issues no reads and sheds one
+// unreferenced model a frame. The blocking loader is not gated.
+enum { STREAM_HEAP_FLOOR = 512*1024 };   // B87: general heap holds fewer big blocks now   // B76: back to 640K. 1MB (B73) + the 512K reserve left ~50K of headroom: near set stuck at 2/16, black docks
+enum { STREAM_BUDGET_CAP = 0 };   // B27 tried 2MB: the budget is soft, str stayed at 8-10MB and the churn sharpened
+// Prioritise what is close (user, 09-01): models seen within this many
+// metres in the last two frames are never evicted, and the farthest
+// evictable model goes first. Near requests are priority requests.
+enum { STREAM_NEAR_M = 60 };   // = STREAM_DIST: below it, 60-80m models were evicted and re-requested every frame
+enum { STREAM_KEEP_M = STREAM_HD_M };   // B105: = the renderer's HD request ring (80 m, user). 70 against an 80 m ring left a requested-but-evictable band; B94: 90 (B93) starved the boot until the decode thread's mallocs failed and corrupted memory
+static uint16 gModelDist[MODELINFOSIZE];
+static uint32 gModelDistFrame[MODELINFOSIZE];
+// Every model with an instance within STREAM_NEAR_M of the camera, in ANY
+// direction. The renderer's stamp only sees what is in the frustum, and the
+// B28 instrument showed the near set being evicted while just behind the
+// camera and reloaded on the next turn — the lamppost 2m away flipping
+// twelve times in five seconds. Rebuilt once a frame from the 5x5 sectors
+// around the camera (a 250m box holds the 60m circle wherever the camera
+// sits in its sector). Drawn lists only; dummies never render.
+static uint8 gNearModels[(MODELINFOSIZE+7)/8];
+static uint8 gAheadModels[(MODELINFOSIZE+7)/8];
+uint32 gAheadN, gAheadMiss, gAheadDistance;
+uint32 gNearN, gNearMiss;   // census: near-set size and how much of it is not loaded
+// Dynamic request radius (B54). The renderer re-requested every frame whatever
+// the LRU evicted beyond 80m, so under pressure the 80-300m ring churned and
+// the near set never filled (the empty world). Shrinks while evictions run
+// hot, grows while the heap has room; the renderer requests nothing beyond it.
+float gStreamRadius = 300.0f;
+// Eviction cooldown (B58): a model the LRU just evicted beyond the near set is
+// not re-requested for a few seconds, so the boundary stops blinking and the
+// disc stops reloading what it just dropped. Seconds, wraps at 256.
+static uint8 gEvictSec[MODELINFOSIZE];
+// Just-loaded protection (B59): the blocking loader evicted what it had just
+// loaded (farthest from the old camera) while loading the rest — the first
+// cutscene started empty. A model loaded under 5s ago is not evictable.
+// B114: FRAMES, not CTimer seconds. The clock is frozen through a blocking
+// load and the first Update then adds the whole load (38.8 s at New Game),
+// so every model of the scene lost its grace on the same frame: evict +33 at
+// 5/s right after the load, near 38/84 -> 1/17, "geometry lost when the
+// loading finishes". Frames do not advance while main is inside a load.
+static uint16 gLoadFrame[NUMSTREAMINFO];   // B106: TXDs too — 'STREAM rm txd icons9' every 500 ms was a TXD dropped and re-pulled with no grace
+static inline void StampLoaded(int32 id)
+{
+	if(id < 0 || id >= NUMSTREAMINFO) return;
+	uint16 f = (uint16)CTimer::GetFrameCounter();
+	gLoadFrame[id] = f ? f : 1;
+}
+static inline bool LoadedRecently(int32 id)
+{
+	if(id < 0 || id >= NUMSTREAMINFO || gLoadFrame[id] == 0) return false;
+	return (uint16)((uint16)CTimer::GetFrameCounter() - gLoadFrame[id]) < 300;   // ~5 s at 60 fps
+}
+uint32 gBlink;   // census: near (<100m) models evicted — each one is a visible LOD flip
+// LoadScene centres the near set on the scene, not on the camera that has not
+// moved there yet; BuildNearSet honours it for a few seconds.
+static CVector gNearFocus;
+static int gNearFocusCalls;
+bool gStreamEvictedRecently(int32 id)
+{
+	if(id < 0 || id >= MODELINFOSIZE) return false;
+	uint8 now = (uint8)(CTimer::GetTimeInMilliseconds()/1000);
+	return gEvictSec[id] && (uint8)(now - gEvictSec[id]) < 8;
+}
+static int gEvictTrace = 300;   // B58: the first evictions of the run, named
+static bool ModelShown(int32 id, uint32 d);
+static void
+TraceEvict(int32 id)
+{
+	// B181: a flip is an eviction inside the model's own draw reach. '<100 m'
+	// also counted the 80-100 m evictions of bushes and props already past
+	// their draw distance (b180: 904 'blinks' in 16 min, mostly invisible).
+	if(id >= 0 && id < MODELINFOSIZE && ModelShown(id, CStreaming::ModelDistNow(id))) gBlink++;
+	if(gEvictTrace <= 0 || id < 0 || id >= MODELINFOSIZE) return;
+	gEvictTrace--;
+	printf("EVICT %d %s d=%u\n", id, CModelInfo::GetModelInfo(id)->GetModelName(), CStreaming::ModelDistNow(id));
+}
+static void
+BuildNearSet(void)
+{
+	memset(gNearModels, 0, sizeof(gNearModels));
+	CVector cam = TheCamera.GetPosition();
+	if(gNearFocusCalls > 0){ gNearFocusCalls--; cam = gNearFocus; }
+	int cx = CWorld::GetSectorIndexX(cam.x), cy = CWorld::GetSectorIndexY(cam.y);
+	float r2 = (float)STREAM_NEAR_M * (float)STREAM_NEAR_M;
+	static const int lists[] = { ENTITYLIST_BUILDINGS, ENTITYLIST_BUILDINGS_OVERLAP,
+	                             ENTITYLIST_OBJECTS, ENTITYLIST_OBJECTS_OVERLAP };
+	for(int y = cy-2; y <= cy+2; y++){
+		if(y < 0 || y >= NUMSECTORS_Y) continue;
+		for(int x = cx-2; x <= cx+2; x++){
+			if(x < 0 || x >= NUMSECTORS_X) continue;
+			CSector *sec = CWorld::GetSector(x, y);
+			for(int l = 0; l < 4; l++)
+				for(CPtrNode *n = sec->m_lists[lists[l]].first; n; n = n->next){
+					CEntity *e = (CEntity*)n->item;
+					float d2 = (e->GetPosition() - cam).MagnitudeSqr();
+					if(d2 > r2){
+						// B106: give models beside and behind the camera a real
+						// distance. Only the frustum scan stamped one, so anything
+						// off-screen read 65535 = "farthest" and was the first pick of
+						// every farthest-first eviction — the flank stuck at LOD.
+						if(d2 <= (float)((STREAM_KEEP_M+40)*(STREAM_KEEP_M+40)))
+							CStreaming::NoteModelDistance(e->GetModelIndex(), Sqrt(d2));
+						continue;
+					}
+					int32 id = e->GetModelIndex();
+					if(id >= 0 && id < MODELINFOSIZE) gNearModels[id>>3] |= 1 << (id&7);
+				}
+		}
+	}
+	gNearN = gNearMiss = 0;
+	for(int id = 0; id < MODELINFOSIZE; id++)
+		if((gNearModels[id>>3] >> (id&7)) & 1){
+			gNearN++;
+			if(!CStreaming::HasModelLoaded(id)) gNearMiss++;
+		}
+}
+static inline bool
+IsNearModel(int32 id)
+{
+	return id >= 0 && id < MODELINFOSIZE && ((gNearModels[id>>3] >> (id&7)) & 1);
+}
+
+static bool
+IsAheadModel(int32 id)
+{
+	return id >= 0 && id < MODELINFOSIZE && ((gAheadModels[id>>3] >> (id&7)) & 1);
+}
+
+static bool
+HasPendingLods(void)
+{
+	for(CStreamingInfo *si = CStreaming::ms_startRequestedList.m_next;
+	    si && si != &CStreaming::ms_endRequestedList; si = si->m_next)
+		if(si->m_flags & STREAMFLAGS_LOD)
+			return true;
+	for(int ch = 0; ch < 2; ch++){
+		if(CStreaming::ms_channel[ch].state == CHANNELSTATE_IDLE) continue;
+		for(int i = 0; i < 4; i++){
+			int id = CStreaming::ms_channel[ch].streamIds[i];
+			if(id < 0) continue;
+			CStreamingInfo &si = CStreaming::ms_aInfoForModel[id];
+			if((si.m_flags & STREAMFLAGS_LOD) &&
+			   (si.m_loadState == STREAMSTATE_READING || si.m_loadState == STREAMSTATE_STARTED))
+				return true;
+		}
+	}
+	return false;
+}
+
+static bool
+LodPassAllows(int32 id)
+{
+	return (CStreaming::ms_aInfoForModel[id].m_flags & STREAMFLAGS_LOD) ||
+	    (id >= STREAM_OFFSET_COL && id < STREAM_OFFSET_ANIM);
+}
+
+static bool
+InStreamingCorridor(float dx, float dy, float vx, float vy, float reach, float width, float radius = 0.0f)
+{
+	float along = dx*vx + dy*vy;
+	if(along < -radius || along > reach + radius) return false;
+	float across = dx*vy - dy*vx;
+	return across*across <= (width + radius)*(width + radius);
+}
+
+enum { STREAM_AHEAD_MODELS = 24 };
+struct AheadRequest { int32 id; float distance; };
+
+static void
+InsertAheadRequest(AheadRequest *requests, int32 &count, int32 id, float distance)
+{
+	for(int32 i = 0; i < count; i++){
+		if(requests[i].id != id) continue;
+		if(requests[i].distance <= distance) return;
+		for(int32 j = i; j + 1 < count; j++) requests[j] = requests[j+1];
+		count--;
+		break;
+	}
+	if(count == STREAM_AHEAD_MODELS && requests[count-1].distance <= distance) return;
+	int32 i = Min(count, STREAM_AHEAD_MODELS-1);
+	while(i > 0 && requests[i-1].distance > distance){ requests[i] = requests[i-1]; i--; }
+	requests[i].id = id;
+	requests[i].distance = distance;
+	if(count < STREAM_AHEAD_MODELS) count++;
+}
+
+static float
+StreamingLookAhead(float speed)
+{
+	return Min(240.0f, STREAM_HD_M + speed*50.0f*3.0f);
+}
+
+static void
+BuildAheadSet(void)
+{
+	memset(gAheadModels, 0, sizeof(gAheadModels));
+	gAheadN = gAheadMiss = gAheadDistance = 0;
+	if(CStreaming::ms_disableStreaming || TheCamera.m_WideScreenOn ||
+	   CCutsceneMgr::IsCutsceneProcessing() || FindPlayerVehicle() == nil || HasPendingLods()) return;
+	CVector velocity = FindPlayerSpeed();
+	float speed = Sqrt(velocity.x*velocity.x + velocity.y*velocity.y);
+	if(!isfinite(speed) || speed < 0.05f) return;
+	velocity /= speed;
+	float reach = StreamingLookAhead(speed);
+	const float width = 45.0f;
+	AheadRequest requests[STREAM_AHEAD_MODELS];
+	int32 count = 0;
+	CVector pos = FindPlayerCoors(), end = pos + velocity*reach;
+	gAheadDistance = (uint32)reach;
+	const float margin = width + STREAM_NEAR_M;
+	int xmin = Max(0, CWorld::GetSectorIndexX(Min(pos.x, end.x)-margin));
+	int xmax = Min(NUMSECTORS_X-1, CWorld::GetSectorIndexX(Max(pos.x, end.x)+margin));
+	int ymin = Max(0, CWorld::GetSectorIndexY(Min(pos.y, end.y)-margin));
+	int ymax = Min(NUMSECTORS_Y-1, CWorld::GetSectorIndexY(Max(pos.y, end.y)+margin));
+	static const int lists[] = { ENTITYLIST_BUILDINGS, ENTITYLIST_BUILDINGS_OVERLAP,
+	                             ENTITYLIST_OBJECTS, ENTITYLIST_OBJECTS_OVERLAP, ENTITYLIST_DUMMIES };
+	CWorld::AdvanceCurrentScanCode();
+	for(int y = ymin; y <= ymax; y++)
+		for(int x = xmin; x <= xmax; x++){
+			CSector *sector = CWorld::GetSector(x, y);
+			for(int l = 0; l < ARRAY_SIZE(lists); l++)
+				for(CPtrNode *n = sector->m_lists[lists[l]].first; n; n = n->next){
+					CEntity *e = (CEntity*)n->item;
+					if(e->m_scanCode == CWorld::GetCurrentScanCode()) continue;
+					e->m_scanCode = CWorld::GetCurrentScanCode();
+					if(e->bDontStream || e->bStreamingDontDelete || !e->bIsVisible ||
+					   e->bIsBIGBuilding || !IsAreaVisible(e->m_area)) continue;
+					int32 id = e->GetModelIndex();
+					if(id < 0 || id >= MODELINFOSIZE) continue;
+					if(IsNearModel(id) && CStreaming::HasModelLoaded(id)) continue;
+					CBaseModelInfo *base = CModelInfo::GetModelInfo(id);
+					if(base == nil || !base->IsSimple()) continue;
+					CTimeModelInfo *mi = (CTimeModelInfo*)base;
+					if(mi->GetModelType() == MITYPE_TIME &&
+					   !CClock::GetIsTimeInRange(mi->GetTimeOn(), mi->GetTimeOff())) continue;
+					float radius = base->GetColModel() ? Min((float)STREAM_NEAR_M, e->GetBoundRadius()) : 0.0f;
+					CVector delta = (base->GetColModel() ? e->GetBoundCentre() : e->GetPosition()) - pos;
+					if(!InStreamingCorridor(delta.x, delta.y, velocity.x, velocity.y, reach, width, radius)) continue;
+					float distance = Max(0.0f, delta.x*velocity.x + delta.y*velocity.y - radius);
+					InsertAheadRequest(requests, count, id, distance);
+				}
+		}
+	for(int32 i = 0; i < count; i++){
+		int32 id = requests[i].id;
+		gAheadModels[id>>3] |= 1 << (id&7);
+		gAheadN++;
+		if(!CStreaming::HasModelLoaded(id)) gAheadMiss++;
+		int32 flags = STREAMFLAGS_PREFETCH;
+		if(requests[i].distance <= STREAM_HD_M + speed*50.0f) flags |= STREAMFLAGS_PRIORITY;
+		if(CStreaming::ms_numModelsRequested < 32 || CStreaming::ms_aInfoForModel[id].m_loadState != STREAMSTATE_NOTLOADED)
+			CStreaming::RequestModel(id, flags);
+	}
+}
+#define STREAM_FLOOR_ENABLED 1
+static size_t gStreamHeapFree = STREAM_HEAP_FLOOR;
+#endif
+
+extern "C" int gcBootDone(void);   // gamecube.cpp: 1 from the first GS_PLAYING_GAME frame (B144)
+volatile int gcEssentialLoad;   // B150: read by gcArenaCarve (gamecube.cpp)
+static uint8 gLoadFails[NUMSTREAMINFO];   // bounded retry counters, see FailedLoad
+static uint8 gFailSec[NUMSTREAMINFO];     // B133: second of the last failure; the cap is a 60 s cooldown, not a life sentence
+static uint32 gSpecialWaitFrame;          // B142: frame of the last HasSpecialCharLoaded miss (the script is waiting)
+static const char *gFailWhy = "?";   // last reason handed to FailedLoad
+extern uint32 gStrEvict;
+extern "C" { extern void *gHeapReserve; extern volatile unsigned gHeapEmergency; void gcHeapReserveArm(void); }   // gamecube.cpp heap reserve (B73)
+extern "C" size_t gcHeapFreeTotal(void);   // B79: general free + big-block chunk free
+// B107: the honest budget in one place. What the streamer holds plus what it
+// can still get: the general heap above its slack, and — now that every RW
+// block of 1K+ lives in the permanent 2MB chunks (B106) — the chunk room in
+// full. Counting only fordblks (B51) left 139-578K of headroom against a
+// 7-8MB set, so MakeSpaceFor evicted on nearly every load; Init2's boot value
+// (1831K) was never refreshed during the blocking New Game loads, so the
+// scene evicted its own models (near 38/84 at the first census).
+static void
+HonestBudget(void)
+{
+	size_t general = mallinfo().fordblks;
+	size_t total = gcHeapFreeTotal();
+	size_t chunkFree = total > general ? total - general : 0;
+	size_t slack = STREAM_HEAP_FLOOR + 256*1024;
+	size_t head = (general > slack ? general - slack : 0) + chunkFree;
+	CStreaming::ms_memoryAvailable = CStreaming::ms_memoryUsed + head;
+	if(CStreaming::ms_memoryAvailable < 4*1024*1024) CStreaming::ms_memoryAvailable = 4*1024*1024;
+}
+extern unsigned gxAramBytes, gxAramStoreBytes;   // gxraster.cpp texel store
 bool CStreaming::ms_bLoadingBigModel;
 int32 CStreaming::ms_numModelsRequested;
 CStreamingInfo CStreaming::ms_aInfoForModel[NUMSTREAMINFO];
@@ -227,6 +579,11 @@ CStreaming::Init2(void)
 	size_t roundedStreamingBufferSize = (size_t)ms_streamingBufferSize;
 	if(roundedStreamingBufferSize & 1)
 		roundedStreamingBufferSize++;
+#ifdef GTA_OGC
+	// See StreamTarget: the buffer no longer has to hold the largest file.
+	if(roundedStreamingBufferSize > STREAM_BUFFER_CAP_SECTORS)
+		roundedStreamingBufferSize = STREAM_BUFFER_CAP_SECTORS;
+#endif
 	size_t allocationMultiplier = 1;
 #ifdef ONE_THREAD_PER_CHANNEL
 	allocationMultiplier = 2;
@@ -248,6 +605,7 @@ CStreaming::Init2(void)
 	}
 	ms_streamingBufferSize /= 2;
 	ms_pStreamingBuffer[1] = ms_pStreamingBuffer[0] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
+	printf("STREAM buffer: %d sectors a channel at %p\n", ms_streamingBufferSize, ms_pStreamingBuffer[0]);
 #else
 	ms_pStreamingBuffer[0] = (int8*)RwMallocAlign((size_t)ms_streamingBufferSize*2*CDSTREAM_SECTOR_SIZE, CDSTREAM_SECTOR_SIZE);
 	if(ms_pStreamingBuffer[0] == nil){
@@ -257,6 +615,7 @@ CStreaming::Init2(void)
 	}
 	ms_streamingBufferSize /= 2;
 	ms_pStreamingBuffer[1] = ms_pStreamingBuffer[0] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
+	printf("STREAM buffer: %d sectors a channel at %p\n", ms_streamingBufferSize, ms_pStreamingBuffer[0]);
 	ms_pStreamingBuffer[2] = ms_pStreamingBuffer[1] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
 	ms_pStreamingBuffer[3] = ms_pStreamingBuffer[2] + (size_t)ms_streamingBufferSize*CDSTREAM_SECTOR_SIZE;
 #endif
@@ -384,18 +743,41 @@ CStreaming::Init2(void)
 		// failure path is being reached silently rather than that 2MB is magic.
 		// Do not tune this again without first finding out why it is a cliff.
 		size_t reserve = 2*MB; // engine late allocs, render targets
-		ms_memoryAvailable = _dwMemAvailPhys > reserve + 4*MB ?
-		    _dwMemAvailPhys - reserve : 4*MB;
-		desiredNumVehiclesLoaded = 12; // reconstructed console target
-		{
-			extern size_t gOgcHeapUsedAtInit;
-			struct mallinfo mi = mallinfo();
-			gOgcHeapUsedAtInit = mi.uordblks;
-			char line[96];
-			snprintf(line, sizeof(line), "  arena %uK budget %uK",
-			    (uint32)(_dwMemAvailPhys/1024), (uint32)(ms_memoryAvailable/1024));
-			BootLog(line);
-		}
+		// The cliff above is now understood. _dwMemAvailPhys is the WHOLE
+		// arena, sampled at psInitialize before anything was allocated; by the
+		// time this runs, pools, paths, collision and the engine already hold
+		// most of it (measured: usedNow 15273K of a 16032K arena at this line).
+		// Budgeting "arena minus reserve" then granted the streamer ~14MB on
+		// top of a heap with ~200K left — 29MB of demand in 16MB. It never
+		// showed because libogc's Wii sbrk fell through into MEM2 (MALLOC_MEM2
+		// = 1) and absorbed the excess; with MEM2 forbidden the overcommit is
+		// the OOM. Budget what is actually left, the way dca3 sizes its fixed
+		// STREAMING_MEM_SIZE against a known resident set.
+		extern size_t gOgcHeapUsedAtInit;
+		struct mallinfo mi = mallinfo();
+		gOgcHeapUsedAtInit = mi.uordblks;
+		size_t left = _dwMemAvailPhys > (size_t)mi.uordblks ?
+		    _dwMemAvailPhys - (size_t)mi.uordblks : 0;
+		ms_memoryAvailable = left > reserve + 4*MB ? left - reserve : 4*MB;
+		// User experiment 09-01 (B27): a hard 2MB streaming budget, with the
+		// texels already out of MEM1 (ARAM tier). Governs geometry only now.
+		if(STREAM_BUDGET_CAP && ms_memoryAvailable > STREAM_BUDGET_CAP)
+			ms_memoryAvailable = STREAM_BUDGET_CAP;
+		// With the texels in ARAM the heap left at init says nothing about the
+		// geometry the world needs (B29: 4MB budget against a 8-10MB set, so
+		// MakeSpaceFor looped on every load). The heap floor in Update is the
+		// real limiter; this only decides when farthest-first eviction starts.
+		// 12MB. B33 tried 10.5MB to pay for the audio and MakeSpaceFor looped
+		// again (evict 1068 in 2.5 min, LOD blink back). The heap floor in
+		// Update is what yields MEM1 to the audio: far models, one a frame.
+		// 10MB (user, B37: "reduce the streaming memory, use the DVD more").
+		// The near set is protected everywhere now, so the budget only sets how
+		// far the HD world reaches before the LOD shells take over.
+		if(ms_memoryAvailable < 10*MB)
+			ms_memoryAvailable = left > 3*MB ? left - 1536*1024 : left/2;   // B94: the flat 10MB let the boot burst fill the heap to the last byte (B93 corrupted there); the cadence grows it honestly afterwards
+		printf("STREAM budget: %uK (heap left %uK)\n", (unsigned)(ms_memoryAvailable/1024), (unsigned)(left/1024));
+		gcHeapReserveArm();   // B77: arm while the heap is still wide open
+		desiredNumVehiclesLoaded = 12; // the PS2's number — user rule 09-01: at least PS2 levels of cars and peds
 	}
 #elif defined(FIX_BUGS)
 	// do what gta3 does
@@ -503,6 +885,100 @@ CStreaming::Update(void)
 #endif
 
 	UpdateMemoryUsed();
+#ifdef GTA_OGC
+	{
+		extern unsigned rwGeoAllocFails;
+		static unsigned compactedFailures;
+		if(gcBootDone() && compactedFailures != rwGeoAllocFails){
+			compactedFailures = rwGeoAllocFails;
+			CGame::TidyUpMemory(false, false);
+		}
+	}
+	// B177: the B20 ten-second memset of gLoadFails is gone. FailedLoad already
+	// forgives a model 60 s after its last failure (B133); zeroing every 10 s
+	// meant RequestModel's 60 s block never held, and b171 re-read nbt_hotel05
+	// 14 times in 40 s (each read also shedding up to 24 models).
+	gMainWhere = "stream-update";
+	{
+		// Neither changes faster than the camera moves 60m: the near set every 4
+		// frames, the heap walk (mallinfo is O(chunks)) every 8.
+		static uint32 cadence;
+		cadence++;
+		if((cadence & 3) == 0){ BuildNearSet(); BuildAheadSet(); }
+		if(cadence % 60 == 0){
+			static uint32 lastEvict;
+			uint32 rate = gStrEvict - lastEvict;
+			lastEvict = gStrEvict;
+			if(rate > 8 && gStreamRadius > (float)STREAM_NEAR_M) gStreamRadius *= 0.85f;
+			else if(rate == 0 && gcHeapFreeTotal() > STREAM_HEAP_FLOOR + 768*1024 && gStreamRadius < 300.0f) gStreamRadius *= 1.05f;   // B87: chunk room counts for the radius   // B59 rule (B60's regrowth flooded the heap)
+			if(gStreamRadius < (float)STREAM_NEAR_M) gStreamRadius = (float)STREAM_NEAR_M;
+		}
+		if((cadence & 7) == 0){
+			gStreamHeapFree = mallinfo().fordblks; /* B85: the floor guards the GENERAL heap; chunk room does not serve a 3K malloc */
+			// Honest budget (B51): what the streamer holds plus what the heap can
+			// still give above the floor. MakeSpaceFor then evicts the farthest
+			// models before an allocation fails, instead of the floor shedding
+			// after one did. A fixed 10MB overcommitted the heap by 1-3MB.
+			HonestBudget();   // B107: general heap above slack + chunk room, see the helper
+		}
+	}
+	// Heap emergency (B73): the reserve went out; shed hard until there is
+	// room to re-arm it, and re-arm as soon as there is.
+	if(gHeapEmergency){
+		// B114: shed to the level that ENDS the emergency (floor+512K), not
+		// 512K above it — free idles between the two, so the loop cycled.
+		for(int k = 0; k < 8 && gStreamHeapFree < STREAM_HEAP_FLOOR + 512*1024; k++){
+			if(!RemoveLeastUsedModel(0)) break;
+			gStrEvict++;
+			gStreamHeapFree = mallinfo().fordblks; /* B85: the floor guards the GENERAL heap; chunk room does not serve a 3K malloc */
+		}
+		// B105: the emergency ENDS here. gcHeapReserveArm is a stub since B78
+		// (the BSS arena replaced the reserve) and nothing ever zeroed the
+		// flag, so after the first failed malloc this loop ran every frame for
+		// the rest of the run: free idles at 0.9-1.3MB, always under the 1.5MB
+		// target, and every model beyond STREAM_KEEP_M was evicted the moment
+		// its 5 s LoadedRecently grace ended — the HD/LOD flicker.
+		if(gStreamHeapFree >= STREAM_HEAP_FLOOR + 512*1024){
+			gcHeapReserveArm();
+			printf("HEAP: emergency over, free %uK after %u events\n", (unsigned)(gStreamHeapFree/1024), (unsigned)gHeapEmergency);
+			gHeapEmergency = 0;
+		}
+	}else if(gHeapReserve == nil && gStreamHeapFree > STREAM_HEAP_FLOOR + 512*1024)   // B77: 1536K was never reached in play (free idles ~1.2MB), so the reserve never existed
+		gcHeapReserveArm();
+	// ARAM pressure (B66): TXDs stay resident at refcount 0 (TxdStore.cpp), so
+	// the texel store fills and new TXDs — the pause menu's included — fail
+	// their ARAM allocation. Drop unreferenced TXDs while under 1.5MB is left.
+	for(int k = 0; k < 4 && gxAramStoreBytes && gxAramBytes + 768*1024 > gxAramStoreBytes; k++){   // B114: margin 1536K -> 768K; the loop armed at 9.2MB while play sits at 8.7-9.4MB and churned TXDs
+		CStreamingInfo *si; bool dropped = false;
+		for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
+			int32 id = si - ms_aInfoForModel;
+			if(id >= STREAM_OFFSET_TXD && id < STREAM_OFFSET_COL &&
+			   CTxdStore::GetNumRefs(id - STREAM_OFFSET_TXD) == 0 && !IsTxdUsedByRequestedModels(id - STREAM_OFFSET_TXD) &&
+			   !LoadedRecently(id)){   // B106: 5 s grace for TXDs as for models
+				RemoveModel(id); gStrEvict++; dropped = true; break;
+			}
+		}
+		if(!dropped){
+			// Everything resident is referenced: free a far model so its TXD can go.
+			// B107: one per frame, not four — the burst was visible as LOD flips
+			// while 'blink' stayed 0 (B72 relief kept, throttled).
+			if(RemoveLeastUsedModel(0)) gStrEvict++;
+			break;
+		}
+	}
+	if(STREAM_FLOOR_ENABLED && gStreamHeapFree < STREAM_HEAP_FLOOR){
+		static uint32 lastSaid;
+		if(CTimer::GetTimeInMilliseconds() - lastSaid > 1000){
+			lastSaid = CTimer::GetTimeInMilliseconds();
+			printf("STREAM floor: free %uK, shedding\n", (unsigned)(gStreamHeapFree/1024));
+		}
+		// Re-sample after a shed so one eviction is not repeated eight times;
+		// when nothing is evictable, wait for the next sample instead of walking
+		// the loaded list every frame for nothing.
+		if(RemoveLeastUsedModel(0)){ gStrEvict++; gStreamHeapFree = mallinfo().fordblks; /* B85: the floor guards the GENERAL heap; chunk room does not serve a 3K malloc */ }
+		else gStreamHeapFree = STREAM_HEAP_FLOOR;
+	}
+#endif
 
 	if(ms_channelError != -1){
 		RetryLoadFile(ms_channelError);
@@ -545,6 +1021,14 @@ CStreaming::Update(void)
 
 	for(si = ms_endRequestedList.m_prev; si != &ms_startRequestedList; si = prev){
 		prev = si->m_prev;
+#ifdef GTA_OGC
+		int32 id = si - ms_aInfoForModel;
+		if(si->m_flags & STREAMFLAGS_PREFETCH){
+			if(id < STREAM_OFFSET_TXD ? IsAheadModel(id) :
+			   id < STREAM_OFFSET_COL && IsTxdUsedByRequestedModels(id - STREAM_OFFSET_TXD)) continue;
+			si->m_flags &= ~STREAMFLAGS_PREFETCH;
+		}
+#endif
 		if((si->m_flags & (STREAMFLAGS_KEEP_IN_MEMORY|STREAMFLAGS_PRIORITY)) == 0)
 			RemoveModel(si - ms_aInfoForModel);
 	}
@@ -805,6 +1289,66 @@ RegisterAtomicMemPtrsCB(RpAtomic *atomic, void *data)
 // its budget, evicting on every request, which shows up as the world drawn
 // from far LODs that flicker in and out even while standing still.
 static uint32 gResidentCost[NUMSTREAMINFO];
+// A load that fails (a TXD whose texel block the heap could not give, a DFF
+// the reader rejected) used to be answered with RemoveModel + ReRequestModel,
+// unconditionally. At init LoadAllRequestedModels drains the request list, so
+// one asset that fails every time keeps the loader spinning forever — the
+// loading screen that never ends (B9: one 32KB texel alloc failed after the
+// vehicle preload, then silence). Retry twice, then drop it: the world can
+// still request it again later, but the streamer no longer re-requests its
+// own failure. Reset on a successful load.
+static void
+FailedLoad(int32 streamId);
+
+void
+CStreaming::NoteModelDistance(int32 id, float dist)
+{
+	if(id < 0 || id >= MODELINFOSIZE) return;
+	uint32 frame = CTimer::GetFrameCounter();
+	uint16 d = dist >= 65000.0f ? 65000 : (uint16)dist;
+	if(gModelDistFrame[id] != frame){
+		gModelDistFrame[id] = frame;
+		gModelDist[id] = d;
+	}else if(d < gModelDist[id])
+		gModelDist[id] = d;
+}
+
+// Metres to the closest instance the renderer evaluated in the last two
+// frames; 65535 when nothing did (peds, weapons, off-scan models).
+uint32
+CStreaming::ModelDistNow(int32 id)
+{
+	if(id < 0 || id >= MODELINFOSIZE) return 65535;
+	if(IsNearModel(id)) return 0;
+	if(IsAheadModel(id)) return STREAM_KEEP_M - 1;
+	if((uint32)(CTimer::GetFrameCounter() - gModelDistFrame[id]) > 4) return 65535;
+	return gModelDist[id];
+}
+
+static void
+FailedLoad(int32 streamId)
+{
+	CStreaming::RemoveModel(streamId);
+	{
+		uint8 sec = (uint8)(CTimer::GetTimeInMillisecondsPauseMode()/1000); if(sec == 0) sec = 1;
+		if(gFailSec[streamId] && (uint8)(sec - gFailSec[streamId]) > 60) gLoadFails[streamId] = 0;   // B133: a model dropped a minute ago may try again (anim blocks 7910-7915 died at boot in b132)
+		gFailSec[streamId] = sec;
+	}
+	if(gLoadFails[streamId] < 255)
+		gLoadFails[streamId]++;
+	// B124: a model the script or a dependency is waiting for must not be
+	// dropped after three tries — the intro parked for 15 minutes on a black
+	// screen (b121/b123, docks scene) waiting for vehicles whose 45-62K
+	// geometry failed three times in a row. Each retry now runs the
+	// size-aware shed, so the fourth try has a real hole to land in.
+	// B131: 24 only for what the SCRIPT waits on; b129 spent 12 minutes at the
+	// docks retrying six DEPENDENCY zone vehicles 24 times each.
+	uint8 limit = (CStreaming::ms_aInfoForModel[streamId].m_flags & STREAMFLAGS_SCRIPTOWNED) || streamId >= STREAM_OFFSET_COL ? 24 : 3;   // B146: collision/anim blocks keep trying (b132: col 2K = white screen)
+	if(gLoadFails[streamId] < limit)
+		CStreaming::ReRequestModel(streamId);
+	else if(gLoadFails[streamId] == limit)
+		printf("streaming: %d failed to load %d times (%s), not retrying\n", streamId, limit, gFailWhy);
+}
 
 // Texture bytes the resident-cost measurement cannot see.
 //
@@ -821,6 +1365,12 @@ static uint32 gResidentCost[NUMSTREAMINFO];
 // Charging only what falls OUTSIDE the window is exact by construction: no
 // double counting, and no guessing at a scale factor.
 bool gStreamMeasuring;
+
+struct StreamMeasurementScope {
+	bool previous;
+	StreamMeasurementScope() : previous(gStreamMeasuring) { gStreamMeasuring = true; }
+	~StreamMeasurementScope() { gStreamMeasuring = previous; }
+};
 
 // The ARAM cache sizes its slots from this: the largest single request the
 // streamer can make, which is what ms_streamingBufferSize already is.
@@ -853,6 +1403,8 @@ CStreamingMeasuring(void)
 
 // Reported per heartbeat interval, see MakeSpaceFor for what the pair means.
 uint32 gStrEvict, gStrLoad;
+extern "C" { uint32 gLoadAllN; }   // DIAG b176: blocking LoadAllRequestedModels calls
+extern "C" void gcHeapCheck(uint32 tag, uint32 arg);   // gamecube.cpp, dvd:/heapcheck.txt
 
 // mallinfo's uordblks underflows on a 24MB console (it reports ~305MB), but
 // arena minus fordblks is sound: total heap obtained, less what is free.
@@ -861,7 +1413,9 @@ OgcHeapResident(void)
 {
 	struct mallinfo mi = mallinfo();
 	size_t arena = (size_t)mi.arena;
-	size_t freeb = (size_t)mi.fordblks;
+	// B87: general holes plus at most 768K of chunk room. All of it (B85) let str grow until 3K mallocs failed; none of it (B86) evicted the near set forever (near 0/13, evict +500/min).
+	size_t chunkFree = gcHeapFreeTotal() - (size_t)mi.fordblks;
+	size_t freeb = (size_t)mi.fordblks + (chunkFree < 768*1024 ? chunkFree : 768*1024);
 	return arena > freeb ? arena - freeb : 0;
 }
 
@@ -880,6 +1434,20 @@ StreamedSize(int32 streamId)
 bool
 CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 {
+#ifdef GTA_OGC
+	// B150: while a SCRIPTOWNED model converts, the emergency arena accepts any size.
+	struct EssentialScope { EssentialScope(bool on){ gcEssentialLoad = on; } ~EssentialScope(){ gcEssentialLoad = 0; } } essential((ms_aInfoForModel[streamId].m_flags & STREAMFLAGS_SCRIPTOWNED) != 0);
+#endif
+#ifdef GTA_OGC
+	if(gcBootDone() && streamId < STREAM_OFFSET_TXD &&
+	   !(ms_aInfoForModel[streamId].m_flags & (STREAMFLAGS_SCRIPTOWNED | STREAMFLAGS_LOD)) &&
+	   mallinfo().fordblks < STREAM_HEAP_FLOOR){
+		static uint32 said; if(said++ < 30) printf("STREAM defer %d: heap %uK free\n", streamId, (unsigned)(mallinfo().fordblks/1024));
+		RemoveModel(streamId);
+		return false;
+	}
+#endif
+
 	RwMemory mem;
 	RwStream *stream;
 	int cdsize;
@@ -889,7 +1457,7 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 #ifdef GTA_OGC
 	size_t residentBefore = OgcHeapResident();
-	gStreamMeasuring = true;
+	StreamMeasurementScope measurement;
 	gStrLoad++;
 #endif
 
@@ -913,8 +1481,13 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 		if(CTxdStore::GetSlot(mi->GetTxdSlot())->texDict == nil ||
 #endif
 		   animId != -1 && !CAnimManager::GetAnimationBlock(animId)->isLoaded){
-			RemoveModel(streamId);
-			ReRequestModel(streamId);
+			{
+				static char why[48];
+				int ts = mi->GetTxdSlot();
+				snprintf(why, sizeof(why), "txd %d state %d anim %d", ts, ms_aInfoForModel[ts + STREAM_OFFSET_TXD].m_loadState, animId);
+				gFailWhy = why;
+			}
+			FailedLoad(streamId);
 			RwStreamClose(stream, &mem);
 			return false;
 		}
@@ -937,6 +1510,8 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 			success = CFileLoader::StartLoadClumpFile(stream, streamId);
 			if(success)
 				ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_STARTED;
+			else
+				CModelInfo::GetModelInfo(streamId)->RemoveRef();   // the ref above belongs to the second part, which never comes
 		}else{
 			success = CFileLoader::LoadClumpFile(stream, streamId);
 #ifdef USE_CUSTOM_ALLOCATOR
@@ -958,8 +1533,8 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 		if(!success){
 			debug("Failed to load %s\n", CModelInfo::GetModelInfo(streamId)->GetModelName());
-			RemoveModel(streamId);
-			ReRequestModel(streamId);
+			gFailWhy = "model load";
+			FailedLoad(streamId);
 			RwStreamClose(stream, &mem);
 			return false;
 		}
@@ -973,6 +1548,17 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 		}
 
 		PUSH_MEMID(MEMID_STREAM_TEXUTRES);
+#ifdef GTA_OGC
+		if(cdsize > 2*ms_streamingBufferSize){
+			// bigger than the staging pair: DVD -> pair -> ARAM, see CdPullStream
+			static CdPullStream pull;
+			pull.init((uint8*)ms_pStreamingBuffer[0], (uint32)ms_streamingBufferSize*2*CDSTREAM_SECTOR_SIZE,
+			    (uint8*)buf, gPullCd, (uint32)cdsize*CDSTREAM_SECTOR_SIZE);
+			success = CTxdStore::LoadTxd(streamId - STREAM_OFFSET_TXD, &pull);
+			printf("STREAM pull: txd %d %s %uK %s in %ums\n", streamId - STREAM_OFFSET_TXD, CTxdStore::GetTxdName(streamId - STREAM_OFFSET_TXD), (unsigned)cdsize*2, success ? "ok" : "FAILED",
+			    (unsigned)(CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond() - startTime));
+		}else
+#endif
 		if(ms_bLoadingBigModel || cdsize > 200){
 			success = CTxdStore::StartLoadTxd(streamId - STREAM_OFFSET_TXD, stream);
 			if(success)
@@ -984,8 +1570,8 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 		if(!success){
 			debug("Failed to load %s.txd\n", CTxdStore::GetTxdName(streamId - STREAM_OFFSET_TXD));
-			RemoveModel(streamId);
-			ReRequestModel(streamId);
+			gFailWhy = "txd load";
+			FailedLoad(streamId);
 			RwStreamClose(stream, &mem);
 			return false;
 		}
@@ -995,8 +1581,7 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 		POP_MEMID();
 		if(!success){
 			debug("Failed to load %s.col\n", CColStore::GetColName(streamId - STREAM_OFFSET_COL));
-			RemoveModel(streamId);
-			ReRequestModel(streamId);
+			FailedLoad(streamId);
 			RwStreamClose(stream, &mem);
 			return false;
 		}
@@ -1015,8 +1600,7 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 		POP_MEMID();
 		if(!success){
 			debug("Failed to load animation block %d\n", streamId - STREAM_OFFSET_ANIM);
-			RemoveModel(streamId);
-			ReRequestModel(streamId);
+			FailedLoad(streamId);
 			RwStreamClose(stream, &mem);
 			return false;
 		}
@@ -1034,17 +1618,6 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 			if(mi->IsSimple() && !smi->m_isBigBuilding){
 				if(ms_aInfoForModel[streamId].m_flags & STREAMFLAGS_NOFADE)
 					smi->m_alpha = 255;
-#ifdef GTA_OGC
-				// Under the 24MB budget the streamer keeps evicting models
-				// still in view; every reload restarted the fade, and against
-				// a night sky a fade-in reads as the object blinking DARK for
-				// half a second — "textura piscando escuro, principalmente as
-				// distantes". A model that had an on-screen instance in the
-				// last ~2s (m_alphaFrame, stamped by IncreaseAlpha) snaps
-				// straight back to opaque; only genuinely new arrivals fade.
-				else if((uint16)((uint16)CTimer::GetFrameCounter() - smi->m_alphaFrame) < 120)
-					smi->m_alpha = 255;
-#endif
 				else
 					smi->m_alpha = 0;
 			}
@@ -1065,8 +1638,7 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 		ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_LOADED;
 #ifdef GTA_OGC
 		{
-			gStreamMeasuring = false;
-		size_t after = OgcHeapResident();
+			size_t after = OgcHeapResident();
 			uint32 cost = after > residentBefore ?
 			    (uint32)(after - residentBefore) : 0;
 			// Never charge zero. A shared TXD that was already resident
@@ -1075,9 +1647,13 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 			// ms_memoryUsed ever falling, and clears the entire world before
 			// giving up. Opening the pause menu was enough to trigger it.
 			// Floor at the cd size so every eviction makes progress.
-			uint32 floorCost = StreamedSize(streamId);
+			// A TXD's texels live in ARAM: charge it the cd size and MakeSpaceFor
+			// evicts real geometry to admit a file that costs MEM1 nothing.
+			uint32 floorCost = streamId >= STREAM_OFFSET_TXD && streamId < STREAM_OFFSET_COL ? 4*1024 : StreamedSize(streamId);
 			gResidentCost[streamId] = cost > floorCost ? cost : floorCost;
 			ms_memoryUsed += gResidentCost[streamId];
+			StampLoaded(streamId);
+			gLoadFails[streamId] = 0;
 		}
 #elif !defined(USE_CUSTOM_ALLOCATOR)
 		ms_memoryUsed += StreamedSize(streamId);
@@ -1103,7 +1679,7 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 
 #ifdef GTA_OGC
 	size_t residentBefore = OgcHeapResident();
-	gStreamMeasuring = true;
+	StreamMeasurementScope measurement;
 	gStrLoad++;
 #endif
 
@@ -1154,11 +1730,10 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 	ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_LOADED;
 #ifdef GTA_OGC
 	{
-		gStreamMeasuring = false;
 		size_t after = OgcHeapResident();
 		uint32 cost = after > residentBefore ?
 		    (uint32)(after - residentBefore) : 0;
-		uint32 floorCost = StreamedSize(streamId);
+		uint32 floorCost = streamId >= STREAM_OFFSET_TXD && streamId < STREAM_OFFSET_COL ? 4*1024 : StreamedSize(streamId);
 		gResidentCost[streamId] = cost > floorCost ? cost : floorCost;
 		ms_memoryUsed += gResidentCost[streamId];
 	}
@@ -1167,8 +1742,7 @@ CStreaming::FinishLoadingLargeFile(int8 *buf, int32 streamId)
 #endif
 
 	if(!success){
-		RemoveModel(streamId);
-		ReRequestModel(streamId);
+		FailedLoad(streamId);
 		UpdateMemoryUsed();
 		return false;
 	}
@@ -1188,12 +1762,43 @@ CStreaming::RequestModel(int32 id, int32 flags)
 {
 	CSimpleModelInfo *mi;
 
+#ifdef GTA_OGC
+	if(id < STREAM_OFFSET_TXD){
+		mi = (CSimpleModelInfo*)CModelInfo::GetModelInfo(id);
+		if(mi && mi->IsSimple() && mi->m_isBigBuilding)
+			flags |= STREAMFLAGS_LOD;
+	}
+	if(flags & STREAMFLAGS_LOD)
+		flags |= STREAMFLAGS_PRIORITY;
+	// B145: admission control instead of read-then-defer. b144 read every
+	// deferred model three times per pass and the renderer re-requested it
+	// every frame: a 100 s scene load with the DVD churning. Below the floor,
+	// or inside a model's fail cooldown, an ordinary request is simply not
+	// queued; the script's own requests always are.
+	if(gcBootDone() && id < STREAM_OFFSET_TXD && ms_aInfoForModel[id].m_loadState == STREAMSTATE_NOTLOADED && !(flags & STREAMFLAGS_SCRIPTOWNED) && !(ms_aInfoForModel[id].m_flags & STREAMFLAGS_SCRIPTOWNED)){   // B146: MODELS only — b145 deferred the zone's collision block and the car fell through the world
+		uint8 sec = (uint8)(CTimer::GetTimeInMillisecondsPauseMode()/1000); if(sec == 0) sec = 1;
+		if(gLoadFails[id] >= 3 && gFailSec[id] && (uint8)(sec - gFailSec[id]) <= 60)
+			return;
+		if(mallinfo().fordblks < STREAM_HEAP_FLOOR && !(flags & STREAMFLAGS_LOD))
+			return;
+	}
+#endif
 	if(ms_aInfoForModel[id].m_loadState == STREAMSTATE_INQUEUE){
 		// updgrade to priority
 		if(flags & STREAMFLAGS_PRIORITY && !ms_aInfoForModel[id].IsPriority()){
 			ms_numPriorityRequests++;
 			ms_aInfoForModel[id].m_flags |= STREAMFLAGS_PRIORITY;
 		}
+#ifdef GTA_OGC
+		if(id < STREAM_OFFSET_TXD && (flags & (STREAMFLAGS_PRIORITY | STREAMFLAGS_LOD))){
+			CBaseModelInfo *model = CModelInfo::GetModelInfo(id);
+			int dependencyFlags = flags & (STREAMFLAGS_PRIORITY | STREAMFLAGS_LOD);
+			ReRequestModel(model->GetTxdSlot() + STREAM_OFFSET_TXD, dependencyFlags);
+			int anim = model->GetAnimFileIndex();
+			if(anim != -1)
+				ReRequestModel(anim + STREAM_OFFSET_ANIM, dependencyFlags);
+		}
+#endif
 	}else if(ms_aInfoForModel[id].m_loadState != STREAMSTATE_NOTLOADED){
 		flags &= ~STREAMFLAGS_PRIORITY;
 	}
@@ -1223,7 +1828,7 @@ CStreaming::RequestModel(int32 id, int32 flags)
 				RequestTxd(mi->GetTxdSlot(), flags);
 				int anim = mi->GetAnimFileIndex();
 				if(anim != -1)
-					RequestAnim(anim, STREAMFLAGS_DEPENDENCY);
+					RequestAnim(anim, STREAMFLAGS_DEPENDENCY | (flags & (STREAMFLAGS_PRIORITY | STREAMFLAGS_LOD)));
 			}
 			ms_aInfoForModel[id].AddToList(&ms_startRequestedList);
 			ms_numModelsRequested++;
@@ -1431,7 +2036,7 @@ CStreaming::RequestSpecialModel(int32 modelId, const char *modelName, int32 flag
 	}
 	if(!CGeneral::faststrcmp(mi->GetModelName(), modelName)){
 		// Already have the correct name, just request it
-		RequestModel(modelId, flags);
+		RequestModel(modelId, flags | STREAMFLAGS_PRIORITY);   // B131: the script WAITs on these — ahead of the zone vehicles
 		return;
 	}
 
@@ -1489,7 +2094,22 @@ CStreaming::RequestSpecialChar(int32 charId, const char *modelName, int32 flags)
 bool
 CStreaming::HasSpecialCharLoaded(int32 id)
 {
-	return HasModelLoaded(id + MI_SPECIAL01);
+	// B131 diagnostic: the intro's WAIT on six special characters parked
+	// b121-b129 at the docks; say what state the missing one is in.
+	if(!HasModelLoaded(id + MI_SPECIAL01)){
+		gSpecialWaitFrame = CTimer::GetFrameCounter(); if(gSpecialWaitFrame == 0) gSpecialWaitFrame = 1;   // B142: the sweeps relax while this is fresh
+		static uint32 lastMs; uint32 now = CTimer::GetTimeInMillisecondsPauseMode();
+		// B138: the B137 self-heal (RequestModel from here) froze b137 in
+		// CdStreamSync at the office scene — never request from a poll.
+		if(now - lastMs > 5000){
+			lastMs = now;
+			int32 m = id + MI_SPECIAL01;
+			printf("STREAM specialchar %d model %d state %d flags %x fails %d req %d\n", id, m, (int)ms_aInfoForModel[m].m_loadState,
+			    (unsigned)ms_aInfoForModel[m].m_flags, (int)gLoadFails[m], (int)(ms_aInfoForModel[m].m_next != nil));
+		}
+		return false;
+	}
+	return true;
 }
 
 void
@@ -1515,6 +2135,20 @@ CStreaming::RemoveModel(int32 id)
 
 	if(ms_aInfoForModel[id].m_loadState == STREAMSTATE_NOTLOADED)
 		return;
+#ifdef GTA_OGC
+	if(id < MODELINFOSIZE){ uint8 s = (uint8)(CTimer::GetTimeInMilliseconds()/1000); gEvictSec[id] = s ? s : 1; }
+	// B53 tracer: who evicts a loaded TXD (the 710K pull-every-500ms loop).
+	if(id >= STREAM_OFFSET_TXD && id < STREAM_OFFSET_COL && ms_aInfoForModel[id].m_loadState == STREAMSTATE_LOADED){
+		static uint32 lastMs;
+		uint32 now = CTimer::GetTimeInMilliseconds();
+		if(now - lastMs > 250){
+			lastMs = now;
+			printf("STREAM rm txd %d %s refs %d req %d by %p\n", id - STREAM_OFFSET_TXD, CTxdStore::GetTxdName(id - STREAM_OFFSET_TXD),
+			    CTxdStore::GetNumRefs(id - STREAM_OFFSET_TXD), IsTxdUsedByRequestedModels(id - STREAM_OFFSET_TXD),
+			    __builtin_return_address(0));
+		}
+	}
+#endif
 
 	if(ms_aInfoForModel[id].m_loadState == STREAMSTATE_LOADED){
 		if(id < STREAM_OFFSET_TXD)
@@ -1795,24 +2429,231 @@ found:
 	return true;
 }
 
-bool
-CStreaming::RemoveLeastUsedModel(uint32 excludeMask)
+// B77: a malloc failed with free memory in the arena (fragmentation): B76 died in
+// rw::Skin::init with 1.27MB free. mustmalloc exits on the first NULL, so this
+// runs INSIDE the failing malloc: drop unreferenced loaded models until a block
+// of the wanted size exists, then the caller retries. Only the main thread may
+// touch the streaming tables.
+#ifdef GTA_OGC
+#include <gccore.h>
+#include <ogc/lwp_watchdog.h>
+#endif
+extern "C" void *__real_malloc(size_t);
+extern "C" void *gcBigAlloc(size_t); extern "C" void gcBigFree(void*); extern "C" int gcBigContains(const void*);
+extern "C" lwp_t gMainLwp;   // gamecube.cpp main(): only the main thread may touch the streaming tables
+extern "C" int
+gcStreamEmergencyShed(unsigned need)
 {
+	static bool8 inShed;
+	if(inShed) return 0;
+	// B108: before CStreaming::Init the lists are all-zero; walking them from a
+	// failed malloc inside CFileLoader::LoadLevel spun RemoveLeastUsedModel
+	// forever (PC at 'lwz r30,4(r30)', loading bar frozen at half).
+	if(CStreaming::ms_endLoadedList.m_prev == nil){ static int said; if(said++ < 3) printf("HEAP: shed refused before streaming init (%u bytes)\n", need); return 0; }
+	if(LWP_GetSelf() != gMainLwp){ printf("HEAP: shed refused off the main thread (%uK)\n", need/1024); return 0; }
+	inShed = TRUE;
+	int dropped = 0;
+	bool ready = false;
+	int cap = need >= 32*1024 ? 24 : 4;   // B114/B115: 48 stripped whole blocks for a 3K request; a 700K mesh still needs room
+	// B177: LOD shells and their TXDs are what the city is drawn with while a
+	// detail model is missing. The LRU fallback in RemoveLeastUsedModel took
+	// them for ordinary detail loads (b171/b172: 6 LODs among 21 victims, and
+	// the 102K od_northstar block still failed), leaving neither. Only what the
+	// script is waiting for may spend them.
+	uint32 keep = gcEssentialLoad ? 0 : STREAMFLAGS_LOD;
+	for(int k = 0; k <= cap; k++){
+		void *probe = need >= 1024 ? gcBigAlloc(need) : __real_malloc(need);
+		if(probe == NULL && need >= 1024) probe = __real_malloc(need);
+		if(probe){
+			if(gcBigContains(probe)) gcBigFree(probe); else free(probe);
+			ready = true;
+			break;
+		}
+		if(k == cap) break;
+		if(!CStreaming::RemoveLeastUsedModel(keep, need) && !CStreaming::RemoveLeastUsedModel(keep, need, true)){   // B140: second pass ignores LoadedRecently
+			// B149: nothing unreferenced — every building near the scene still
+			// holds its RW object (refs > 0). Drop the RW objects behind the
+			// camera the way the budget sweep would, then look again. b147:
+			// prop 295 (81K) failed 24x with 'shed 0 models' and 2.2MB free.
+			CStreaming::DeleteRwObjectsBehindCamera(CStreaming::ms_memoryUsed > 2*need ? CStreaming::ms_memoryUsed - 2*need : 0);
+			if(!CStreaming::RemoveLeastUsedModel(keep, need, true)) break;
+		}
+		dropped++;
+	}
+	static u64 lastSaid; static unsigned muted;
+	if(dropped || ticks_to_millisecs(gettime() - lastSaid) > 2000){
+		printf("HEAP: emergency shed %d models for %uK, free now %uK (%u muted)\n", dropped, need/1024, (unsigned)(gcHeapFreeTotal()/1024), muted);
+		lastSaid = gettime(); muted = 0;
+	}else muted++;
+	inShed = FALSE;
+	return ready;
+}
+
+// B88 census: what the streaming bytes are (buildings, clumps, vehicles, peds, txds, other).
+extern "C" void gcStreamClassCensus(unsigned out[6])
+{
+	for(int k = 0; k < 6; k++) out[k] = 0;
+	for(int32 i = 0; i < NUMSTREAMINFO; i++){
+		if(CStreaming::ms_aInfoForModel[i].m_loadState != STREAMSTATE_LOADED) continue;
+		uint32 pos, size;
+		if(!CStreaming::ms_aInfoForModel[i].GetCdPosnAndSize(pos, size)) continue;
+		unsigned bytes = size*CDSTREAM_SECTOR_SIZE;
+		int k = 5;
+		if(i < STREAM_OFFSET_TXD){
+			CBaseModelInfo *mi = CModelInfo::GetModelInfo(i);
+			if(mi == nil) continue;
+			switch(mi->GetModelType()){
+			case MITYPE_SIMPLE: case MITYPE_TIME: k = 0; break;
+			case MITYPE_CLUMP: case MITYPE_WEAPON: k = 1; break;
+			case MITYPE_VEHICLE: k = 2; break;
+			case MITYPE_PED: k = 3; break;
+			}
+		}else if(i < STREAM_OFFSET_COL) k = 4;
+		out[k] += bytes;
+	}
+}
+
+// B142: the intro's special-character WAIT runs before LOAD_CUTSCENE, so the
+// cutscene test alone (B141) never fired; b140/b141 parked at the office with
+// 214K free. While the script polls HasSpecialCharLoaded (stamped below) or a
+// cutscene is up, the world outside 30 m may go and just-loaded models too.
+static inline bool StreamSceneHold(void)
+{
+	return CCutsceneMgr::IsCutsceneProcessing() || CCutsceneMgr::IsRunning() ||
+	       (gSpecialWaitFrame != 0 && (uint32)(CTimer::GetFrameCounter() - gSpecialWaitFrame) < 120);
+}
+static inline uint32 StreamKeepM(void) { return StreamSceneHold() ? 30 : STREAM_KEEP_M; }
+
+// B178: a model stamped this frame closer than its own draw distance (plus
+// the renderer's fade and request margins) is on screen, or will be asked for
+// again the moment it goes. Evicting it bought one model's room for another
+// visible model: b177f evicted nbw_bush01 at 210-226 m and wshnrthroad02 at
+// 94 m, each three or four times in five minutes — every copy vanished and
+// faded back in (m_alpha is per model), the blinking bushes and asphalt.
+// Only the script's own loads, a scene being set up and the heap floor may
+// spend them; anything else fails its load and stays at LOD a little longer.
+static bool gEvictShownOK;
+static bool
+ModelShown(int32 id, uint32 d)
+{
+	if(d == 65535 || id < 0 || id >= MODELINFOSIZE)
+		return false;
+	CBaseModelInfo *mi = CModelInfo::GetModelInfo(id);
+	float reach = mi->IsSimple() ? ((CSimpleModelInfo*)mi)->GetLargestLodDistance() : 150.0f;
+	return (float)d < reach + FADE_DISTANCE + STREAM_DISTANCE;
+}
+
+// B148: the docks script also waits on HAS_MODEL_LOADED 295-298 (cutscene
+// props) after the special characters; b147 parked there with no diagnostic.
+// Called from the script command when the model is not loaded.
+extern "C" void gcScriptWaitDiag(int32 m)
+{
+	if(m < 0 || m >= NUMSTREAMINFO) return;
+	gSpecialWaitFrame = CTimer::GetFrameCounter(); if(gSpecialWaitFrame == 0) gSpecialWaitFrame = 1;
+	static uint32 lastMs; uint32 now = CTimer::GetTimeInMillisecondsPauseMode();
+	if(now - lastMs > 5000){
+		lastMs = now;
+		printf("STREAM scriptwait model %d state %d flags %x fails %d req %d\n", m, (int)CStreaming::ms_aInfoForModel[m].m_loadState,
+		    (unsigned)CStreaming::ms_aInfoForModel[m].m_flags, (int)gLoadFails[m], (int)(CStreaming::ms_aInfoForModel[m].m_next != nil));
+	}
+}
+
+bool
+CStreaming::RemoveLeastUsedModel(uint32 excludeMask, uint32 minBytes, bool ignoreRecent)
+{
+#ifdef GTA_OGC
+	// B125: never a script-owned or DONT_REMOVE model. Every caller here
+	// passes 0, so the emergency shed evicted the intro's special characters
+	// (109-114, unstamped = "farthest") right after LOAD_ALL_MODELS_NOW; nobody
+	// re-requests them and the script's HAS_SPECIAL_CHARACTER_LOADED wait
+	// never ends — the black "Vice City Docks" screen (b121/b123, 15+ min).
+	excludeMask |= STREAMFLAGS_CANT_REMOVE | STREAMFLAGS_20;
+#endif
 	CStreamingInfo *si;
 	int streamId;
+
+#ifdef GTA_OGC
+	// Farthest first, never the near set. The LRU walk below evicted whatever
+	// had lost its RW objects behind the camera — near buildings included —
+	// and reloaded them on the next turn: the load/evict loop that blinked.
+	{
+		// B124: the emergency shed asks for a hole of `minBytes`. Evicting 14
+		// far peds and plants (b123, docks scene) freed 1.4MB in crumbs and no
+		// 45K hole; a single far model at least that big frees one. Prefer the
+		// farthest such model, fall back to plain farthest-first.
+		// B141: a cutscene is a fixed camera; while one is being set up or
+		// running, the outdoor near set that LoadScene pulled in may go —
+		// keep 30 m, not 80, and do not spare just-loaded models. b140 parked
+		// at the office scene with 214K free, chunks full and 'shed 0 models'.
+		bool cut = StreamSceneHold();
+		uint32 keepM = StreamKeepM();
+		bool shownOK = cut || gEvictShownOK || gcEssentialLoad;   // B178
+		if(cut || gAheadDistance != 0) ignoreRecent = true;
+		int bestId = -1; uint32 bestDist = 0;
+		int bigId = -1; uint32 bigDist = 0;
+		for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
+			if(si->m_flags & excludeMask)
+				continue;
+			streamId = si - ms_aInfoForModel;
+			if(streamId >= STREAM_OFFSET_TXD)
+				continue;
+			if(CModelInfo::GetModelInfo(streamId)->GetNumRefs() != 0)
+				continue;
+			if(!ignoreRecent && LoadedRecently(streamId))   // B140: the emergency shed's second pass may take a just-loaded far model (b139: OOM at the hotel with 'shed 0 models', everything recent)
+				continue;
+			// B114: never a LOD shell in the farthest-first pass. Shells live only
+			// in ms_bigBuildingsList and were never distance-stamped, so they read
+			// 65535 = "farthest" and went first (282 of 300 traced evictions,
+			// 121 named LOD*): no HD past 80 m and no shell = an invisible
+			// building, shell reloads = LOD, car reaches 80 m = HD. The shells
+			// are the far fallback; the stock LRU pass below may still take one
+			// when nothing else is left.
+			CBaseModelInfo *model = CModelInfo::GetModelInfo(streamId);
+			if(model->IsSimple() && ((CSimpleModelInfo*)model)->m_isBigBuilding)
+				continue;
+			uint32 d = ModelDistNow(streamId);
+			if(d < keepM)   // B93: the renderer keeps requesting loaded models to 90m (B88); evicting inside that ring was the standing-still ping-pong (evict +450/min, blink +8/min)
+				continue;
+			if(!shownOK && ModelShown(streamId, d))   // B178
+				continue;
+			if(d > bestDist){ bestDist = d; bestId = streamId; }
+			if(minBytes){
+				uint32 posn, size;
+				if(ms_aInfoForModel[streamId].GetCdPosnAndSize(posn, size) && size*CDSTREAM_SECTOR_SIZE >= minBytes && d > bigDist){ bigDist = d; bigId = streamId; }
+			}
+		}
+		if(bigId >= 0) bestId = bigId;
+		if(bestId >= 0){
+			TraceEvict(bestId);
+			RemoveModel(bestId);
+			return true;
+		}
+	}
+#endif
 
 	for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
 		if(si->m_flags & excludeMask)
 			continue;
 		streamId = si - ms_aInfoForModel;
 		if(streamId < STREAM_OFFSET_TXD){
+#ifdef GTA_OGC
+			if(ModelDistNow(streamId) < STREAM_KEEP_M || LoadedRecently(streamId))
+				continue;
+			if(!StreamSceneHold() && !gEvictShownOK && !gcEssentialLoad && ModelShown(streamId, ModelDistNow(streamId)))   // B178
+				continue;
+#endif
 			if (CModelInfo::GetModelInfo(streamId)->GetNumRefs() == 0) {
+				TraceEvict(streamId);
 				RemoveModel(streamId);
 				return true;
 			}
 		}else if(streamId >= STREAM_OFFSET_TXD && streamId < STREAM_OFFSET_COL){
 			if(CTxdStore::GetNumRefs(streamId - STREAM_OFFSET_TXD) == 0 &&
-			   !IsTxdUsedByRequestedModels(streamId - STREAM_OFFSET_TXD)){
+			   !IsTxdUsedByRequestedModels(streamId - STREAM_OFFSET_TXD)
+#ifdef GTA_OGC
+			   && !LoadedRecently(streamId)   // B106
+#endif
+			   ){
 				RemoveModel(streamId);
 				return true;
 			}
@@ -2439,10 +3280,14 @@ int32
 CStreaming::GetNextFileOnCd(int32 lastPosn, bool priority)
 {
 	CStreamingInfo *si, *next;
+	bool dependenciesChanged = false;
 	int streamId;
 	uint32 posn, size;
 	int streamIdFirst, streamIdNext;
 	uint32 posnFirst, posnNext;
+#ifdef GTA_OGC
+	bool lodPass = HasPendingLods();
+#endif
 
 	streamIdFirst = -1;
 	streamIdNext = -1;
@@ -2453,6 +3298,10 @@ CStreaming::GetNextFileOnCd(int32 lastPosn, bool priority)
 		next = si->m_next;
 		streamId = si - ms_aInfoForModel;
 
+#ifdef GTA_OGC
+		if(lodPass && !LodPassAllows(streamId))
+			continue;
+#endif
 		// only priority requests if there are any
 		if(priority && ms_numPriorityRequests != 0 && !si->IsPriority())
 			continue;
@@ -2461,12 +3310,18 @@ CStreaming::GetNextFileOnCd(int32 lastPosn, bool priority)
 		if(streamId < STREAM_OFFSET_TXD){
 			int txdId = CModelInfo::GetModelInfo(streamId)->GetTxdSlot();
 			if(TxdNotLoaded(txdId)){
-				ReRequestTxd(txdId);
+				CStreamingInfo &dependency = ms_aInfoForModel[txdId + STREAM_OFFSET_TXD];
+				int state = dependency.m_loadState, flags = dependency.m_flags;
+				ReRequestModel(txdId + STREAM_OFFSET_TXD, si->m_flags & (STREAMFLAGS_PRIORITY | STREAMFLAGS_LOD));
+				dependenciesChanged |= state != dependency.m_loadState || flags != dependency.m_flags;
 				continue;
 			}
 			int animId = CModelInfo::GetModelInfo(streamId)->GetAnimFileIndex();
 			if(AnimNotLoaded(animId)){
-				ReRequestAnim(animId);
+				CStreamingInfo &dependency = ms_aInfoForModel[animId + STREAM_OFFSET_ANIM];
+				int state = dependency.m_loadState, flags = dependency.m_flags;
+				ReRequestModel(animId + STREAM_OFFSET_ANIM, si->m_flags & (STREAMFLAGS_PRIORITY | STREAMFLAGS_LOD));
+				dependenciesChanged |= state != dependency.m_loadState || flags != dependency.m_flags;
 				continue;
 			}
 		}else if(streamId >= STREAM_OFFSET_ANIM && CCutsceneMgr::IsCutsceneProcessing())
@@ -2491,10 +3346,17 @@ CStreaming::GetNextFileOnCd(int32 lastPosn, bool priority)
 		}
 	}
 
+	if(dependenciesChanged)
+		return GetNextFileOnCd(lastPosn, priority);
+
 	// wrap around
 	if(streamIdNext == -1)
 		streamIdNext = streamIdFirst;
 
+#ifdef GTA_OGC
+	if(streamIdNext == -1 && lodPass)
+		return HasPendingLods() ? -1 : GetNextFileOnCd(lastPosn, priority);
+#endif
 	if(streamIdNext == -1 && ms_numPriorityRequests != 0){
 		// try non-priority files
 		ms_numPriorityRequests = 0;
@@ -2556,13 +3418,38 @@ CStreaming::RequestModelStream(int32 ch)
 	}
 
 	// Load up to 4 adjacent files
+#ifdef GTA_OGC
+	bool lodPass = HasPendingLods();
+#endif
 	haveBigFile = 0;
 	havePed = 0;
 	totalSize = 0;
 	for(i = 0; i < 4; i++){
+#ifdef GTA_OGC
+		// B177: a neighbour nobody asked for used to end the batch, so the next
+		// requested file 20K further on became its own command: a seek on the
+		// drive (35-85 ms plus up to a 35 ms rotation). Reading through up to
+		// STREAM_GAP_SECTORS of unrequested files is ~40 ms of transfer into a
+		// buffer we already own; the bytes are simply not converted.
+		enum { STREAM_GAP_SECTORS = 64 };   // 128K; break-even against a short seek is ~180K
+		if(i > 0 && streamId != -1 && ms_aInfoForModel[streamId].m_loadState != STREAMSTATE_INQUEUE){
+			int32 id = streamId;
+			uint32 gap = 0, gapPosn, gapSize;
+			while(id != -1 && ms_aInfoForModel[id].m_loadState != STREAMSTATE_INQUEUE &&
+			      ms_aInfoForModel[id].GetCdPosnAndSize(gapPosn, gapSize) &&
+			      (gap += gapSize) <= STREAM_GAP_SECTORS)
+				id = ms_aInfoForModel[id].m_nextID;
+			if(id != -1 && gap <= STREAM_GAP_SECTORS)
+				streamId = id;
+		}
+#endif
 		// no more files we can read
 		if(streamId == -1 || ms_aInfoForModel[streamId].m_loadState != STREAMSTATE_INQUEUE)
 			break;
+#ifdef GTA_OGC
+		if(lodPass && !LodPassAllows(streamId))
+			break;
+#endif
 
 		// also stop at non-priority files
 		ms_aInfoForModel[streamId].GetCdPosnAndSize(unused, size);
@@ -2582,6 +3469,16 @@ CStreaming::RequestModelStream(int32 ch)
 		}
 
 		// Now add the file
+#ifdef GTA_OGC
+		// B177: offsets are disc positions from the first file, so a gap read
+		// through above lands every file where ProcessLoadingChannel looks.
+		int32 at = (int32)(unused - posn);
+		if(i > 0 && (unused < posn || at < totalSize || at + (int32)size > ms_streamingBufferSize))
+			break;
+		ms_channel[ch].streamIds[i] = streamId;
+		ms_channel[ch].offsets[i] = at;
+		totalSize = at + size;
+#else
 		ms_channel[ch].streamIds[i] = streamId;
 		ms_channel[ch].offsets[i] = totalSize;
 		totalSize += size;
@@ -2591,6 +3488,7 @@ CStreaming::RequestModelStream(int32 ch)
 			totalSize -= size;
 			break;
 		}
+#endif
 		if(streamId < STREAM_OFFSET_TXD){
 			if (CModelInfo::GetModelInfo(streamId)->GetModelType() == MITYPE_PED)
 				havePed = 1;
@@ -2612,6 +3510,10 @@ CStreaming::RequestModelStream(int32 ch)
 		ms_channel[ch].streamIds[i] = -1;
 	// Now read the data
 	assert(!(ms_bLoadingBigModel && ch == 1));	// this would clobber the buffer
+#ifdef GTA_OGC
+	if(totalSize > 2*ms_streamingBufferSize)
+		totalSize = 2*ms_streamingBufferSize;   // the rest streams through the pair, see CdPullStream
+#endif
 	if(CdStreamRead(ch, ms_pStreamingBuffer[ch], imgOffset+posn, totalSize) == STREAM_NONE)
 		debug("FUCKFUCKFUCK\n");
 	ms_channel[ch].state = CHANNELSTATE_READING;
@@ -2663,9 +3565,13 @@ CStreaming::ProcessLoadingChannel(int32 ch)
 				else if(CTxdStore::GetNumRefs(CModelInfo::GetModelInfo(id)->GetTxdSlot()) == 0)
 					RemoveTxd(CModelInfo::GetModelInfo(id)->GetTxdSlot());
 			}else{
-				MakeSpaceFor(cdsize * CDSTREAM_SECTOR_SIZE);
+				MakeSpaceFor(id >= STREAM_OFFSET_TXD && id < STREAM_OFFSET_COL ? 4*1024 : cdsize * CDSTREAM_SECTOR_SIZE);
+#ifdef GTA_OGC
+				gPullCd = ms_channel[ch].position + ms_channel[ch].offsets[i];
+#endif
 				ConvertBufferToObject(&ms_pStreamingBuffer[ch][ms_channel[ch].offsets[i]*CDSTREAM_SECTOR_SIZE],
 					id);
+				gcHeapCheck(0x434F4E56, id);
 				if(ms_aInfoForModel[id].m_loadState == STREAMSTATE_STARTED){
 					// queue for second part
 					ms_channel[ch].state = CHANNELSTATE_STARTED;
@@ -2742,7 +3648,11 @@ CStreaming::LoadRequestedModels(void)
 
 	if(ms_channelError == -1){
 		// Channel is idle, read more data
-		if(ms_channel[currentChannel].state == CHANNELSTATE_IDLE)
+		if(ms_channel[currentChannel].state == CHANNELSTATE_IDLE
+#ifdef GTA_OGC
+		   && (!STREAM_FLOOR_ENABLED || gStreamHeapFree >= STREAM_HEAP_FLOOR || ms_numPriorityRequests > 0)
+#endif
+		   )
 			RequestModelStream(currentChannel);
 		// Switch channel
 		if(ms_channel[currentChannel].state != CHANNELSTATE_STARTED)
@@ -2766,6 +3676,7 @@ CStreaming::LoadAllRequestedModels(bool priority)
 	if(bInsideLoadAll)
 		return;
 	bInsideLoadAll = true;
+	gMainWhere = "load-all"; gLoadAllN++;
 
 	FlushChannels();
 	imgOffset = GetCdImageOffset(CdStreamGetLastPosn());
@@ -2780,7 +3691,17 @@ CStreaming::LoadAllRequestedModels(bool priority)
 
 	// All those "first" checks are because of variables aren't initialized in first pass.
 
+	// B139: bounded. b137 parked main inside this loop for good (watchdog
+	// 'frozen 104s at [cd-sync]', worker and DVD idle): a request that can
+	// never convert keeps being re-requested. After 20 s of wall time the
+	// pass ends; whatever is left loads through the per-frame path or not at all.
+	u64 loadAllStart = gettime();
 	while (true) {
+		if(gcBootDone() && ticks_to_millisecs(gettime() - loadAllStart) > 20000){   // B144: the boot's LoadLevel pass may legitimately take longer
+			printf("STREAM load-all: 20 s, %d requests left, giving up this pass\n", (int)ms_numModelsRequested);
+			for(int c = 0; c < ARRAY_SIZE(ms_pStreamingBuffer); c++) if(!first && streamIds[c] != -1) CdStreamSync(c);
+			break;
+		}
 		for (int i=0; i<ARRAY_SIZE(ms_pStreamingBuffer); i++) {
 
 			// Channel has file to load
@@ -2850,9 +3771,26 @@ CStreaming::LoadAllRequestedModels(bool priority)
 
 		//printf("process: order %d, ch %d, id %d\n", processI, nextChannel, streamIds[nextChannel]);
 
-		// Try again on error
+		// Try again on error — B139: four times, not forever. b137 parked main
+		// here for good (watchdog: 'frozen 104s at [cd-sync]', worker and DVD
+		// idle) on a read that errored instantly every time.
+		int tries = 0;
+		bool readOk = true;
 		while (CdStreamSync(nextChannel) != STREAM_NONE) {
+			if(++tries >= 4){
+				printf("STREAM read error ch %d model %d off %u size %u: giving up on it\n", nextChannel, streamIds[nextChannel], (unsigned)streamPoses[nextChannel], (unsigned)streamSizes[nextChannel]);
+				readOk = false;
+				break;
+			}
 			CdStreamRead(nextChannel, ms_pStreamingBuffer[nextChannel], imgOffset+streamPoses[nextChannel], streamSizes[nextChannel]);
+		}
+		if(!readOk){
+			gFailWhy = "read error";
+			FailedLoad(streamIds[nextChannel]);
+			streamIds[nextChannel] = -1;
+			readOrder[processI] = -1;
+			processI = (processI + 1) % ARRAY_SIZE(readOrder);
+			continue;
 		}
 		ms_aInfoForModel[streamIds[nextChannel]].m_loadState = STREAMSTATE_READING;
 
@@ -2893,6 +3831,7 @@ CStreaming::LoadAllRequestedModels(bool priority)
 	if(bInsideLoadAll)
 		return;
 	bInsideLoadAll = true;
+	gMainWhere = "load-all"; gLoadAllN++;
 
 	if(priority)
 		numRequests = ms_numPriorityRequests;
@@ -2911,15 +3850,23 @@ CStreaming::LoadAllRequestedModels(bool priority)
 		DecrementRef(streamId);
 
 		if(ms_aInfoForModel[streamId].GetCdPosnAndSize(posn, size)){
+			int8 *dst = ms_pStreamingBuffer[0];
+			uint32 readSize = size;
+#ifdef GTA_OGC
+			gPullCd = imgOffset+posn;
+			if(readSize > 2*(uint32)ms_streamingBufferSize)
+				readSize = 2*ms_streamingBufferSize;   // the rest streams through the pair, see CdPullStream
+#endif
 			do
-				status = CdStreamRead(0, ms_pStreamingBuffer[0], imgOffset+posn, size);
+				status = CdStreamRead(0, dst, imgOffset+posn, readSize);
 			while(CdStreamSync(0) || status == STREAM_NONE);
 			ms_aInfoForModel[streamId].m_loadState = STREAMSTATE_READING;
 
-			MakeSpaceFor(size * CDSTREAM_SECTOR_SIZE);
-			ConvertBufferToObject(ms_pStreamingBuffer[0], streamId);
+			MakeSpaceFor(streamId >= STREAM_OFFSET_TXD && streamId < STREAM_OFFSET_COL ? 4*1024 : size * CDSTREAM_SECTOR_SIZE);
+			ConvertBufferToObject(dst, streamId);
+			gcHeapCheck(0x434F4E41, streamId);
 			if(ms_aInfoForModel[streamId].m_loadState == STREAMSTATE_STARTED)
-				FinishLoadingLargeFile(ms_pStreamingBuffer[0], streamId);
+				FinishLoadingLargeFile(dst, streamId);
 
 			if(streamId < STREAM_OFFSET_TXD){
 				CSimpleModelInfo *mi = (CSimpleModelInfo*)CModelInfo::GetModelInfo(streamId);
@@ -3010,7 +3957,7 @@ CStreaming::UpdateMemoryUsed(void)
 #endif
 }
 
-#define STREAM_DIST 80.0f
+#define STREAM_DIST 60.0f   // user, 09-02: the all-directions HD scan at 60 m (was 80); = STREAM_NEAR_M, so the near ring and the request ring coincide
 
 void
 CStreaming::AddModelsToRequestList(const CVector &pos, int32 flags)
@@ -3479,10 +4426,24 @@ CStreaming::DeleteRwObjectsBehindCameraInSectorList(CPtrList &list, size_t mem)
 	for(node = list.first; node; node = node->next){
 		e = (CEntity*)node->item;
 		if(!e->bStreamingDontDelete && !e->bImBeingRendered &&
+#ifdef GTA_OGC
+		   !(ms_aInfoForModel[e->GetModelIndex()].m_flags & STREAMFLAGS_20) &&
+#endif
 		   e->m_rwObject && ms_aInfoForModel[e->GetModelIndex()].m_next &&
 		   FindPlayerPed()->m_pCurSurface != e){
 			e->DeleteRwObject();
-			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0) {
+			// The RW object goes (cheap to rebuild); the MODEL stays if any
+			// instance stands within STREAM_NEAR_M — B33 traced the near-set
+			// blink to this line, not to RemoveLeastUsedModel.
+			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0
+#ifdef GTA_OGC
+			    && ModelDistNow(e->GetModelIndex()) >= StreamKeepM()   // B106: the whole request ring, not just the near disc; B142: 30 m while a scene holds
+			    && CanRemoveModel(e->GetModelIndex())   // B137: RemoveModel on a QUEUED script-owned model cancels its request (b136: specialchar 110 'state 0 req 0' forever)
+#endif
+			    ) {
+#ifdef GTA_OGC
+				TraceEvict(e->GetModelIndex());
+#endif
 				RemoveModel(e->GetModelIndex());
 				if(ms_memoryUsed < mem)
 					return true;
@@ -3501,9 +4462,23 @@ CStreaming::DeleteRwObjectsNotInFrustumInSectorList(CPtrList &list, size_t mem)
 	for(node = list.first; node; node = node->next){
 		e = (CEntity*)node->item;
 		if(!e->bStreamingDontDelete && !e->bImBeingRendered &&
+#ifdef GTA_OGC
+		   !(ms_aInfoForModel[e->GetModelIndex()].m_flags & STREAMFLAGS_20) &&
+#endif
 		   e->m_rwObject && (!e->IsVisible() || e->bOffscreen) && ms_aInfoForModel[e->GetModelIndex()].m_next){
 			e->DeleteRwObject();
-			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0) {
+			// The RW object goes (cheap to rebuild); the MODEL stays if any
+			// instance stands within STREAM_NEAR_M — B33 traced the near-set
+			// blink to this line, not to RemoveLeastUsedModel.
+			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0
+#ifdef GTA_OGC
+			    && ModelDistNow(e->GetModelIndex()) >= StreamKeepM()   // B106: the whole request ring, not just the near disc; B142: 30 m while a scene holds
+			    && CanRemoveModel(e->GetModelIndex())   // B137: RemoveModel on a QUEUED script-owned model cancels its request (b136: specialchar 110 'state 0 req 0' forever)
+#endif
+			    ) {
+#ifdef GTA_OGC
+				TraceEvict(e->GetModelIndex());
+#endif
 				RemoveModel(e->GetModelIndex());
 				if(ms_memoryUsed < mem)
 					return true;
@@ -3527,6 +4502,10 @@ CStreaming::MakeSpaceFor(int32 size)
 #endif
 	int32 want = size;
 #ifdef GTA_OGC
+	// B107: blocking loads (LoadScene, LoadAllRequestedModels at New Game)
+	// used to run 12 s against Init2's boot value; track the heap they fill.
+	// Every 4th call: mallinfo walks the heap.
+	{ static uint32 n; if((n++ & 3) == 0) HonestBudget(); }
 	// Free a slice of headroom beyond what this load needs, so the next few
 	// loads fit without evicting anything.
 	//
@@ -3542,7 +4521,12 @@ CStreaming::MakeSpaceFor(int32 size)
 	//
 	// ponytail: a fixed slice, not a ratio — the upgrade is real resident-byte
 	// accounting, at which point the budget itself becomes trustworthy.
-	want += 512*1024;
+	// 1.5MB, not 512K (B37): at 512K the streamer sat one model above the
+	// line and evicted ~55 times a second — every load cost a reload, and the
+	// disc traffic starved the audio stream thread (crackle). A wider slice
+	// evicts in batches and leaves the disc to the streams between them.
+	// B53: no slice. Under the honest budget it demanded 512K the heap never had,
+	// so every conversion evicted; the fresh TXDs went first and reloaded at 2/s.
 #endif
 	while(ms_memoryUsed >= ms_memoryAvailable - want){
 		size_t before = ms_memoryUsed;
@@ -3570,6 +4554,12 @@ CStreaming::MakeSpaceFor(int32 size)
 void
 CStreaming::LoadScene(const CVector &pos)
 {
+#ifdef GTA_OGC
+	gNearFocus = pos; gNearFocusCalls = 90;   // ~6s of BuildNearSet calls (every 4 frames)
+	BuildNearSet();
+	HonestBudget();   // B107: not Init2's boot number
+	printf("STREAM loadscene budget %uK used %uK\n", (unsigned)(ms_memoryAvailable/1024), (unsigned)(ms_memoryUsed/1024));
+#endif
 	CStreamingInfo *si, *prev;
 	eLevelName level;
 

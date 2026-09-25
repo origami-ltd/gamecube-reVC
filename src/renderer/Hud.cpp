@@ -216,6 +216,14 @@ RwTexture *gpLaserSightTex;
 RwTexture *gpLaserDotTex;
 RwTexture *gpViewFinderTex;
 
+#ifdef GTA_OGC
+extern "C" signed char gcStatsHud;              // gamecube.cpp (B97)
+extern "C" const char *gcStatsText(void);
+extern "C" float gcFramesPerSecond(void);
+extern "C" unsigned gcFrameMsAvg(void);
+extern "C" unsigned gcFrameMsMax(void);
+#endif
+
 void CHud::Draw()
 {
 	RwRenderStateSet(rwRENDERSTATETEXTUREFILTER, (void*)rwFILTERNEAREST);
@@ -1641,6 +1649,37 @@ void CHud::DrawAfterFade()
 	} else {
 		BigMessageInUse[1] = 0.0f;
 	}
+#ifdef GTA_OGC
+	// B98: main's Graphics > debug level (FEH_STA: OFF / FPS / VERBOSE, MenuScreensCustom.cpp
+	// gDebugLevel). FPS = frame time from the census window; VERBOSE adds the census rows.
+	extern int8 gDebugLevel;
+	if(gDebugLevel >= 1){
+		char fl[64]; snprintf(fl, sizeof(fl), "%.1f fps  ft %u/%ums", gcFramesPerSecond(), gcFrameMsAvg(), gcFrameMsMax());
+		wchar fw[64]; AsciiToUnicode(fl, fw);
+		CFont::SetPropOn(); CFont::SetBackgroundOff(); CFont::SetScale(SCREEN_SCALE_X(0.4f), SCREEN_SCALE_Y(0.7f));
+		CFont::SetCentreOff(); CFont::SetRightJustifyOff(); CFont::SetJustifyOff();
+		CFont::SetWrapx(SCREEN_SCALE_FROM_RIGHT(4.0f)); CFont::SetFontStyle(FONT_STANDARD);
+		CFont::SetDropShadowPosition(1); CFont::SetDropColor(CRGBA(0, 0, 0, 255)); CFont::SetColor(CRGBA(255, 255, 255, 255));
+		CFont::PrintString(SCREEN_SCALE_X(6.0f), SCREEN_SCALE_Y(gDebugLevel >= 2 ? 40.0f : 6.0f), fw);
+	}
+	if(gDebugLevel >= 2){
+		const char *txt = gcStatsText();
+		char row[3][200]; int r = 0, k = 0;
+		for(const char *p = txt; *p && r < 3; p++){
+			if(*p == '|' && k > 0){ row[r][k] = 0; r++; k = 0; if(*(p+1) == ' ') p++; continue; }
+			if(k < 199) row[r][k++] = *p;
+		}
+		if(r < 3) row[r++][k] = 0;
+		CFont::SetPropOn(); CFont::SetBackgroundOff(); CFont::SetScale(SCREEN_SCALE_X(0.28f), SCREEN_SCALE_Y(0.5f));
+		CFont::SetCentreOff(); CFont::SetRightJustifyOff(); CFont::SetJustifyOff();
+		CFont::SetWrapx(SCREEN_SCALE_FROM_RIGHT(4.0f)); CFont::SetFontStyle(FONT_STANDARD);
+		CFont::SetDropShadowPosition(1); CFont::SetDropColor(CRGBA(0, 0, 0, 255)); CFont::SetColor(CRGBA(255, 255, 0, 255));
+		for(int i = 0; i < r; i++){
+			wchar buf[200]; AsciiToUnicode(row[i], buf);
+			CFont::PrintString(SCREEN_SCALE_X(6.0f), SCREEN_SCALE_Y(6.0f + 11.0f*i), buf);
+		}
+	}
+#endif
 }
 
 void CHud::GetRidOfAllHudMessages()

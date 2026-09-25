@@ -177,9 +177,6 @@ ScreenDroplets::Shutdown(void)
 	closeim2d_uv2();
 }
 
-#ifdef RW_GAMECUBE
-namespace rw { namespace gx { extern bool32 gxScreenDropDebugRed; extern bool32 gxScreenDropDebugMask; extern bool32 gxForceAddBlend; } }
-#endif
 
 void
 ScreenDroplets::Process(void)
@@ -193,44 +190,6 @@ ScreenDroplets::Process(void)
 		return;
 	}
 	SprayDrops();
-#ifdef RW_GAMECUBE
-	// dvd:/autodrop.txt plants three fixed drops centre-screen every half
-	// second — the drop renderer becomes screenshotable without weather or
-	// a pad. Content "red" additionally draws them flat red (see gx.cpp),
-	// which shows the mask's shape and alpha with nothing else in the frame.
-	{
-
-		static int8 autoDrop = -1;
-		static uint32 lastPlant;
-		if(autoDrop < 0){
-			DVD_FS_GUARD;
-			FILE *ad = fopen("dvd:/autodrop.txt", "r");
-			autoDrop = 0;
-			if(ad){
-				char m[8] = {0};
-				fread(m, 1, 4, ad);
-				fclose(ad);
-				autoDrop = m[0] == 'r' ? 2 : m[0] == 'm' ? 3 : 1;
-			}
-			rw::gx::gxScreenDropDebugRed = autoDrop == 2;
-			// "mask": paint the quad with the mask's ALPHA as grayscale —
-			// soft circles = sampling fine, flat squares = UV/texcoord broken.
-			rw::gx::gxScreenDropDebugMask = autoDrop == 3;
-			// dvd:/autoblend.txt: force ONE/ONE on additive im2D draws (the
-			// rain-particle bisect — squares gone means blend state loss).
-			{
-				FILE *ab = fopen("dvd:/autoblend.txt", "r");
-				if(ab){ fclose(ab); rw::gx::gxForceAddBlend = 1; }
-			}
-		}
-		if(autoDrop > 0 && CTimer::GetTimeInMilliseconds() - lastPlant > 500){
-			lastPlant = CTimer::GetTimeInMilliseconds();
-			NewDrop(SCREEN_WIDTH/2 - 60, SCREEN_HEIGHT/2, 20, 4000, true, 255, 255, 255);
-			NewDrop(SCREEN_WIDTH/2 + 60, SCREEN_HEIGHT/2, 30, 4000, true, 255, 255, 255);
-			NewDrop(SCREEN_WIDTH/2, SCREEN_HEIGHT/2 - 60, 12, 4000, true, 255, 255, 255);
-		}
-	}
-#endif
 	ProcessMoving();
 	Fade();
 }
@@ -272,7 +231,6 @@ void gxDropletBegin(rw::Raster *mask, rw::Raster *screen);
 void gxDropletQuad(const float *px, const float *py, float u2l, float v2t,
     float u2r, float v2b, uint32 rgba);
 void gxDropletEnd(void);
-extern bool32 gxScreenDropDebugRed;
 } }
 
 void

@@ -291,7 +291,9 @@ def _convert_geometry(chunk, stats):
         return chunk
 
     texcoord_count = _texcoord_sets(flags)
-    if texcoord_count > 2:
+    # The console reader (gxReadNativeGeometry) builds gxPackGeometry's layout,
+    # which carries one packed UV set; two-set geometry stays generic.
+    if texcoord_count > 1:
         stats.skipped_range += 1
         return chunk
 

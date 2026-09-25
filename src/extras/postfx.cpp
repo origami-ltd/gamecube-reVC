@@ -314,44 +314,37 @@ CPostFX::RenderOverlayShader(RwCamera *cam, int32 r, int32 g, int32 b, int32 a)
 		return;
 	}
 	{
-		// Match the trails path's colour EXACTLY, minus its ghosting. That
-		// path feeds its own output back (the front capture includes last
-		// frame's overlay), so on a static scene it converges per channel to
-		//   F = S·(1-k) / (1 - 2·t·(1+k)),   k = 30/255,  t = tint/255
-		// (one alpha-30 pass at colour 2t plus two additive passes at t).
-		// Apply that steady-state gain in ONE direct-write pass through the
-		// same two-stage mult-add TEV the MOBILE filter uses: identical
-		// grade with Motion Blur on or off, and nothing temporal to flicker.
-		float f = Intensity;
+		// B177: NORMAL is frame*mult per channel and nothing else, which the
+		// EFB blender does in place: dst*lo with (ZERO, SRCCOLOR), then
+		// dst + dst*hi with (DESTCOLOR, ONE) for the part of mult above 1.
+		// The frame grab this used to need was a 600K MEM1 texture, taken
+		// every frame and never given back.
 		const float k = 30.0f/255.0f;
-		float tc[3] = { r*f/255.0f, g*f/255.0f, b*f/255.0f };
-		float mult[3], add[3];
+		int lo[3], hi[3];
 		for(int i = 0; i < 3; i++){
-			float d = 1.0f - 2.0f*tc[i]*(1.0f + k);
-			if(d < 0.45f)
-				d = 0.45f;   // caps the gain near 2, where the EFB clamps anyway
-			mult[i] = (1.0f - k)/d;
-			add[i] = 0.0f;
+			float tint = (i == 0 ? r : i == 1 ? g : b)*Intensity/255.0f;
+			float mult = 1.0f - k + Min(2.0f*tint, 1.0f)*k + 2.0f*tint;
+			lo[i] = (int)(Min(mult, 1.0f)*255.0f + 0.5f);
+			hi[i] = (int)(Clamp(mult - 1.0f, 0.0f, 1.0f)*255.0f + 0.5f);
 		}
-		// The gain curve is steep, so the ONE-integer steps of the smoothed
-		// tint became ~5% whole-frame luma jumps — the lobby floor pulsing
-		// again, by a third mechanism. Low-pass the final gains in float;
-		// the timecycle drift they follow is minutes-slow anyway.
-		{
-			static float sm[3] = { 1.0f, 1.0f, 1.0f };
-			float a = Min(1.0f, CTimer::GetTimeStep()*0.05f);
-			for(int i = 0; i < 3; i++){
-				sm[i] += (mult[i] - sm[i])*a;
-				mult[i] = sm[i];
-			}
+		RwRenderStateSet(rwRENDERSTATETEXTURERASTER, nil);
+		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)TRUE);
+		if(lo[0] < 255 || lo[1] < 255 || lo[2] < 255){
+			RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDZERO);
+			RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDSRCCOLOR);
+			for(int i = 0; i < 4; i++)
+				RwIm2DVertexSetIntRGBA(&Vertex[i], lo[0], lo[1], lo[2], 255);
+			RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
 		}
-		rw::gx::setIm2DConstMulAdd(mult, add);
-		RwRenderStateSet(rwRENDERSTATETEXTURERASTER, pBackBuffer);
-		RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void*)FALSE);
+		if(hi[0] > 0 || hi[1] > 0 || hi[2] > 0){
+			RwRenderStateSet(rwRENDERSTATESRCBLEND, (void*)rwBLENDDESTCOLOR);
+			RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDONE);
+			for(int i = 0; i < 4; i++)
+				RwIm2DVertexSetIntRGBA(&Vertex[i], hi[0], hi[1], hi[2], 255);
+			RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
+		}
 		for(int i = 0; i < 4; i++)
 			RwIm2DVertexSetIntRGBA(&Vertex[i], 255, 255, 255, 255);
-		RwIm2DRenderIndexedPrimitive(rwPRIMTYPETRILIST, Vertex, 4, Index, 6);
-		rw::gx::clearIm2DOverride();
 	}
 	return;
 #endif
@@ -425,6 +418,11 @@ CPostFX::RenderMotionBlur(RwCamera *cam, uint32 blur)
 bool
 CPostFX::NeedBackBuffer(void)
 {
+#ifdef GTA_OGC
+	// B177: NORMAL blends in place (RenderOverlayShader); MOBILE's negative
+	// add still needs the grabbed frame.
+	return EffectSwitch == POSTFX_MOBILE || MotionBlurOn || CMBlur::Drunkness > 0.0f;
+#endif
 	// Current frame -- needed for non-blur effect
 	switch(EffectSwitch){
 	case POSTFX_OFF:
@@ -445,6 +443,9 @@ CPostFX::NeedBackBuffer(void)
 bool
 CPostFX::NeedFrontBuffer(int32 type)
 {
+#ifdef GTA_OGC
+	return MotionBlurOn || CMBlur::Drunkness > 0.0f || type == MOTION_BLUR_SNIPER;
+#endif
 	// Last frame -- needed for motion blur
 	if(CMBlur::Drunkness > 0.0f)
 		return true;
@@ -467,9 +468,20 @@ CPostFX::NeedFrontBuffer(int32 type)
 	return false;
 }
 
+#ifdef GTA_OGC
+static uint32 gLastGrabFrame;   // B177: Render gives the grab buffers back once nobody has grabbed for 2 s
+#endif
+
 void
 CPostFX::GetBackBuffer(RwCamera *cam)
 {
+#ifdef GTA_OGC
+	if(pBackBuffer == nil)
+		Open(cam);
+	if(pBackBuffer == nil)
+		return;
+	gLastGrabFrame = CTimer::GetFrameCounter();
+#endif
 	RwRasterPushContext(pBackBuffer);
 	RwRasterRenderFast(RwCameraGetRaster(cam), 0, 0);
 	RwRasterPopContext();
@@ -509,7 +521,6 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 		// Field probe for the flicker itself: raw blur-colour min/max since
 		// the last line, one short gecko line every ~5s. Confirms (or
 		// acquits) the oscillation source with numbers from a play session.
-		extern void GeckoLog(const char *msg);
 		static uint32 lo = 0xFFFFFFFF, hi, n;
 		uint32 sum = red + green + blue;
 		if(sum < lo) lo = sum;
@@ -517,7 +528,6 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 		if(++n >= 300){
 			char line[32];
 			snprintf(line, sizeof(line), "BLR %u-%u t%d", lo, hi, type);
-			GeckoLog(line);
 			lo = 0xFFFFFFFF; hi = 0; n = 0;
 		}
 	}
@@ -528,8 +538,10 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 	blue = AvgBlue;
 	blur = AvgAlpha;
 
+#ifndef GTA_OGC
 	if(NeedBackBuffer())
 		GetBackBuffer(cam);
+#endif
 
 	DefinedState();
 
@@ -538,6 +550,23 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)FALSE);
 	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)FALSE);
 
+#ifdef GTA_OGC
+	if(!bJustInitialised){
+		float history = MotionBlurOn ? 0.25f : 0.0f;
+		history = Max(history, Min(1.0f, CMBlur::Drunkness) * (175.0f/255.0f));
+		if(history > 0.0f){
+			float frames = Max(0.01f, CTimer::GetTimeStep() * (30.0f/50.0f));
+			RenderMotionBlur(cam, (uint32)(255.0f * powf(history, frames) + 0.5f));
+		}
+	}
+	if(NeedBackBuffer() || NeedFrontBuffer(type))
+		GetBackBuffer(cam);
+	if(type == MOTION_BLUR_SNIPER){
+		if(!bJustInitialised)
+			RenderOverlaySniper(cam, red, green, blue, blur);
+	}else if(EffectSwitch == POSTFX_NORMAL || EffectSwitch == POSTFX_MOBILE)
+		RenderOverlayShader(cam, red, green, blue, blur);
+#else
 	if(type == MOTION_BLUR_SNIPER){
 		if(!bJustInitialised)
 			RenderOverlaySniper(cam, red, green, blue, blur);
@@ -561,6 +590,7 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 
 	if(!bJustInitialised)
 		RenderMotionBlur(cam, 175.0f * CMBlur::Drunkness);
+#endif
 
 	RwRenderStateSet(rwRENDERSTATEZTESTENABLE, (void*)TRUE);
 	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void*)TRUE);
@@ -570,12 +600,29 @@ CPostFX::Render(RwCamera *cam, uint32 red, uint32 green, uint32 blue, uint32 blu
 	RwRenderStateSet(rwRENDERSTATEDESTBLEND, (void*)rwBLENDINVSRCALPHA);
 
 	if(NeedFrontBuffer(type)){
+#ifdef GTA_OGC
+		RwRaster *previous = pFrontBuffer;
+		pFrontBuffer = pBackBuffer;
+		pBackBuffer = previous;
+#else
 		RwRasterPushContext(pFrontBuffer);
 		RwRasterRenderFast(RwCameraGetRaster(cam), 0, 0);
 		RwRasterPopContext();
+#endif
 		bJustInitialised = false;
 	}else
 		bJustInitialised = true;
+
+#ifdef GTA_OGC
+	// B177: grabs are occasional now (rain drops, sniper, drunk, trails,
+	// MOBILE). Two seconds after the last one, recreate the rasters empty so
+	// their 600K textures go back to the heap instead of staying for the run.
+	if(gLastGrabFrame && CTimer::GetFrameCounter() - gLastGrabFrame > 60 && !NeedFrontBuffer(type)){
+		gLastGrabFrame = 0;
+		Close();
+		Open(cam);
+	}
+#endif
 
 	POP_RENDERGROUP();
 }

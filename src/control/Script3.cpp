@@ -28,6 +28,7 @@
 #include "Restart.h"
 #include "Stats.h"
 #include "Streaming.h"
+extern "C" void gcScriptWaitDiag(int32 model);   // Streaming.cpp (B148)
 #include "User.h"
 #include "WaterLevel.h"
 #include "Weather.h"
@@ -769,6 +770,9 @@ int8 CRunningScript::ProcessCommands500To599(int32 command)
 		if (model < 0)
 			model = CTheScripts::UsedObjectArray[-model].index;
 		UpdateCompareFlag(CStreaming::HasModelLoaded(model));
+#ifdef GTA_OGC
+		if(!CStreaming::HasModelLoaded(model)) gcScriptWaitDiag(model);   // B148
+#endif
 		return 0;
 	}
 	case COMMAND_MARK_MODEL_AS_NO_LONGER_NEEDED:

@@ -2,6 +2,9 @@
 
 #include "AudioManager.h"
 #include "audio_enums.h"
+#ifdef GTA_OGC
+extern "C" int gcStreamPrimed(int n);
+#endif
 
 #include "Automobile.h"
 #include "Boat.h"
@@ -10132,11 +10135,20 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADING;
 #else
 			SampleManager.PreloadStreamedFile(m_nMissionAudioSampleIndex[slot], slot + 1);
+#ifdef GTA_OGC
+			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADING;
+#else
 			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADED;
+#endif
 #endif
 			nFramesUntilFailedLoad[slot] = 0;
 			break;
 		case LOADING_STATUS_LOADING:
+#ifdef GTA_OGC
+			if(!gcStreamPrimed(slot + 1))
+				return;
+			m_nMissionAudioLoadingStatus[slot] = LOADING_STATUS_LOADED;
+#else
 #ifdef GTA_PS2
 			if (SampleManager.IsMissionAudioLoaded(slot, m_nMissionAudioSampleIndex[slot]) == LOADING_STATUS_LOADED)
 				m_nMissionAudioLoadingStatus = LOADING_STATUS_LOADED;
@@ -10156,6 +10168,7 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 				SampleManager.LoadMissionAudio(slot, m_nMissionAudioSampleIndex[slot]);
 				return;
 			}
+#endif
 #endif
 		case LOADING_STATUS_LOADED:
 		{

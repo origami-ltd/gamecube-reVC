@@ -11,7 +11,7 @@ enum Config {
 
 	NUMCDIMAGES = 6, // gta3.img duplicates (not used on PC)
 	MAX_CDIMAGES = 8, // additional cdimages
-	MAX_CDCHANNELS = 5,
+	MAX_CDCHANNELS = 2,
 
 	MODELINFOSIZE = 6500,	// 4900 on PS2
 	TXDSTORESIZE = 1385,
@@ -28,16 +28,29 @@ enum Config {
 	TWODFXSIZE = 1210,
 #if defined ANDROID
 	MAXVEHICLESLOADED = 70,
+#elif defined GTA_OGC
+	MAXVEHICLESLOADED = 50, // the PS2/PC number — user rule 09-01: at least PS2 levels of cars and peds (dca3 ran 25)
 #else
     MAXVEHICLESLOADED = 50, // 70 on mobile
 #endif
 	NUMOBJECTINFO = 210,
 
 	// Pool sizes
+#ifdef GTA_OGC
+	// dca3's DC_SQUEEZE_RAM profile — the numbers Vice City runs at on a
+	// Dreamcast with 16MB of main RAM. Its own note on NUMPTRNODES: "This is
+	// the most important one to reduce." Every pool below these four is
+	// already identical between the two ports.
+	NUMPTRNODES = 50000,   // PS2/PC value (dca3 27500) — user rule 09-01
+	NUMENTRYINFOS = 3200,
+	NUMPEDS = 140,          // PS2 value (dca3 50)
+	NUMVEHICLES = 110,      // PS2 value (dca3 50)
+#else
 	NUMPTRNODES = 50000,
 	NUMENTRYINFOS = 3200,
 	NUMPEDS = 140,
 	NUMVEHICLES = 110,
+#endif
 	NUMBUILDINGS = 7000,
 	NUMTREADABLES = 1,
 	NUMOBJECTS = 460,
@@ -278,6 +291,10 @@ enum Config {
 //#define ANIM_COMPRESSION	// only keep most recently used anims uncompressed
 
 #ifdef GTA_OGC
+// The PS2's way with ped.ifp: 16-bit keyframes resident, an LRU of
+// uncompressed sequences for what is playing. ~2MB of MEM1 held as float
+// keyframes otherwise (B21 census: the fixed heap's largest unnamed block).
+#define ANIM_COMPRESSION
 // Halves every collision vertex, 12 bytes to 6. This reclaims REAL resident
 // bytes; it does not buy budget out of the reserve, which is the trade that
 // breaks the exterior.
@@ -323,9 +340,7 @@ enum Config {
 #define MORE_LANGUAGES		// Add more translations to the game
 #define COMPATIBLE_SAVES // this allows changing structs while keeping saves compatible, and keeps saves compatible between platforms
 #define FIX_INCOMPATIBLE_SAVES // try to fix incompatible saves, requires COMPATIBLE_SAVES
-#ifndef GTA_OGC
 #define LOAD_INI_SETTINGS // as the name suggests. fundamental for CUSTOM_FRONTEND_OPTIONS
-#endif
 
 #define NO_MOVIES	// add option to disable intro videos
 

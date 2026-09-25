@@ -24,6 +24,7 @@
 #include "Clock.h"
 #include "World.h"
 #include "Camera.h"
+#include "CutsceneMgr.h"
 #include "ModelIndices.h"
 #include "Streaming.h"
 #include "Shadows.h"
@@ -768,6 +769,10 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 
 	dist = (ent->GetPosition() - ms_vecCameraPosition).Magnitude();
 
+#ifdef GTA_OGC
+	CStreaming::NoteModelDistance(ent->GetModelIndex(), dist);
+#endif
+
 #ifndef FIX_BUGS
 	// Whatever this is supposed to do, it breaks fading for objects
 	// whose draw dist is > LOD_DISTANCE-FADE_DISTANCE, i.e. 280
@@ -782,28 +787,7 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 	if(ent->IsObject() && ent->bRenderDamaged)
 		mi->m_isDamaged = true;
 
-#ifdef GTA_OGC
-	// LOD hysteresis. Objects that sit on their own draw-distance boundary
-	// were switching every frame while the player stood still, because the
-	// threshold moves even when the camera does not: TheCamera.LODDistMultiplier
-	// is 70/FOV scaled by ms_lodDistScale and is recomputed per frame, so any
-	// FOV drift slides the boundary across a stationary object.
-	//
-	// Measured, from the scene transition log: cl_tablesetlrg (the Marco's
-	// Bistro table set) sat at dist 8.4 with m_lodDistances[0] = 7 and
-	// mult 1.2 — a threshold of exactly 8.4. It logged 2973 visibility flips,
-	// twenty times the next worst object. Streetlamp2, lamppost3 and
-	// veg_palmbig14 were the same story further down the list.
-	//
-	// Once something is on screen, keep it on screen until it is a tenth
-	// further away than the distance that would have let it appear. That
-	// costs a little draw distance and buys a stable image.
-	// ponytail: one constant, no per-entity state — m_rwObject already tells
-	// us whether this entity was being drawn.
-	RpAtomic *a = mi->GetAtomicFromDistance(ent->m_rwObject ? dist*0.9f : dist);
-#else
 	RpAtomic *a = mi->GetAtomicFromDistance(dist);
-#endif
 #ifdef GTA_OGC
 	// LOD fallback, counted rather than logged. An entity standing inside the
 	// range of its most detailed atomic that still has no atomic to hand back
@@ -876,7 +860,8 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 		mi->m_isDamaged = false;
 		if(ent->m_rwObject == nil)
 			ent->CreateRwObject();
-		assert(ent->m_rwObject);
+		if(ent->m_rwObject == nil)
+			return VIS_INVISIBLE;
 		RpAtomic *rwobj = (RpAtomic*)ent->m_rwObject;
 		// Make sure our atomic uses the right geometry and not
 		// that of an atomic for another draw distance.
@@ -934,7 +919,8 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 
 	if(ent->m_rwObject == nil)
 		ent->CreateRwObject();
-	assert(ent->m_rwObject);
+	if(ent->m_rwObject == nil)
+		return VIS_INVISIBLE;
 	RpAtomic *rwobj = (RpAtomic*)ent->m_rwObject;
 	if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 		RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
@@ -1014,7 +1000,8 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 	if(a){
 		if(ent->m_rwObject == nil)
 			ent->CreateRwObject();
-		assert(ent->m_rwObject);
+		if(ent->m_rwObject == nil)
+			return VIS_INVISIBLE;
 		RpAtomic *rwobj = (RpAtomic*)ent->m_rwObject;
 
 		// Make sure our atomic uses the right geometry and not
@@ -1025,6 +1012,9 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 			// Shared-alpha pop fix, same as SetupEntityVisibility.
 			return VIS_INVISIBLE;
 		}
+#ifdef GTA_OGC
+		CStreaming::NoteModelDistance(ent->GetModelIndex(), 0.0f);
+#endif
 		mi->IncreaseAlpha();
 
 		if(mi->m_alpha != 255){
@@ -1061,7 +1051,8 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 	// Fade...
 	if(ent->m_rwObject == nil)
 		ent->CreateRwObject();
-	assert(ent->m_rwObject);
+	if(ent->m_rwObject == nil)
+		return VIS_INVISIBLE;
 	RpAtomic *rwobj = (RpAtomic*)ent->m_rwObject;
 	if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 		RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
@@ -1069,6 +1060,9 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 		// Shared-alpha pop fix, same as SetupEntityVisibility.
 		return VIS_INVISIBLE;
 	}
+#ifdef GTA_OGC
+	CStreaming::NoteModelDistance(ent->GetModelIndex(), 0.0f);
+#endif
 	mi->IncreaseAlpha();
 	CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);
 	ent->bDistanceFade = true;
@@ -1582,14 +1576,21 @@ CRenderer::ScanBigBuildingList(CPtrList &list)
 	CEntity *ent;
 	int vis;
 
+#ifndef GTA_OGC
 	int f = CTimer::GetFrameCounter() & 3;
+#endif
 	for(node = list.first; node; node = node->next){
 		ent = (CEntity*)node->item;
+#ifdef GTA_OGC
+		ent->bOffscreen = true;
+		vis = SetupBigBuildingVisibility(ent);
+#else
 		if(ent->bOffscreen || (ent->m_randomSeed&3) != f){
 			ent->bOffscreen = true;
 			vis = SetupBigBuildingVisibility(ent);
 		}else
 			vis = VIS_VISIBLE;
+#endif
 		switch(vis){
 		case VIS_VISIBLE:
 			InsertEntityIntoList(ent);
@@ -1639,9 +1640,16 @@ CRenderer::ScanSectorList(CPtrList *lists)
 					ms_aInVisibleEntityPtrs[ms_nNoOfInVisibleEntities++] = ent;
 				break;
 			case VIS_STREAMME:
-				if(!CStreaming::ms_disableStreaming)
+				if(!CStreaming::ms_disableStreaming){
+#ifdef GTA_OGC
+					int flags = CStreaming::ModelDistNow(ent->GetModelIndex()) < STREAM_HD_NEAR_M ? STREAMFLAGS_PRIORITY : 0;
+					if(flags || !m_loadingPriority || CStreaming::ms_numModelsRequested < 10)
+						CStreaming::RequestModel(ent->GetModelIndex(), flags);
+#else
 					if(!m_loadingPriority || CStreaming::ms_numModelsRequested < 10)
 						CStreaming::RequestModel(ent->GetModelIndex(), 0);
+#endif
+				}
 				break;
 			}
 		}
@@ -1685,8 +1693,15 @@ CRenderer::ScanSectorList_Priority(CPtrList *lists)
 				break;
 			case VIS_STREAMME:
 				if(!CStreaming::ms_disableStreaming){
+#ifdef GTA_OGC
+					int flags = CStreaming::ModelDistNow(ent->GetModelIndex()) < STREAM_HD_NEAR_M ? STREAMFLAGS_PRIORITY : 0;
+					CStreaming::RequestModel(ent->GetModelIndex(), flags);
+					int state = CStreaming::ms_aInfoForModel[ent->GetModelIndex()].m_loadState;
+					if(state == STREAMSTATE_INQUEUE || state == STREAMSTATE_READING || state == STREAMSTATE_STARTED)
+#else
 					CStreaming::RequestModel(ent->GetModelIndex(), 0);
 					if(CStreaming::ms_aInfoForModel[ent->GetModelIndex()].m_loadState != STREAMSTATE_LOADED)
+#endif
 						m_loadingPriority = true;
 				}
 				break;
@@ -1791,6 +1806,9 @@ CRenderer::ShouldModelBeStreamed(CEntity *ent, const CVector &campos)
 		if(!CClock::GetIsTimeInRange(mi->GetTimeOn(), mi->GetTimeOff()))
 			return false;
 	float dist = (ent->GetPosition() - campos).Magnitude();
+#ifdef GTA_OGC
+	CStreaming::NoteModelDistance(ent->GetModelIndex(), dist);
+#endif
 	if(mi->m_noFade)
 		return dist - STREAM_DISTANCE < mi->GetLargestLodDistance();
 	else

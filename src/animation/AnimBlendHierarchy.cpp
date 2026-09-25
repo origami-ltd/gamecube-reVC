@@ -117,7 +117,7 @@ CAnimBlendHierarchy::RemoveUncompressedData(void)
 	compressed = 1;
 }
 
-#ifdef USE_CUSTOM_ALLOCATOR
+#if defined(USE_CUSTOM_ALLOCATOR) || defined(GTA_OGC)
 void
 CAnimBlendHierarchy::MoveMemory(bool onlyone)
 {

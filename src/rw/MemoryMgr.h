@@ -8,6 +8,8 @@ void *MemoryMgrMalloc(size_t size);
 void *MemoryMgrRealloc(void *ptr, size_t size);
 void *MemoryMgrCalloc(size_t num, size_t size);
 void MemoryMgrFree(void *ptr);
+void MemoryMgrBeginCompaction(size_t maxBytes);
+void *MemoryMgrMoveMemory(void *ptr);
 
 void *RwMallocAlign(RwUInt32 size, RwUInt32 align);
 void RwFreeAlign(void *mem);

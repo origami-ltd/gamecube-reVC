@@ -1966,6 +1966,15 @@ CAutomobile::PreRender(void)
 	if(!CCullZones::CamNoRain() && !CCullZones::PlayerNoRain() &&
 	   Abs(fwdSpeed) < 20.0f && CWeather::Rain > 0.02f){
 		CColModel *colModel = GetColModel();
+#ifdef GTA_OGC
+		// B188: PARTICLE_RAIN_SPLASHUP is only created within 15 m of the
+		// camera (particle.cfg), yet every slow car in view ran 3 transforms
+		// and ~4 rejected spawns per collision triangle — thousands a rain frame.
+		float reach = 15.0f + colModel->boundingSphere.radius;
+		if((GetPosition() - TheCamera.GetPosition()).MagnitudeSqr() > reach*reach)
+			colModel = nil;
+		if(colModel)
+#endif
 
 		for(i = 0; i < colModel->numTriangles; i++){
 			CVector p1, p2, p3, c;

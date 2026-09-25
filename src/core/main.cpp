@@ -61,8 +61,6 @@
 namespace rw { extern unsigned rwAllocLive[16], rwAllocTotal[16], rwAllocLiveBytes[16]; }
 unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync, gxSnapFrame, gxSnapSky, gxSnapShow;
 unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream, gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
-// The sky split three ways, see DoRWStuffStartOfFrame_Horizon.
-unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
 #endif
 #include "Lights.h"
 #include "Credits.h"
@@ -73,7 +71,6 @@ unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
 #include "Text.h"
 #include "RpAnimBlend.h"
 #include "Frontend.h"
-extern const char *gPhase;   // freeze watchdog breadcrumb, see gamecube.cpp
 #include "AnimViewer.h"
 #include "Script.h"
 #include "PathFind.h"
@@ -94,6 +91,16 @@ extern const char *gPhase;   // freeze watchdog breadcrumb, see gamecube.cpp
 #include "VarConsole.h"
 #ifdef USE_OUR_VERSIONING
 #include "GitSHA1.h"
+#ifdef GTA_OGC
+// B155: per-phase frame profile, printed with the census (gamecube.cpp).
+extern "C" unsigned long long gcNowUs(void);
+extern "C" void gcProfAdd(int id, unsigned long long us);
+#define GC_PROF_BEGIN(v) unsigned long long v = gcNowUs()
+#define GC_PROF_END(v, id) gcProfAdd(id, gcNowUs() - v)
+#else
+#define GC_PROF_BEGIN(v)
+#define GC_PROF_END(v, id)
+#endif
 #endif
 
 GlobalScene Scene;
@@ -260,37 +267,16 @@ DoRWStuffStartOfFrame_Horizon(int16 TopRed, int16 TopGreen, int16 TopBlue, int16
 	if(Scene.camera == nil)
 		return false;
 
-#ifdef GTA_OGC
-	// sky measured 8.1ms — the largest single item in a 16ms frame, larger than
-	// the whole world render, with the GP idle. Split it rather than guess
-	// which of the three parts owns it: the camera resize (which rebuilds
-	// rasters when the size changes), the clear, or the sky gradient itself.
-	extern unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
-	unsigned long long tPart = gettime();
-#endif
 	CDraw::CalculateAspectRatio();
 	CameraSize(Scene.camera, nil, SCREEN_VIEWWINDOW, SCREEN_ASPECT_RATIO);
 	CVisibilityPlugins::SetRenderWareCamera(Scene.camera);
-#ifdef GTA_OGC
-	gxCamSizeUs = (unsigned)ticks_to_microsecs(gettime() - tPart);
-	tPart = gettime();
-#endif
 	RwCameraClear(Scene.camera, &gColourTop, CLEARMODE);
-#ifdef GTA_OGC
-	gxClearUs = (unsigned)ticks_to_microsecs(gettime() - tPart);
-#endif
 
 	if(!RsCameraBeginUpdate(Scene.camera))
 		return false;
 
 	TheCamera.m_viewMatrix.Update();
-#ifdef GTA_OGC
-	tPart = gettime();
-#endif
 	CClouds::RenderBackground(TopRed, TopGreen, TopBlue, BottomRed, BottomGreen, BottomBlue, Alpha);
-#ifdef GTA_OGC
-	gxCloudUs = (unsigned)ticks_to_microsecs(gettime() - tPart);
-#endif
 
 	return true;
 }
@@ -413,20 +399,6 @@ RwGrabScreen(RwCamera *camera, RwChar *filename)
 void
 DoRWStuffEndOfFrame(void)
 {
-#ifdef GTA_OGC
-	// The watchdog counts frames PRESENTED, not main-loop iterations.
-	//
-	// SwitchMenuOnAndOff renders two whole frames from inside itself, outside
-	// the loop, before opening the menu — and LoadAllTextures runs there too.
-	// Counting loop iterations meant the counter froze for all of that, so the
-	// watchdog called a slow menu load a hang. Some of the freezes chased in
-	// this project may have been exactly that.
-	//
-	// Incrementing here makes "no frame reached the screen for eight seconds"
-	// the thing being measured, which is what a freeze actually is.
-	extern volatile uint32 gFrameTick;
-	gFrameTick++;
-#endif
 #ifndef GTA_OGC
 	CDebug::DisplayScreenStrings();	// custom
 	CDebug::DebugDisplayTextBuffer();
@@ -722,69 +694,12 @@ ResetLoadingScreenBar()
 	NumberOfChunksLoaded = 0.0f;
 }
 
-#ifdef GTA_OGC
-// Whether boot breadcrumbs are painted on the TV as well as sent to the Gecko
-// and the SD. Off by default: on screen it is a full-page wall of text over
-// the loading screen. Toggled by holding L + A for three seconds.
-bool gShowBootConsole = false;
-
-// Whether the periodic diagnostics are written to the SD.
-//
-// Suspected of causing the freeze rather than recording it. The watchdog's own
-// unguarded fopen came back empty while the game was stuck, and an unguarded
-// write cannot be blocked by the GP — so libfat itself was wedged. The last
-// heartbeat before the stop showed ev=0 ld=0: the streaming worker was idle, so
-// the only thing touching the filesystem was this. boot.sh has always had to
-// fsck_msdos the card before every boot, which was read as a symptom of the
-// freeze and may be its cause.
-//
-// Off by default. Gecko carries the same lines and is a separate transport.
-bool gLogToSd = false;
-// Effect-pass vitals for the P profile line; MBlur counts into these.
-uint32 gFxQueued, gFxDrawn;
-// Lost with an uncommitted revert; zero until its increment site returns.
-unsigned gxBeginUs;
-// Worst frame period since the last heartbeat print — the X field in the P
-// line. gxSnapFrame samples one frame per beat and misses hitches; this one
-// cannot.
-unsigned gxWorstFrameUs, gxWorstSnap;
-
-
-// Boot-stage breadcrumbs: the last line in this file names the load stage
-// that hung or crashed. Console loads are slow and opaque otherwise.
-void
-BootLog(const char *msg)
-{
-	// The printf goes to the libogc console, which paints white-on-black text
-	// straight over the loading screen — and it is redundant, because the same
-	// line already goes to the Gecko and to the SD. Off unless asked for.
-	if(gShowBootConsole)
-		printf("BOOT %s\n", msg);
-	extern void GeckoLog(const char*);
-	GeckoLog(msg); // live host tail via Dolphin USB Gecko (TCP 55020)
-	DVD_FS_GUARD;
-	FILE *progress = gLogToSd ? fopen("dvd:/boot_progress.log", "a") : nil;
-	if(progress){
-		fprintf(progress, "%s\n", msg);
-		fclose(progress);
-	}
-}
-#endif
 
 void
 LoadingScreen(const char *str1, const char *str2, const char *splashscreen)
 {
 	CSprite2d *splash;
 
-#ifdef GTA_OGC
-	{
-		char line[256];
-		snprintf(line, sizeof(line), "%s | %s | %s",
-		    str1 ? str1 : "-", str2 ? str2 : "-",
-		    splashscreen ? splashscreen : "-");
-		BootLog(line);
-	}
-#endif
 
 #ifdef DISABLE_LOADING_SCREEN
 	if (str1 && str2)
@@ -796,9 +711,6 @@ LoadingScreen(const char *str1, const char *str2, const char *splashscreen)
 #endif
 
 	splash = LoadSplash(splashscreen);
-#ifdef GTA_OGC
-	BootLog("  splash loaded");
-#endif
 
 #ifndef GTA_PS2
 	if(RsGlobal.quit)
@@ -1316,8 +1228,7 @@ DisplayGameDebugText()
 			}
 		}
 
-		//NOTE: fps should be 30, but its 29 due to different fp2int conversion 
-		sprintf(str, "X:%4.0f Y:%4.0f Z:%4.0f F-%d %s-%s", pos.x, pos.y, pos.z, (int32)FramesPerSecond,
+		sprintf(str, "X:%4.0f Y:%4.0f Z:%4.0f F-%.1f %s-%s", pos.x, pos.y, pos.z, FramesPerSecond,
 			ZonePrint[ZoneId].name, ZonePrint[ZoneId].area);
 
 		AsciiToUnicode(str, ustr);
@@ -1671,509 +1582,23 @@ Render2dStuffAfterFade(void)
 #endif
 	CHud::DrawAfterFade();
 
-#ifdef GTA_OGC
-	// FPS counter, top-left: white on black, drawn above fades.
-	//
-	// Off by default and toggled by holding L + A for three seconds. It is a
-	// developer readout sitting on top of the game, and leaving it permanently
-	// on the screen makes the port unpleasant to actually play. Three seconds
-	// and two buttons because L and A are both used constantly in normal play
-	// — a shorter hold or a single button would fire by accident mid-mission.
-	{
-		// The FPS readout is always drawn — every measurement in this port is
-		// made from it. What L + A toggles is the boot console, which is the
-		// thing that actually covers the screen.
-		static uint32 holdStart;
-		CPad *pad = CPad::GetPad(0);
-		bool32 combo = pad && pad->NewState.LeftShoulder1 && pad->NewState.Cross;
-		uint32 nowMs = CTimer::GetTimeInMillisecondsPauseMode();
-		if(!combo)
-			holdStart = 0;
-		else if(holdStart == 0)
-			holdStart = nowMs;
-		else if(nowMs - holdStart >= 3000){
-			gShowBootConsole = !gShowBootConsole;
-			holdStart = 0;
-			// Swallow the hold so releasing and re-pressing is required,
-			// rather than toggling once every three seconds while held.
-			pad->NewState.LeftShoulder1 = 0;
-		}
-	}
-	{
-		// Menu-driven debug level: OFF skips the whole readout (the early
-		// return the user asked for), FPS prints the short line, VERBOSE the
-		// full profile.
-		extern int8 gDebugLevel;
-		if(gDebugLevel == 0)
-			goto debugHudDone;
-		{
-		char fpsA[192];
-		wchar fpsW[192];
-		extern unsigned gxMeshCount, gxVertCount, gxDlMeshCount;
-		extern unsigned gxSimUs, gxRenderUs, gxStreamUs, gxGpUs, gxVsyncUs, gxHudUs, gxTexBuilds, gxIdleUs, gxAudioUs, gxFxUs, gxListUs, gxPreUs, gxTileUs, gxPostUs, gxSkyUs, gxTailUs, gxLightsUs, gxFrameUs, gxFadeUs, gxAfterUs, gxEndUs, gxCopyUs;
-		// Presentation rate, not a smoothed average. FramesPerSecond is a
-		// 30-sample mean: it reads a flat 30 straight through a 266ms hitch,
-		// which is exactly why the stutter was invisible while the counter
-		// looked healthy. Derive the rate from the measured frame period
-		// (Idle entry to Idle entry, already latched in gxSnapFrame), and
-		// hold the worst period of the last 5s so a hitch cannot scroll past
-		// between glances. A 266ms frame now reads "3 f266.0 max266".
-		// Assume 60fps until the first period is latched: a 1us "period"
-		// reads as 1000000 fps, which is both nonsense and far too wide for
-		// the snug HUD box.
-		unsigned per = gxSnapFrame ? gxSnapFrame : 16667;
-		static unsigned worstUs;
-		static uint32 worstAt;
-		uint32 nowMs = CTimer::GetTimeInMillisecondsPauseMode();
-		if(gxSnapFrame > worstUs || nowMs - worstAt > 5000){
-			worstUs = gxSnapFrame;
-			worstAt = nowMs;
-		}
-		#if OGC_PROFILE
-		if(gDebugLevel >= 2){
-		unsigned work = gxSnapFrame > gxSnapVsync ?
-		    gxSnapFrame - gxSnapVsync : 0;
-		// oom = geometry allocations the streamer had to soft-fail, mem =
-		// what streaming believes it is holding. A non-zero oom means the
-		// world is failing to load rather than failing to draw — the two look
-		// identical on screen (missing chunks, no collision, white world).
-		extern unsigned rwGeoAllocFails;
-		// fr = total free heap in KB, blk = NUMBER of free chunks (mallinfo
-		// has no largest-block field; ordblks is the count). Read together
-		// they measure fragmentation, which is the thing that actually breaks
-		// allocation here: 4484K free split across ~9200 chunks averages 486
-		// bytes each, so a megabyte-sized request fails while the total looks
-		// healthy. str = ms inside CStreaming::Update, i.e. disc I/O stalling
-		// the frame.
-		extern unsigned rwGeoAllocFails, rwTexAllocFails, gxStreamUs, gxTiledBytes;
-		// ARAM cache hit rate. A streaming game re-reads the same archive
-		// entries constantly, so this is the number that says whether the
-		// disc is still being hit for things ARAM already holds.
-		extern uint32 gAramHits, gAramMisses;
-		unsigned arTotal = gAramHits + gAramMisses;
-		unsigned arPct = arTotal ? (unsigned)((uint64)gAramHits*100/arTotal) : 0;
-		struct mallinfo mi = mallinfo();
-		sprintf(fpsA, "%u f%u.%u max%u work%u oom%u/%u m%uK tex%uK fr%uK blk%u str%u ar%u%%",
-		    1000000u/per, per/1000, (per%1000)/100, worstUs/1000,
-		    work/1000, rwGeoAllocFails, rwTexAllocFails,
-		    (unsigned)(CStreaming::ms_memoryUsed>>10),
-		    gxTiledBytes>>10,
-		    (unsigned)(mi.fordblks>>10), (unsigned)mi.ordblks,
-		    gxStreamUs/1000, arPct);
-		}else
-			sprintf(fpsA, "%u", Min(1000000u/per, 999u));
-#else
-		sprintf(fpsA, "%u", Min(1000000u/per, 999u));
-#endif
-		gxTileUs = 0; gxTexBuilds = 0;
-		gxMeshCount = 0;
-		gxVertCount = 0;
-		gxDlMeshCount = 0;
-
-		// One block, one PrintString. Two overlapping text draws is not a
-		// readout, it is a mess — the phase line was landing on top of the
-		// last line of the counter. CFont wraps this for us.
-		if(gDebugLevel >= 2){
-			extern unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream,
-			    gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
-			extern unsigned gxCamSizeUs, gxClearUs, gxCloudUs;
-			unsigned acc = gxSnapSim + gxSnapRender + gxSnapSky + gxSnapFx +
-			    gxSnapHud + gxSnapLights + gxSnapTile + gxSnapStream +
-			    gxSnapCopy + gxSnapGp + gxSnapVsync;
-			unsigned other = gxSnapFrame > acc ? gxSnapFrame - acc : 0;
-			int n = (int)strlen(fpsA);
-			snprintf(fpsA + n, sizeof(fpsA) - n,
-			    " | sim%u rnd%u sky%u(sz%u cl%u cd%u) fx%u hud%u lit%u str%u cpy%u gp%u vs%u oth%u max%u",
-			    gxSnapSim/100, gxSnapRender/100, gxSnapSky/100,
-			    gxCamSizeUs/100, gxClearUs/100, gxCloudUs/100, gxSnapFx/100,
-			    gxSnapHud/100, gxSnapLights/100, gxSnapStream/100,
-			    gxSnapCopy/100, gxSnapGp/100, gxSnapVsync/100, other/100,
-			    worstUs/1000);
-		}
-		AsciiToUnicode(fpsA, fpsW);
-		CFont::SetPropOn();
-		CFont::SetScale(SCREEN_SCALE_X(0.6f), SCREEN_SCALE_Y(0.8f));
-		CFont::SetCentreOff();
-		CFont::SetRightJustifyOff();
-		CFont::SetJustifyOff();
-		// The background box runs to wrapX no matter how short the text is
-		// (GetTextRect right = wrapX for left-justified text), so size the
-		// wrap to the content: a snug square for the bare FPS number, the
-		// full readout width only in verbose.
-		CFont::SetWrapx(SCREEN_SCALE_X(8.0f) + SCREEN_SCALE_X(gDebugLevel >= 2 ? 200.0f : 24.0f));
-		CFont::SetFontStyle(FONT_STANDARD);
-		CFont::SetBackgroundOn();
-		CFont::SetBackGroundOnlyTextOn();
-		CFont::SetBackgroundColor(CRGBA(0, 0, 0, 128));   // 50% transparent
-		CFont::SetDropShadowPosition(0);
-		CFont::SetColor(CRGBA(255, 255, 255, 255));
-		CFont::PrintString(SCREEN_SCALE_X(8.0f), SCREEN_SCALE_Y(8.0f), fpsW);
-		CFont::SetBackgroundOff();
-		CFont::SetBackGroundOnlyTextOff();
-		}
-	}
-	debugHudDone: ;
-#endif
 
 	CFont::DrawFonts();
 	CCredits::Render();
 	POP_RENDERGROUP();
 }
 
-#ifdef GTA_OGC
-// gxPackGeometry's tally, reported by the heartbeat: bytes reclaimed, how many
-// geometries took the packed path, and how many were refused because their
-// extents would have forced too coarse a quantum. A refusal is not a bug, but
-// a large refusal count means the floor is set wrong and the saving is being
-// left on the table.
-namespace rw { namespace gx {
-extern uint32 gxPackSaved, gxPackGeoms, gxPackRefusedPos, gxPackRefusedUV;
-extern uint32 gxDropQuads;
-extern int32 gxDropBeginState;
-} }
-#endif
 
+#ifdef GTA_OGC
+bool gIntroHold;   // B99: set by gamecube.cpp at GS_INIT_PLAYING_GAME
+#endif
 void
 Idle(void *arg)
 {
-#ifdef GTA_OGC
-	extern unsigned gxIdleUs, gxFrameUs;
-	// True frame period: Idle entry to Idle entry. Comparing this against
-	// the sum of the instrumented blocks answers whether the frame is
-	// fully accounted or whether work hides between them.
-	{
-		static unsigned long long tPrevEntry;
-		unsigned long long now = gettime();
-		if(tPrevEntry)
-			gxFrameUs = (unsigned)ticks_to_microsecs(now - tPrevEntry);
-			if(gxFrameUs > gxWorstFrameUs)
-				gxWorstFrameUs = gxFrameUs;
-		tPrevEntry = now;
-	}
-	unsigned long long tIdle = gettime();
-	struct IdleTimer {
-		unsigned long long t;
-		unsigned *out;
-		~IdleTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
-	} idleTimer = { tIdle, &gxIdleUs };
-	// Latch: every counter is written at a different point in the frame,
-	// so the HUD was mixing values from different frames and the sums
-	// never reconciled. Snapshot them together at the end of Idle and
-	// display the snapshot — one complete frame, internally consistent.
-	extern unsigned gxSnapSim, gxSnapRender, gxSnapEnd, gxSnapVsync,
-	    gxSnapFrame, gxSnapSky;
-	extern unsigned gxSimUs, gxRenderUs, gxEndUs, gxVsyncUs, gxSkyUs;
-	extern unsigned gxShowUs, gxSnapShow;
-	// The rest of the phases were measured but never latched, so anything
-	// reading them mixed values from different frames — the exact problem the
-	// latch above exists to solve, applied to seven counters out of twenty-two.
-	// A profiler whose columns come from different frames cannot be summed
-	// against the frame period, which is the one check that says whether the
-	// frame is fully accounted for.
-	extern unsigned gxHudUs, gxFxUs, gxSkyUs, gxTileUs, gxStreamUs,
-	    gxCopyUs, gxGpUs, gxLightsUs, gxIdleUs;
-	extern unsigned gxSnapHud, gxSnapFx, gxSnapTile, gxSnapStream,
-	    gxSnapCopy, gxSnapGp, gxSnapLights, gxSnapIdle;
-	struct Latch {
-		~Latch(){
-			gxSnapSim = gxSimUs; gxSnapRender = gxRenderUs;
-			gxSnapEnd = gxEndUs; gxSnapVsync = gxVsyncUs;
-			gxSnapFrame = gxFrameUs; gxSnapSky = gxSkyUs;
-			gxWorstSnap = gxWorstFrameUs; gxWorstFrameUs = 0;
-			gxSnapShow = gxShowUs;
-			gxSnapHud = gxHudUs; gxSnapFx = gxFxUs;
-			gxSnapTile = gxTileUs; gxSnapStream = gxStreamUs;
-			gxSnapCopy = gxCopyUs; gxSnapGp = gxGpUs;
-			gxSnapLights = gxLightsUs; gxSnapIdle = gxIdleUs;
-		}
-	} latch;
-#endif
 	CTimer::Update();
 
-#ifdef GTA_OGC
-	// 5s heartbeat: game state data for stall diagnosis.
-	// Written to the SD log as well as the gecko — Dolphin's emulated gecko
-	// truncates anything past a couple of dozen characters, so every field
-	// after "HB t=" was being cut off and the transport was silently useless
-	// for exactly the state we needed.
-	{
-		static uint32 lastBeat;
-		uint32 now = CTimer::GetTimeInMillisecondsPauseMode();
-		if(now - lastBeat > 5000){
-			lastBeat = now;
-			extern void GeckoLog(const char*);
-			// vi&3: 0 interlaced, 2 progressive (480p). Latched in startGX,
-			// which runs before the SD or the Gecko listener exists.
-			extern unsigned gxViTVMode, gxHaveComponent, gxXfbHeight;
-			extern unsigned gxCamW, gxCamH, gxEfbHeight;
-			// Per-interval, not cumulative: a rising total says nothing, the
-			// rate is what tells you whether the world is still falling back
-			// to its far shells right now.
-			extern uint32 gLodMiss;
-			static uint32 lastLodMiss;
-			// free/blk together, because total free is not the safety metric:
-			// 5423K spread over 12085 chunks averages 460 bytes, so a
-			// megabyte-sized geometry request can fail while the total looks
-			// healthy. The HUD has shown both for a while, but only for the
-			// single frame someone happened to screenshot — the reserve is
-			// tuned against the whole run, so the whole run has to be logged.
-			struct mallinfo hbMi = mallinfo();
-			extern uint32 gStrEvict, gStrLoad;
-			static uint32 lastEvict, lastLoad;
-			// Largest block still obtainable, measured instead of feared.
-			// mallinfo gives total free and a chunk count but not the largest
-			// chunk, and the largest chunk is what decides whether a geometry
-			// load succeeds — which is the entire reason the reserve is not
-			// supposed to be tuned against total free. Probe it: halve down
-			// from 2MB until one succeeds, hand it straight back. Seven
-			// mallocs every five seconds buys the number the reserve is
-			// actually protecting.
-			unsigned maxblk = 0;
-			for(size_t t = 2u<<20; t >= (32u<<10); t >>= 1){
-				void *p = malloc(t);
-				if(p){ free(p); maxblk = (unsigned)(t>>10); break; }
-			}
-			char hb[256];
-			snprintf(hb, sizeof(hb),
-			    "HB t=%u clk=%02d:%02d fade=%d splashTgt=%d fadeSt=%d cut=%d "
-			    "strMem=%uK strReq=%d menu=%d vi=%u cbl=%u xfbH=%u "
-			    "pack=%uK geo=%u refP=%u refU=%u lodMiss=%u "
-			    "free=%uK blk=%u maxblk=%uK ev=%u ld=%u "
-			    "rs=%dx%d cam=%ux%u efb=%u",
-			    (unsigned)now, CClock::GetHours(), CClock::GetMinutes(),
-			    CDraw::FadeValue, TheCamera.m_FadeTargetIsSplashScreen,
-			    TheCamera.GetScreenFadeStatus(),
-			    CCutsceneMgr::IsCutsceneProcessing(),
-			    (unsigned)(CStreaming::ms_memoryUsed>>10),
-			    CStreaming::ms_numModelsRequested,
-			    FrontEndMenuManager.m_bMenuActive,
-			    gxViTVMode, gxHaveComponent, gxXfbHeight,
-			    (unsigned)(rw::gx::gxPackSaved>>10),
-			    (unsigned)rw::gx::gxPackGeoms,
-			    (unsigned)rw::gx::gxPackRefusedPos,
-			    (unsigned)rw::gx::gxPackRefusedUV,
-			    (unsigned)(gLodMiss - lastLodMiss),
-			    (unsigned)(hbMi.fordblks>>10), (unsigned)hbMi.ordblks,
-			    maxblk,
-			    (unsigned)(gStrEvict - lastEvict),
-			    (unsigned)(gStrLoad - lastLoad),
-			    (int)RsGlobal.width, (int)RsGlobal.height,
-			    gxCamW, gxCamH, gxEfbHeight);
-			lastLodMiss = gLodMiss;
-			lastEvict = gStrEvict; lastLoad = gStrLoad;
-			GeckoLog(hb);
-			// Cutscene clock ratio, to the card: ct (cutscene seconds) vs
-			// wall dt between beats answers "2x?" numerically, and ts names
-			// the culprit if the global timescale is the one doubled.
-			if(CCutsceneMgr::IsRunning()){
-				DVD_FS_GUARD;
-				FILE *cf = fopen("dvd:/cut.log", "a");
-				if(cf){
-					fprintf(cf, "CUT wall=%u ct=%d ts=%.2f step=%.4f\n",
-					    (unsigned)now,
-					    CCutsceneMgr::GetCutsceneTimeInMilleseconds(),
-					    CTimer::GetTimeScale(),
-					    CTimer::GetTimeStepNonClippedInSeconds());
-					fclose(cf);
-				}
-			}
-			// The frame profile on its own short line. The HB line above is
-			// far past what Gecko delivers intact, so anything appended to it
-			// is never read — and the whole question right now is which phase
-			// owns the frame. Tenths of a millisecond, same units as the HUD.
-			{
-				extern unsigned gxSnapSim, gxSnapRender, gxSnapSky, gxBeginUs,
-				    gxSnapFrame;
-				extern unsigned gxListUs, gxPreUs, gxAudioUs, gxFadeUs,
-				    gxAfterUs;
-				extern unsigned gxSnapTile, gxSnapStream, gxSnapCopy,
-				    gxSnapVsync;
-				char prof[96];
-				// F = whole frame period in tenths of a ms (333 = 30fps),
-				// L = limiter pref (0 off, 1 sixty, 2 thirty), V = vsync pref.
-				// X = worst single frame in the beat (gxWorstSnap). The
-				// specifier used to ride with NO argument — every later
-				// column shifted one arg left (X showed the limiter, w
-				// printed stack garbage). Keep count and args in lockstep.
-				snprintf(prof, sizeof(prof),
-				    "P s%u b%u r%u m%u F%u X%u L%d V%d C%d M%d li%u pr%u a%u fd%u af%u ti%u st%u cp%u vs%u d%d q%u w%u",
-				    gxSnapSky/100, gxBeginUs/100,
-				    gxSnapRender/100, gxSnapSim/100, gxSnapFrame/100,
-				    gxWorstSnap/100,
-				    (int)FrontEndMenuManager.m_PrefsFrameLimiter,
-				    (int)FrontEndMenuManager.m_PrefsVsyncDisp,
-				    (int)CPostFX::EffectSwitch, (int)CPostFX::MotionBlurOn,
-				    gxListUs/100, gxPreUs/100, gxAudioUs/100,
-				    gxFadeUs/100, gxAfterUs/100,
-				    gxSnapTile/100, gxSnapStream/100, gxSnapCopy/100,
-				    gxSnapVsync/100,
-#ifdef SCREEN_DROPLETS
-				    ScreenDroplets::ms_numDrops,
-#else
-				    -1,
-#endif
-				    gFxQueued, gFxDrawn);
-				gFxQueued = gFxDrawn = 0;
-				GeckoLog(prof);
-				// Droplet vitals + build tag, to the card unconditionally:
-				// every "which build are you on / which link broke" debate
-				// would have been one line in this file.
-				{
-					static int8 dropHb;
-					if(++dropHb >= 6){
-						dropHb = 0;
-						DVD_FS_GUARD;
-						FILE *df = fopen("dvd:/automenu.log", "a");
-						if(df){
-							fprintf(df,
-							    "DROP b=" __TIME__ " d=%d q=%u st=%d rain=%d\n",
-#ifdef SCREEN_DROPLETS
-							    ScreenDroplets::ms_numDrops,
-#else
-							    -1,
-#endif
-							    rw::gx::gxDropQuads, rw::gx::gxDropBeginState,
-							    (int)(CWeather::Rain*100));
-							fclose(df);
-						}
-					}
-					rw::gx::gxDropQuads = 0;
-				}
-				if(gLogToSd){
-					DVD_FS_GUARD;
-					FILE *pf = fopen("dvd:/hb.log", "a");
-					// The HB line (ev/ld churn counters) is appended once at
-					// the end of the heartbeat block; only the profile line
-					// belongs here.
-					if(pf){ fprintf(pf, "%s\n", prof); fclose(pf); }
-				}
-			}
-			// dvd:/autolog.txt turns the per-heartbeat SD logging on, so a
-			// hands-free run leaves hb.log with the full series.
-			{
-				static int8 autoLog = -1;
-				if(autoLog < 0){
-					DVD_FS_GUARD;
-					FILE *al = fopen("dvd:/autolog.txt", "r");
-					autoLog = al != nil;
-					if(al) fclose(al);
-					if(autoLog)
-						gLogToSd = true;
-				}
-			}
-			{
-				// dvd:/autoweather.txt forces rain. Re-forced every heartbeat,
-				// not once: the first beat lands during loading and
-				// CWeather::Init wipes the force right after — measured as a
-				// bone-dry street with the trigger armed.
-				static int8 autoWeather = -1;
-				if(autoWeather < 0){
-					DVD_FS_GUARD;
-					FILE *aw = fopen("dvd:/autoweather.txt", "r");
-					autoWeather = aw != nil;
-					if(aw) fclose(aw);
-				}
-				if(autoWeather > 0)
-					CWeather::ForceWeatherNow(WEATHER_RAINY);
-			}
-			// The neo-row probe, re-emitted here because the original in
-			// CustomFrontendOptionsPopulate fires before the filesystem
-			// (and the Gecko listener) exist. gNeoRowsIn is latched there;
-			// this line lands.
-			{
-				static bool8 neoReported;
-				if(!neoReported){
-					neoReported = TRUE;
-					extern int8 gNeoRowsIn;
-					char nl[32];
-					snprintf(nl, sizeof(nl), "NEO rows=%d", (int)gNeoRowsIn);
-					GeckoLog(nl);
-					DVD_FS_GUARD;
-					FILE *nf = fopen("dvd:/automenu.log", "a");
-					if(nf){ fprintf(nf, "%s\n", nl); fclose(nf); }
-				}
-			}
-			// dvd:/automenu.txt opens the pause menu once, hands-free, the
-			// same way autostart.txt skips the frontend. The menu freeze is
-			// only reachable by pressing Start, which makes it untestable
-			// without a controller on the machine doing the debugging — and a
-			// bug you cannot trigger on demand costs a boot per attempt.
-			// Fires once, after the world has settled, so it reproduces the
-			// real case (menu over a loaded game) rather than menu-over-nothing.
-			// It opens AND closes, because the two fail differently and only
-			// the pair separates them: with the SD contention reduced the game
-			// got past opening and started stopping on the way out instead,
-			// which is the interesting half now. Closing also writes
-			// gta_vc.set, so the exit is a filesystem event as much as a
-			// rendering one.
-			{
-				// Open, close, open again. The freeze survives one whole
-				// cycle and only lands on the SECOND open, which is what says
-				// it is state the close does not release rather than a race —
-				// so a reproduction that stops after one cycle reproduces
-				// nothing.
-				static int autoMenuStep;
-				bool menuUp = FrontEndMenuManager.m_bMenuActive;
-				if(autoMenuStep == 0 && now > 30000 && !menuUp){
-					DVD_FS_GUARD;
-					FILE *am = fopen("dvd:/automenu.txt", "r");
-					if(am){
-						fclose(am);
-						autoMenuStep = 1;
-						GeckoLog("AUTOMENU o1");
-						FrontEndMenuManager.RequestFrontEndStartUp();
-					}
-				}else if(autoMenuStep == 1 && menuUp){
-					autoMenuStep = 2;
-					GeckoLog("AUTOMENU c1");
-					FrontEndMenuManager.RequestFrontEndShutDown();
-				}else if(autoMenuStep == 2 && !menuUp){
-					autoMenuStep = 3;
-					GeckoLog("AUTOMENU o2");
-					FrontEndMenuManager.RequestFrontEndStartUp();
-				}else if(autoMenuStep == 3 && menuUp){
-					autoMenuStep = 4;
-					GeckoLog("AUTOMENU survived");
-				}
-			}
-			// Allocation size histogram, so the block size of any pool comes
-			// out of measured demand instead of intuition. tot = every
-			// allocation ever made in that bucket (the churn that fragments),
-			// live = how many of them are still outstanding.
-			{
-				char h1[256];
-				int n = snprintf(h1, sizeof(h1), "ALLOC tot");
-				for(int b = 0; b < 16; b++)
-					n += snprintf(h1+n, sizeof(h1)-n, " %u", rw::rwAllocTotal[b]);
-				DVD_FS_GUARD;
-				FILE *fa = gLogToSd ? fopen("dvd:/alloc.log", "a") : nil;
-				if(fa){
-					fprintf(fa, "%s\n", h1);
-					n = snprintf(h1, sizeof(h1), "ALLOC live");
-					for(int b = 0; b < 16; b++)
-						n += snprintf(h1+n, sizeof(h1)-n, " %u", rw::rwAllocLive[b]);
-					fprintf(fa, "%s\n", h1);
-					n = snprintf(h1, sizeof(h1), "ALLOC kb");
-					for(int b = 0; b < 16; b++)
-						n += snprintf(h1+n, sizeof(h1)-n, " %u",
-						    rw::rwAllocLiveBytes[b]>>10);
-					fprintf(fa, "%s\n", h1);
-					fclose(fa);
-				}
-			}
-			DVD_FS_GUARD;
-			FILE *f = gLogToSd ? fopen("dvd:/hb.log", "a") : nil;
-			if(f){
-				fprintf(f, "%s\n", hb);
-				fclose(f);
-			}
-		}
-	}
-#endif
 
-	gPhase = "tbinit";
 	tbInit();
-	gPhase = "after-tbinit";
 
 	CSprite2d::InitPerFrame();
 	CFont::InitPerFrame();
@@ -2182,71 +1607,60 @@ Idle(void *arg)
 	CPointLights::InitPerFrame();
 
 	tbStartTimer(0, "CGame::Process");
+	GC_PROF_BEGIN(tGame);
+	CGame::Process();
+	GC_PROF_END(tGame, 4);
+	tbEndTimer("CGame::Process");
 #ifdef GTA_OGC
-	// Split the frame: simulation vs everything else. Three render-side
-	// optimisations moved the frame rate by nothing and the rate is flat
-	// across a 59% swing in vertex count, so measure where the time
-	// actually goes instead of guessing.
+	// B99: black and silent from New Game until the first cutscene actually
+	// runs. The intro script fades in (2 s of GAME time) in the same frame the
+	// cutscene load begins; on a real drive the next three frames take seconds
+	// of WALL time each, so the world, radar and ambience showed through at
+	// fade 247..225 (B98 FRAME trace). Main never saw it: with MEM2 those
+	// frames were 16 ms. Released by the first running cutscene, or after 15 s
+	// of game time (Load Game has no cutscene).
+	// B102: the 15 s game-time escape released the hold before the office
+	// scene — the INTRO script's special-character loads alone take longer
+	// than that on this drive, so the street came back under the black.
+	// Released only by a running cutscene, or by a real fade-in: 30 frames
+	// below 224 with no cutscene load in flight (Load Game has no cutscene;
+	// MAIN's one-frame fade-in before INTRO fades out again never qualifies).
+	// Between scenes the same rule applies without the hold: fully faded out
+	// and no cutscene running is muted, enforced every frame because
+	// DeleteCutsceneData restores 127 at each scene's end.
 	{
-		extern unsigned gxSimUs;
-		unsigned long long t0 = gettime();
-	gPhase = "process";
-		CGame::Process();
-		gxSimUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-	}
-	{
-		// Field heartbeat, 5s: the three reported symptoms as numbers.
-		// FADE — fading entities inserted/drawn (pop-in fix);
-		// FT   — frame pacing: worst frame and spike counts (stutter fix);
-		// AUD  — silence chunks served to starved voices + chunks decoded
-		//        off-thread (menu-static fix + decode-thread liveness).
-		extern unsigned gFadeIns, gFadeDraws;
-		extern unsigned gxFrameUs;
-		extern unsigned gStreamStarvedTotal, gStreamDecPumps;
-		static u64 lastFadeBeat;
-		static unsigned ftFrames, ftWorst, ftOver25, ftOver40;
-		ftFrames++;
-		if(gxFrameUs > ftWorst) ftWorst = gxFrameUs;
-		if(gxFrameUs > 25000) ftOver25++;
-		if(gxFrameUs > 40000) ftOver40++;
-		u64 now = gettime();
-		if(lastFadeBeat == 0 || ticks_to_millisecs(now - lastFadeBeat) > 5000){
-			lastFadeBeat = now;
-			printf("FADE ins=%u draw=%u | FT n=%u worst=%ums >25=%u >40=%u | AUD strv=%u dec=%u\n",
-			    gFadeIns, gFadeDraws, ftFrames, ftWorst/1000,
-			    ftOver25, ftOver40,
-			    gStreamStarvedTotal, gStreamDecPumps);
-			gFadeIns = 0;
-			gFadeDraws = 0;
-			ftFrames = 0; ftWorst = 0; ftOver25 = 0; ftOver40 = 0;
+		static int gcVisible, gcMuted = -1;
+		if(gIntroHold){
+			if(CCutsceneMgr::IsRunning())
+				gIntroHold = false;
+			else{
+				// B113: not while the menu is up — behind the in-game frontend the
+				// fade is 0, and 30 frames of "Start Game / New Game" released the
+				// hold, so the street played under the menu after the loading bar.
+				if(!CCutsceneMgr::IsCutsceneProcessing() && !FrontEndMenuManager.m_bMenuActive && CDraw::FadeValue < 224) gcVisible++; else gcVisible = 0;
+				if(gcVisible > 30) gIntroHold = false;
+			}
+			if(gIntroHold) CDraw::FadeValue = 255;
+		}
+		int fade = CDraw::FadeValue;
+		int mute = gIntroHold || (TheCamera.GetScreenFadeStatus() == FADE_2 && !CCutsceneMgr::IsRunning()) ? 1 :
+		           (fade <= 224 || CCutsceneMgr::IsRunning()) ? 0 : gcMuted;
+		if(mute == 1){
+			DMAudio.SetEffectsFadeVol(0); DMAudio.SetMusicFadeVol(0);
+		}else if(mute == 0 && gcMuted != 0){
+			DMAudio.SetEffectsFadeVol(127); DMAudio.SetMusicFadeVol(127);
+		}
+		if(mute != gcMuted && mute != -1){
+			gcMuted = mute;
+			printf("MUTE %s fade=%d hold=%d f=%u\n", mute ? "on" : "off", fade, gIntroHold, (unsigned)CTimer::GetFrameCounter());
 		}
 	}
-#else
-	gPhase = "process";
-	CGame::Process();
-	gPhase = "after-process";
 #endif
-	tbEndTimer("CGame::Process");
 	POP_MEMID();
-
 	tbStartTimer(0, "DMAudio.Service");
-#ifdef GTA_OGC
-	// everything from here to the end of Idle = the "post-sim" half
-	extern unsigned gxPostUs;
-	unsigned long long tPost = gettime();
-	struct PostTimer {
-		unsigned long long t; unsigned *out;
-		~PostTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
-	} postTimer = { tPost, &gxPostUs };
-	{
-		extern unsigned gxAudioUs;
-		unsigned long long t0 = gettime();
-		DMAudio.Service();
-		gxAudioUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-	}
-#else
+	GC_PROF_BEGIN(tAudio);
 	DMAudio.Service();
-#endif
+	GC_PROF_END(tAudio, 5);
 	tbEndTimer("DMAudio.Service");
 
 	if(CGame::bDemoMode && CTimer::GetTimeInMilliseconds() > (3*60 + 30)*1000 && !CCutsceneMgr::IsCutsceneProcessing()){
@@ -2260,15 +1674,31 @@ Idle(void *arg)
 		return;
 	}
 	
+	SetLightsWithTimeOfDayColour(Scene.world);
+
 #ifdef GTA_OGC
 	{
-		extern unsigned gxLightsUs;
-		unsigned long long t0 = gettime();
-		SetLightsWithTimeOfDayColour(Scene.world);
-		gxLightsUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+		// B98: New Game -> first cutscene timeline. One line per state change
+		// (fade value, fade status, world-render branch, cutscene state, menu,
+		// camera mode) and one every 300 frames regardless.
+		static uint32 lastKey = ~0u, lastFrame;
+		int st = TheCamera.GetScreenFadeStatus();
+		int world = !FrontEndMenuManager.m_bMenuActive && st != FADE_2;
+		int cam = TheCamera.Cams[TheCamera.ActiveCam].Mode;
+		uint32 key = CDraw::FadeValue | st << 8 | world << 10 | (CCutsceneMgr::ms_cutsceneLoadStatus & 7) << 11 |
+		    CCutsceneMgr::IsRunning() << 14 | CCutsceneMgr::IsCutsceneProcessing() << 15 |
+		    FrontEndMenuManager.m_bMenuActive << 16 | (cam & 0xff) << 17 |
+		    TheCamera.GetFading() << 25 | (TheCamera.GetFadingDirection() == FADE_IN) << 26;
+		if(key != lastKey || CTimer::GetFrameCounter() - lastFrame >= 300){
+			lastKey = key; lastFrame = CTimer::GetFrameCounter();
+			printf("FRAME %u t=%u fade=%u st=%d world=%d cut=%u/%d/%d menu=%d cam=%d fading=%d%s\n",
+			    (unsigned)CTimer::GetFrameCounter(), (unsigned)CTimer::GetTimeInMilliseconds(),
+			    (unsigned)CDraw::FadeValue, st, world, (unsigned)CCutsceneMgr::ms_cutsceneLoadStatus,
+			    CCutsceneMgr::IsRunning(), CCutsceneMgr::IsCutsceneProcessing(),
+			    FrontEndMenuManager.m_bMenuActive, cam, TheCamera.GetFading(),
+			    TheCamera.GetFading() ? (TheCamera.GetFadingDirection() == FADE_IN ? " in" : " out") : "");
+		}
 	}
-#else
-	SetLightsWithTimeOfDayColour(Scene.world);
 #endif
 
 	if(arg == nil)
@@ -2296,28 +1726,16 @@ Idle(void *arg)
 			CRenderer::ClearForFrame();
 		}
 #endif
-#ifdef GTA_OGC
-		{
-			extern unsigned gxListUs, gxPreUs;
-			unsigned long long t0 = gettime();
-			CRenderer::ConstructRenderList();
-			gxListUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-			tbEndTimer("CnstrRenderList");
-
-			tbStartTimer(0, "PreRender");
-			t0 = gettime();
-			CRenderer::PreRender();
-			gxPreUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-			tbEndTimer("PreRender");
-		}
-#else
+		GC_PROF_BEGIN(tCnstr);
 		CRenderer::ConstructRenderList();
+		GC_PROF_END(tCnstr, 6);
 		tbEndTimer("CnstrRenderList");
 
 		tbStartTimer(0, "PreRender");
+		GC_PROF_BEGIN(tPre);
 		CRenderer::PreRender();
+		GC_PROF_END(tPre, 7);
 		tbEndTimer("PreRender");
-#endif
 
 #ifdef FIX_BUGS
 		RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void *)FALSE); // TODO: temp? this fixes OpenGL render but there should be a better place for this
@@ -2326,14 +1744,6 @@ Idle(void *arg)
 		RwCameraSetFogDistance(Scene.camera, CTimeCycle::GetFogStart());
 #endif
 
-#ifdef GTA_OGC
-		extern unsigned gxSkyUs;
-		unsigned long long tSky = gettime();
-		struct SkyTimer {
-			unsigned long long t; unsigned *out;
-			~SkyTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
-		} skyTimer = { tSky, &gxSkyUs };
-#endif
 		if(CWeather::LightningFlash && !CCullZones::CamNoRain()){
 			if(!DoRWStuffStartOfFrame_Horizon(255, 255, 255, 255, 255, 255, 255))
 				goto popret;
@@ -2344,9 +1754,6 @@ Idle(void *arg)
 				goto popret;
 		}
 
-#ifdef GTA_OGC
-		gxSkyUs = (unsigned)ticks_to_microsecs(gettime() - tSky);
-#endif
 		DefinedState();
 
 #ifndef FIX_BUGS
@@ -2355,67 +1762,52 @@ Idle(void *arg)
 #endif
 
 		tbStartTimer(0, "RenderScene");
-#ifdef GTA_OGC
-		{
-			extern unsigned gxRenderUs;
-			unsigned long long t0 = gettime();
-			RenderScene();
-			gxRenderUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-		}
-#else
+		GC_PROF_BEGIN(tRender);
 		RenderScene();
-#endif
+		GC_PROF_END(tRender, 8);
 		tbEndTimer("RenderScene");
-#ifdef GTA_OGC
-		extern unsigned gxTailUs;
-		unsigned long long tTail = gettime();
-		struct TailTimer {
-			unsigned long long t; unsigned *out;
-			~TailTimer(){ *out = (unsigned)ticks_to_microsecs(gettime() - t); }
-		} tailTimer = { tTail, &gxTailUs };
-#endif
+		GC_PROF_BEGIN(tFx);
 
 #ifdef EXTENDED_PIPELINES
 		CustomPipes::EnvMapRender();
 #endif
 
 		RenderDebugShit();
-#ifdef GTA_OGC
-		{
-			extern unsigned gxFxUs;
-			unsigned long long t0 = gettime();
-			RenderEffects();
-			gxFxUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-		}
-#else
+		GC_PROF_BEGIN(tEffects);
 		RenderEffects();
-#endif
+		GC_PROF_END(tEffects, 12);
 
 		if((TheCamera.m_BlurType == MOTION_BLUR_NONE || TheCamera.m_BlurType == MOTION_BLUR_LIGHT_SCENE) &&
 		   TheCamera.m_ScreenReductionPercentage > 0.0f)
 		        TheCamera.SetMotionBlurAlpha(150);
 
 #ifdef SCREEN_DROPLETS
+		GC_PROF_BEGIN(tDroplets);
+#ifdef GTA_OGC
+		// B177: the refraction grab is a 600K frame copy; take it only when
+		// there is a drop to refract.
+		ScreenDroplets::Process();
+		if(ScreenDroplets::ms_numDrops || ScreenDroplets::ms_numDropsMoving)
+			CPostFX::GetBackBuffer(Scene.camera);
+#else
 		CPostFX::GetBackBuffer(Scene.camera);
 		ScreenDroplets::Process();
+#endif
 		ScreenDroplets::Render();
+		GC_PROF_END(tDroplets, 13);
 #endif
 
 		tbStartTimer(0, "RenderMotionBlur");
+		GC_PROF_BEGIN(tBlur);
 		TheCamera.RenderMotionBlur();
+		GC_PROF_END(tBlur, 14);
 		tbEndTimer("RenderMotionBlur");
 
+		GC_PROF_END(tFx, 9);   // effects, droplets, motion blur between RenderScene and the 2D pass
 		tbStartTimer(0, "Render2dStuff");
-#ifdef GTA_OGC
-		{
-			extern unsigned gxHudUs;
-			unsigned long long t0 = gettime();
-			Render2dStuff();
-			gxHudUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-		}
-#else
+		GC_PROF_BEGIN(t2d);
 		Render2dStuff();
-#endif
+		GC_PROF_END(t2d, 10);
 		tbEndTimer("Render2dStuff");
 	}else{
 		CDraw::CalculateAspectRatio();
@@ -2431,9 +1823,7 @@ Idle(void *arg)
 	}
 
 	tbStartTimer(0, "RenderMenus");
-	gPhase = "menus";
 	RenderMenus();
-	gPhase = "after-menus";
 	tbEndTimer("RenderMenus");
 
 #ifdef PS2_MENU
@@ -2442,57 +1832,25 @@ Idle(void *arg)
 #endif
 
 	tbStartTimer(0, "DoFade");
-#ifdef GTA_OGC
-	{
-		extern unsigned gxFadeUs;
-		unsigned long long t0 = gettime();
-		DoFade();
-		gxFadeUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-	}
-#else
 	DoFade();
-#endif
 	tbEndTimer("DoFade");
 
 	tbStartTimer(0, "Render2dStuff-Fade");
-#ifdef GTA_OGC
-	{
-		extern unsigned gxAfterUs;
-		unsigned long long t0 = gettime();
-	gPhase = "2dafterfade";
-		Render2dStuffAfterFade();
-		gPhase = "after-2dafterfade";   // closed, or every hang reads as this
-		gxAfterUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-	}
-#else
-	gPhase = "2dafterfade";
 	Render2dStuffAfterFade();
-	gPhase = "after-2dafterfade";
-#endif
 	tbEndTimer("Render2dStuff-Fade");
 	// CCredits::Render(); // They added it to function above and also forgot it here
 #ifdef XBOX_MESSAGE_SCREEN
-	gPhase = "overlays";
 	FrontEndMenuManager.DrawOverlays();
-	gPhase = "after-overlays";
 #endif
 
 	if (gbShowTimebars)
 		tbDisplay();
 
-#ifdef GTA_OGC
 	{
-		extern unsigned gxEndUs;
-		unsigned long long t0 = gettime();
-	gPhase = "endofframe";
+		GC_PROF_BEGIN(tPresent);
 		DoRWStuffEndOfFrame();
-		gxEndUs = (unsigned)ticks_to_microsecs(gettime() - t0);
+		GC_PROF_END(tPresent, 11);
 	}
-#else
-	gPhase = "endofframe";
-	DoRWStuffEndOfFrame();
-	gPhase = "after-endofframe";
-#endif
 
 	POP_MEMID();	// MEMID_RENDER
 

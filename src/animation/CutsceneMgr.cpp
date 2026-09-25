@@ -1,3 +1,8 @@
+#ifdef GTA_OGC
+#include <unistd.h>
+extern "C" int gcStreamPrimed(int n);   // sampman_gamecube.cpp (B83)
+extern bool gcAutoSkipCutscenes;   // gamecube.cpp: set by autocar.txt
+#endif
 #include "common.h"
 
 #include "General.h"
@@ -6,6 +11,7 @@
 #include <new>
 #include "Directory.h"
 #include "Camera.h"
+#include "Draw.h"
 #include "Streaming.h"
 #include "CdStream.h"
 #include "FileMgr.h"
@@ -204,11 +210,18 @@ CCutsceneMgr::LoadCutsceneData(const char *szCutsceneName)
 	uint32 byteSize;
 	CPlayerPed *pPlayerPed;
 
+	DMAudio.SetEffectsFadeVol(0);
+	DMAudio.SetMusicFadeVol(0);
 	ms_pCutsceneDir->numEntries = 0;
 	if(!ms_pCutsceneDir->ReadDirFile("ANIM\\CUTS.DIR")){
 		ms_animLoaded = false;
 		return;
 	}
+#ifdef GTA_OGC
+	uint32 gcLoadT0 = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond();
+	printf("CUT %s load begin t=%u f=%u fade=%u\n", szCutsceneName, (unsigned)CTimer::GetTimeInMilliseconds(),
+	    (unsigned)CTimer::GetFrameCounter(), (unsigned)CDraw::FadeValue);
+#endif
 
 	ms_cutsceneProcessing = true;
 	ms_wasCutsceneSkipped = false;
@@ -218,7 +231,6 @@ CCutsceneMgr::LoadCutsceneData(const char *szCutsceneName)
 
 	CStreaming::RemoveUnusedModelsInLoadedList();
 	CGame::DrasticTidyUpMemory(true);
-
 	strcpy(ms_cutsceneName, szCutsceneName);
 
 	// Load animations
@@ -231,6 +243,9 @@ CCutsceneMgr::LoadCutsceneData(const char *szCutsceneName)
 	    offset <= INT32_MAX/CDSTREAM_SECTOR_SIZE - size) {
 		byteSize = size * CDSTREAM_SECTOR_SIZE;
 		uint32 byteOffset = offset * CDSTREAM_SECTOR_SIZE;
+		CStreaming::MakeSpaceFor(byteSize);
+		CGame::DrasticTidyUpMemory(true);
+		CStreaming::ImGonnaUseStreamingMemory();
 		stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, "ANIM\\CUTS.IMG");
 		bool success = stream != nil;
 		if(success){
@@ -242,6 +257,7 @@ CCutsceneMgr::LoadCutsceneData(const char *szCutsceneName)
 			ms_cutsceneAssociations.CreateAssociations(szCutsceneName);
 		if(stream)
 			RwStreamClose(stream, nil);
+		CStreaming::IHaveUsedStreamingMemory();
 		ms_animLoaded = success;
 	} else {
 		ms_animLoaded = false;
@@ -288,6 +304,10 @@ CCutsceneMgr::LoadCutsceneData(const char *szCutsceneName)
 	CWorld::Players[CWorld::PlayerInFocus].MakePlayerSafe(true);
 
 	CTimer::Resume();
+#ifdef GTA_OGC
+	printf("CUT %s load end %ums anim=%d cam=%d\n", szCutsceneName,
+	    (unsigned)(CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond() - gcLoadT0), ms_animLoaded, bCamLoaded);
+#endif
 }
 
 void
@@ -454,6 +474,10 @@ CCutsceneMgr::DeleteCutsceneData(void)
 {
 	if (!ms_loaded) return;
 	CTimer::Suspend();
+#ifdef GTA_OGC
+	DMAudio.SetEffectsFadeVol(0);
+	DMAudio.SetMusicFadeVol(0);
+#endif
 
 	ms_cutsceneProcessing = false;
 	ms_useLodMultiplier = false;
@@ -493,6 +517,11 @@ CCutsceneMgr::DeleteCutsceneData(void)
 	}
 	ms_running = false;
 	ms_loaded = false;
+#ifndef GTA_OGC
+	DMAudio.SetEffectsFadeVol(127);   // B80: a skipped cutscene never reached the un-mute above
+	DMAudio.SetMusicFadeVol(127);
+#endif
+	CStreaming::RemoveUnusedModelsInLoadedList();   // B80: cutscene props/peds go now, not at the LRU's leisure
 
 	FindPlayerPed()->bIsVisible = true;
 	CPad::GetPad(0)->SetEnablePlayerControls(PLAYERCONTROL_CUTSCENE);
@@ -533,6 +562,12 @@ CCutsceneMgr::DeleteCutsceneData(void)
 		NumberOfSavedWeapons = 0;
 	}
 
+#ifdef GTA_OGC
+	if(TheCamera.GetScreenFadeStatus() != FADE_2){
+		DMAudio.SetEffectsFadeVol(127);
+		DMAudio.SetMusicFadeVol(127);
+	}
+#endif
 	CTimer::Resume();
 }
 
@@ -549,7 +584,25 @@ CCutsceneMgr::Update(void)
 
 	switch (ms_cutsceneLoadStatus) {
 	case CUTSCENE_LOADING_AUDIO:
+#ifdef GTA_OGC
+		// B95: hold the main loop (black screen) until the dialogue stream is primed,
+		// 3s at most. B83 returned to the game loop instead, and the world showed
+		// through before the cutscene camera took over.
+		{
+			int wait;
+			for(wait = 0; wait < 300 && !gcStreamPrimed(0); wait++) usleep(10000);
+			printf("CUT %s audio-wait %dms primed=%d t=%u f=%u\n", ms_cutsceneName, wait*10, gcStreamPrimed(0),
+			    (unsigned)CTimer::GetTimeInMilliseconds(), (unsigned)CTimer::GetFrameCounter());
+		}
+#endif
 		SetupCutsceneToStart();
+#ifdef GTA_OGC
+		printf("CUT %s started camLoaded=%d cam=%d fade=%u\n", ms_cutsceneName, bCamLoaded,
+		    TheCamera.Cams[TheCamera.ActiveCam].Mode, (unsigned)CDraw::FadeValue);
+		{ extern int gcCutAudioTrace; gcCutAudioTrace = 180; }   // B102: name the "door slam" at the scene start
+#endif
+		DMAudio.SetEffectsFadeVol(127);   // B80: loaded, sound back
+		DMAudio.SetMusicFadeVol(127);
 		if (CGeneral::faststricmp(ms_cutsceneName, "finale"))
 			DMAudio.PlayPreloadedCutSceneMusic();
 		ms_cutsceneLoadStatus++;
@@ -580,39 +633,6 @@ CCutsceneMgr::Update(void)
 	ms_cutsceneTimer += CTimer::GetTimeStepNonClippedInSeconds();
 #endif
 
-#ifdef GTA_OGC
-	// 2x-speed hunt: three clocks once a second over gecko. rt = pause-mode
-	// ms (raw wall time, immune to ms_fTimeScale), gt = game ms (scaled +
-	// 60ms clip), ct = this cutscene timer (scaled, unclipped). Whichever
-	// one runs at twice rt names the culprit; if all three agree the speed
-	// bug is downstream of the clocks (anim data or render), not timing.
-	{
-		extern void GeckoLog(const char *msg);
-		static float prevTimer = 1e9f;
-		static uint32 rt0, gt0, frames;
-		if (ms_cutsceneTimer < prevTimer) {   // timer restarted = new scene
-			rt0 = CTimer::GetTimeInMillisecondsPauseMode();
-			gt0 = CTimer::GetTimeInMilliseconds();
-			frames = 0;
-		}
-		prevTimer = ms_cutsceneTimer;
-		if (++frames % 60 == 0) {
-			char line[96];
-			snprintf(line, sizeof(line), "CUT f=%u rt=%u gt=%u ct=%u ts=%.2f",
-			    (unsigned)frames,
-			    (unsigned)(CTimer::GetTimeInMillisecondsPauseMode() - rt0),
-			    (unsigned)(CTimer::GetTimeInMilliseconds() - gt0),
-			    (unsigned)(ms_cutsceneTimer * 1000.0f),
-			    CTimer::GetTimeScale());
-			GeckoLog(line);
-			// The card copy is the one that survives: the gecko capture
-			// reconnects mid-run and truncates lines.
-			DVD_FS_GUARD;
-			FILE *cl = fopen("dvd:/cut.log", "a");
-			if (cl) { fprintf(cl, "%s\n", line); fclose(cl); }
-		}
-	}
-#endif
 
 	for (int i = 0; i < ms_numCutsceneObjs; i++) {
 		int modelId = ms_pCutsceneObjects[i]->GetModelIndex();
@@ -626,6 +646,9 @@ CCutsceneMgr::Update(void)
 	if (bCamLoaded)
 		if (CGeneral::faststricmp(ms_cutsceneName, "finale") && TheCamera.Cams[TheCamera.ActiveCam].Mode == CCam::MODE_FLYBY && ms_cutsceneLoadStatus == CUTSCENE_LOADING_0) {
 			if (CPad::GetPad(0)->GetCrossJustDown()
+#ifdef GTA_OGC
+				|| (gcAutoSkipCutscenes && ms_cutsceneTimer > 1.0f && !ms_wasCutsceneSkipped)
+#endif
 #ifndef GTA_OGC
 				|| (CGame::playingIntro && CPad::GetPad(0)->GetStartJustDown())
 #else
@@ -639,9 +662,20 @@ CCutsceneMgr::Update(void)
 				|| CPad::GetPad(0)->GetEnterJustDown()
 				|| CPad::GetPad(0)->GetCharJustDown(' ')
 #endif
-			)
+			){
+#ifdef GTA_OGC
+					// B98: a scene that ends early ends here or nowhere; say so.
+					printf("CUT %s skipped by cross at %.1fs t=%u f=%u\n", ms_cutsceneName, ms_cutsceneTimer,
+					    (unsigned)CTimer::GetTimeInMilliseconds(), (unsigned)CTimer::GetFrameCounter());
+#endif
 					FinishCutscene();
+			}
 		}
+#ifdef GTA_OGC
+	if(bCamLoaded && (CTimer::GetFrameCounter() % 120) == 0)
+		printf("CUT %s running %.1fs spline %.3f fade=%u f=%u\n", ms_cutsceneName, ms_cutsceneTimer,
+		    TheCamera.GetPositionAlongSpline(), (unsigned)CDraw::FadeValue, (unsigned)CTimer::GetFrameCounter());
+#endif
 }
 
 bool CCutsceneMgr::HasCutsceneFinished(void) { return !bCamLoaded || TheCamera.GetPositionAlongSpline() == 1.0f; }

@@ -117,8 +117,18 @@ CTxdStore::AddRef(int slot)
 void
 CTxdStore::RemoveRef(int slot)
 {
+#ifdef GTA_OGC
+	// B62: a TXD at refcount 0 stays resident. The PS2 freed it here at once;
+	// with our 700K pulls that starved scenes (shared_beach was freed 50 times while
+	// models needing it were in flight: "txd missing" failures). Its texels are
+	// the ARAM cache the port is built around; RemoveLeastUsedModel evicts an
+	// unreferenced TXD when memory is actually needed.
+	if(--GetSlot(slot)->refCount < 0)
+		GetSlot(slot)->refCount = 0;
+#else
 	if(--GetSlot(slot)->refCount <= 0)
 		CStreaming::RemoveTxd(slot);
+#endif
 }
 
 void
@@ -134,7 +144,17 @@ CTxdStore::LoadTxd(int slot, RwStream *stream)
 	RwUInt32 size;
 
 	if(RwStreamFindChunk(stream, rwID_TEXDICTIONARY, &size, nil)){
+#ifdef GTA_OGC
+		// fonts and hud stay in MEM1: drawn every frame, drawn last, and the
+		// first to lose the ARAM tier's window to the world (gxraster.cpp).
+		extern int gxTierExempt;
+		gxTierExempt = !CGeneral::faststricmp(def->name, "fonts") ||
+		    !CGeneral::faststricmp(def->name, "hud");
 		def->texDict = RwTexDictionaryGtaStreamRead(stream, size);
+		gxTierExempt = 0;
+#else
+		def->texDict = RwTexDictionaryGtaStreamRead(stream, size);
+#endif
 		return def->texDict != nil;
 	}
 	printf("Failed to load TXD\n");

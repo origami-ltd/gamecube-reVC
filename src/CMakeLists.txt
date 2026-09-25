@@ -5,6 +5,18 @@ endif()
 
 file(GLOB_RECURSE ${PROJECT}_SOURCES "*.cpp" "*.c" "*.h" "*.rc")
 if(NINTENDO_OGC)
+    # The -O3 hot list, dca3's (miami/Makefile OBJS_O3) mapped onto this tree;
+    # everything else is -Os from the top-level options.
+    foreach(hot core/World.cpp collision/Collision.cpp math/math.cpp
+            math/Matrix.cpp math/Quaternion.cpp math/Rect.cpp math/Vector.cpp
+            renderer/Shadows.cpp)
+        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${hot})
+            set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/${hot}
+                PROPERTIES COMPILE_OPTIONS "-O3")
+        endif()
+    endforeach()
+endif()
+if(NINTENDO_OGC)
     list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "CdStream_posix\\.cpp$")
     list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "/audio/(eax|oal)/")
     list(FILTER ${PROJECT}_SOURCES EXCLUDE REGEX "/audio/sampman_(miles|oal)\\.cpp$")
@@ -42,7 +54,9 @@ else()
     target_link_libraries(${EXECUTABLE} PRIVATE fat iso9660)
     target_link_options(${EXECUTABLE} PRIVATE
         -Wl,--gc-sections
-        -Wl,--wrap=__eabi)
+        -Wl,--wrap=__eabi
+        -Wl,--wrap=malloc -Wl,--wrap=memalign -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=realloc
+        -Wl,-u,gMainWhere)   # keep the watchdog checkpoint symbol through LTO (Dolphin MemoryWatcher reads it by address)
     # The game never throws and never uses typeid or dynamic_cast, but the
     # build was paying for both anyway: __EH_FRAME_BEGIN__ measured 339KB, the
     # second largest object in the whole image behind ThePaths, and the section
@@ -53,6 +67,12 @@ else()
     # libogc rejects defining both __gamecube__ and __wii__, so this is its own
     # macro rather than a reuse of either.
     target_compile_definitions(${EXECUTABLE} PRIVATE GTA_OGC)
+    # Wii release: malloc may grow into MEM2 (libogc's default). OFF clamps the
+    # Wii DOL to the GameCube's MEM1-only heap, for reproducing GC memory bugs.
+    option(REVC_WII_MEM2 "Wii build: let malloc use MEM2" ON)
+    if(NINTENDO_WII AND REVC_WII_MEM2)
+        target_compile_definitions(${EXECUTABLE} PRIVATE REVC_WII_MEM2)
+    endif()
     if(${PROJECT}_AUDIO_GC)
         target_compile_definitions(${EXECUTABLE} PRIVATE AUDIO_GAMECUBE)
         target_link_libraries(${EXECUTABLE} PRIVATE aesnd)

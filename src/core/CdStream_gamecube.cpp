@@ -8,6 +8,7 @@
 #include <ogc/mutex.h>
 #include <ogc/lwp_watchdog.h>
 #include <ogc/aram.h>
+#include <ogc/arqueue.h>
 #include <ogc/cache.h>
 
 // ---------------------------------------------------------------- ARAM cache
@@ -46,6 +47,10 @@ static uint32    aramSlotBytes;
 static uint32    aramClock;
 static bool      aramReady;
 uint32 gAramHits, gAramMisses;   // reported by the HUD
+extern "C" { extern volatile const char *gMainWhere; }   // gamecube.cpp watchdog checkpoint
+extern "C" int fsReadSectorsAbs(u32 lba, u32 count, void *dst);   // dvdfs.c raw sectors (audio channel, B69)
+extern "C" { volatile unsigned gCdTick, gCdState; }   // MemoryWatcher heartbeats: worker loops, 1 while a read is in flight
+extern "C" { extern volatile unsigned gIsoRdBusy; }   // dvdfs.c: sector+1 while a DVD command is in flight
 
 // ARAM DMA wants both addresses and the length 32-byte aligned. Stream buffers
 // come from RwMallocAlign at sector alignment, so only the length needs
@@ -57,19 +62,13 @@ aramAlign32(uint32 v)
 }
 
 static void
-aramWaitDMA(void)
-{
-	while(AR_GetDMAStatus())
-		;
-}
-
-static void
 AramCacheInit(uint32 maxRequestSectors)
 {
 	if(aramReady || maxRequestSectors == 0)
 		return;
 	if(!AR_CheckInit())
 		AR_Init(nil, 0);
+	ARQ_Init();
 
 	aramSlotBytes = aramAlign32(maxRequestSectors * CDSTREAM_SECTOR_SIZE);
 
@@ -111,8 +110,9 @@ AramCacheRead(void *buffer, uint32 offset, uint32 size)
 			continue;
 		uint32 len = aramAlign32(size * CDSTREAM_SECTOR_SIZE);
 		DCInvalidateRange(buffer, len);
-		AR_StartDMA(AR_ARAMTOMRAM, (u32)buffer, s->aramAddr, len);
-		aramWaitDMA();
+		ARQRequest request;
+		ARQ_PostRequest(&request, 0x47434453, ARQ_ARAMTOMRAM, ARQ_PRIO_LO,
+		    s->aramAddr, (u32)MEM_VIRTUAL_TO_PHYSICAL(buffer), len);
 		s->lastUsed = ++aramClock;
 		gAramHits++;
 		return true;
@@ -137,8 +137,9 @@ AramCacheStore(const void *buffer, uint32 offset, uint32 size)
 			victim = i;
 	AramSlot *s = &aramSlots[victim];
 	DCFlushRange((void*)buffer, len);
-	AR_StartDMA(AR_MRAMTOARAM, (u32)buffer, s->aramAddr, len);
-	aramWaitDMA();
+	ARQRequest request;
+	ARQ_PostRequest(&request, 0x47434453, ARQ_MRAMTOARAM, ARQ_PRIO_LO,
+	    s->aramAddr, (u32)MEM_VIRTUAL_TO_PHYSICAL(buffer), len);
 	s->offset = offset;
 	s->size = size;
 	s->lastUsed = ++aramClock;
@@ -162,14 +163,18 @@ struct CdRequest {
 	void *buffer;
 	uint32 offset;
 	uint32 size;
+	uint8  absolute;         // offset is a disc LBA, not an image sector (B69)
+	uint32 stageSectors;     // B177: absolute burst through buffer, piece by piece
+	CdStreamSink sink;
+	void *sinkCtx;
 	volatile int32 status;   // STREAM_* , or STREAM_READING while queued
 };
-static CdRequest requests[MAX_CDCHANNELS];
+static CdRequest requests[MAX_CDCHANNELS+1];   // +1: the audio channel (sampman, B68)
 static lwp_t     ioThread = LWP_THREAD_NULL;
 static sem_t     ioPending;
 static mutex_t   ioLock = LWP_MUTEX_NULL;
 static volatile bool ioQuit;
-static volatile int32 ioQueue[MAX_CDCHANNELS+1];
+static volatile int32 ioQueue[MAX_CDCHANNELS+2];
 static volatile int32 ioHead, ioTail;
 
 // libfat is shared by this worker and by every dvd:/ log the game writes from
@@ -214,7 +219,7 @@ static uint32 imageSectors[MAX_CDIMAGES];
 static int32 imageCount;
 static int32 channelCount;
 static int32 lastPosition;
-static int32 channelStatus[MAX_CDCHANNELS];
+static int32 channelStatus[MAX_CDCHANNELS+1];
 
 static void
 CdStreamFatal(const char *what, int32 channel, uint32 offset, uint32 size)
@@ -231,8 +236,8 @@ CdStreamInit(int32 numChannels)
 {
 	CdStreamRemoveImages();
 	lastPosition = 0;
-	channelCount = numChannels >= 0 && numChannels <= MAX_CDCHANNELS ? numChannels : 0;
-	for(int32 i = 0; i < MAX_CDCHANNELS; i++)
+	channelCount = numChannels >= 0 && numChannels <= MAX_CDCHANNELS ? numChannels + 1 : 0;   // +1 audio channel
+	for(int32 i = 0; i < MAX_CDCHANNELS+1; i++)
 		channelStatus[i] = STREAM_NONE;
 	// Nothing in the game calls CdStreamInitThread — it is only declared in
 	// CdStream.h — so start the worker here, from the entry point that is
@@ -248,6 +253,21 @@ CdStreamDoRead(int32 channel)
 	CdRequest *r = &requests[channel];
 	uint32 offset = r->offset, size = r->size;
 	void *buffer = r->buffer;
+
+	if(r->absolute){
+		uint32 step = r->sink ? r->stageSectors : size, done = 0;
+		do{
+			uint32 n = size - done < step ? size - done : step;
+			CdStreamFsLock();
+			int ok = n && fsReadSectorsAbs(offset + done, n, buffer);
+			CdStreamFsUnlock();
+			if(!ok){ CdStreamFatal("abs read failed", channel, offset, size); return STREAM_ERROR; }
+			done += n;
+			if(r->sink && !r->sink(buffer, n * CDSTREAM_SECTOR_SIZE, r->sinkCtx))
+				break;
+		}while(done < size);
+		return STREAM_NONE;
+	}
 
 	uint32 image = _GET_INDEX(offset);
 	uint32 sector = _GET_OFFSET(offset);
@@ -294,17 +314,20 @@ static void*
 CdStreamThread(void*)
 {
 	for(;;){
+		gCdTick++; gCdState = 0;
 		LWP_SemWait(ioPending);
 		if(ioQuit)
 			break;
 		LWP_MutexLock(ioLock);
 		int32 ch = ioHead == ioTail ? -1 : ioQueue[ioHead];
 		if(ch >= 0)
-			ioHead = (ioHead + 1) % (MAX_CDCHANNELS+1);
+			ioHead = (ioHead + 1) % (MAX_CDCHANNELS+2);
 		LWP_MutexUnlock(ioLock);
 		if(ch < 0)
 			continue;
+		gCdState = 1;
 		int32 st = CdStreamDoRead(ch);
+		gCdState = 2;
 		channelStatus[ch] = st;
 		requests[ch].status = st;   // published last: Sync watches this
 	}
@@ -318,7 +341,7 @@ CdStreamInitThread(void)
 		return;
 	ioQuit = false;
 	ioHead = ioTail = 0;
-	LWP_SemInit(&ioPending, 0, MAX_CDCHANNELS);
+	LWP_SemInit(&ioPending, 0, MAX_CDCHANNELS+1);
 	LWP_MutexInit(&ioLock, false);
 	if(fsLock == LWP_MUTEX_NULL)
 		LWP_MutexInit(&fsLock, true);   // recursive, see the note above
@@ -335,8 +358,9 @@ CdStreamInitThread(void)
 		CdStreamFatal("worker create failed", -1, 0, 0);
 }
 
-int32
-CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
+static int32
+CdStreamQueue(int32 channel, void *buffer, uint32 offset, uint32 size, int absolute,
+              uint32 stageSectors = 0, CdStreamSink sink = nil, void *sinkCtx = nil)
 {
 	if(channel < 0 || channel >= channelCount || buffer == nil){
 		if(channel >= 0 && channel < channelCount){
@@ -352,6 +376,10 @@ CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
 	r->buffer = buffer;
 	r->offset = offset;
 	r->size = size;
+	r->absolute = (uint8)absolute;   // before the post: the worker outranks us and runs at once
+	r->stageSectors = stageSectors;
+	r->sink = sink;
+	r->sinkCtx = sinkCtx;
 
 	// No worker: do it inline rather than queue work nobody will service.
 	// Stuttery, but it always makes progress.
@@ -368,7 +396,7 @@ CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
 	channelStatus[channel] = STREAM_READING;
 
 	LWP_MutexLock(ioLock);
-	int32 nextTail = (ioTail + 1) % (MAX_CDCHANNELS+1);
+	int32 nextTail = (ioTail + 1) % (MAX_CDCHANNELS+2);
 	if(nextTail == ioHead){
 		LWP_MutexUnlock(ioLock);
 		CdStreamFatal("queue full", channel, offset, size);
@@ -378,6 +406,27 @@ CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
 	LWP_MutexUnlock(ioLock);
 	LWP_SemPost(ioPending);
 	return STREAM_SUCCESS;
+}
+
+int32
+CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
+{
+	return CdStreamQueue(channel, buffer, offset, size, 0);
+}
+
+int32
+CdStreamReadAbs(int32 channel, void *buffer, uint32 lba, uint32 sectors)
+{
+	return CdStreamQueue(channel, buffer, lba, sectors, 1);
+}
+
+int32
+CdStreamReadAbsChunked(int32 channel, void *stage, uint32 stageSectors, uint32 lba, uint32 sectors,
+                       CdStreamSink sink, void *ctx)
+{
+	if(sink == nil || stageSectors == 0)
+		return STREAM_ERROR;
+	return CdStreamQueue(channel, stage, lba, sectors, 1, stageSectors, sink, ctx);
 }
 
 int32
@@ -405,13 +454,38 @@ CdStreamSync(int32 channel)
 	// count pending and the next Sync blocked forever — the loading screen
 	// hang. Status is written once by the worker and read here; there is no
 	// count to get out of step.
+	gMainWhere = "cd-sync";
 	u64 started = gettime();
+	// B104: b101 boot took 107s to the second frame, and the watchdog caught
+	// main parked here at log 17:08 with the worker idle (gCdState 0) and the
+	// DVD idle (gIsoRdBusy 0) — nobody was going to publish that completion.
+	// One sample is not a diagnosis, so print what tells the three cases apart
+	// on the next slow spin:
+	//   q empty, worker ticking      -> the request never reached the queue
+	//   q non-empty, worker tick +0  -> the worker is not being scheduled
+	//   worker state 1 / dvd busy    -> genuinely slow I/O, look at the disc
+	unsigned cdTick0 = gCdTick;
+	bool warned = false;
 	while(requests[channel].status == STREAM_READING){
 		LWP_YieldThread();
-		if(ticks_to_millisecs(gettime() - started) > 30000)
+		uint32 ms = ticks_to_millisecs(gettime() - started);
+		if(!warned && ms > 250){
+			warned = true;
+			printf("CDSYNC slow ch %d off %u size %u st %02x | worker +%u state %u | q %d..%d | dvd %u\n",
+			    (int)channel, (unsigned)requests[channel].offset,
+			    (unsigned)requests[channel].size,
+			    (unsigned)requests[channel].status,
+			    (unsigned)(gCdTick - cdTick0), (unsigned)gCdState,
+			    (int)ioHead, (int)ioTail, (unsigned)gIsoRdBusy);
+		}
+		if(ms > 30000)
 			CdStreamFatal("read timeout", channel, requests[channel].offset,
 			    requests[channel].size);
 	}
+	if(warned)
+		printf("CDSYNC done ch %d after %ums | worker +%u\n", (int)channel,
+		    (unsigned)ticks_to_millisecs(gettime() - started),
+		    (unsigned)(gCdTick - cdTick0));
 	int32 st = requests[channel].status;
 	requests[channel].status = STREAM_NONE;
 	channelStatus[channel] = STREAM_NONE;

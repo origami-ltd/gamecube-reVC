@@ -1,3 +1,6 @@
+#ifdef GTA_OGC
+extern "C" void gcBootLevelLoaded(void);   // gamecube.cpp (B151)
+#endif
 #include "common.h"
 #include "platform.h"
 
@@ -45,6 +48,7 @@
 #include "Messages.h"
 #include "MemoryCard.h"
 #include "MemoryHeap.h"
+#include "MemoryMgr.h"
 #include "Pad.h"
 #include "Particle.h"
 #include "ParticleObject.h"
@@ -95,6 +99,16 @@
 #include "custompipes.h"
 #include "screendroplets.h"
 #include "VarConsole.h"
+#ifdef GTA_OGC
+// B155: per-phase frame profile, printed with the census (gamecube.cpp).
+extern "C" unsigned long long gcNowUs(void);
+extern "C" void gcProfAdd(int id, unsigned long long us);
+#define GC_PROF_BEGIN(v) unsigned long long v = gcNowUs()
+#define GC_PROF_END(v, id) gcProfAdd(id, gcNowUs() - v)
+#else
+#define GC_PROF_BEGIN(v)
+#define GC_PROF_END(v, id)
+#endif
 #ifdef USE_TEXTURE_POOL
 #include "TexturePools.h"
 #endif
@@ -418,6 +432,17 @@ bool CGame::Initialise(const char* datFile)
 	int particleTxdSlot = CTxdStore::AddTxdSlot("particle");
 	CTxdStore::LoadTxd(particleTxdSlot, "MODELS/PARTICLE.TXD");
 	CTxdStore::AddRef(particleTxdSlot);
+#ifdef GTA_OGC
+	// B89: the shared texture pool (sharedpool.py). Resident for the whole run;
+	// archive TXDs reference its texels by hash instead of carrying copies.
+	{
+		int sharedTxdSlot = CTxdStore::AddTxdSlot("shared");
+		if(CTxdStore::LoadTxd(sharedTxdSlot, "MODELS/SHARED.TXD"))
+			CTxdStore::AddRef(sharedTxdSlot);
+		else
+			printf("SHARED: models/shared.txd missing; archive references will fail\n");
+	}
+#endif
 	CTxdStore::SetCurrentTxd(gameTxdSlot);
 	LoadingScreen("Loading the Game", "Setup game variables", nil);
 	POP_MEMID();
@@ -480,6 +505,9 @@ bool CGame::Initialise(const char* datFile)
 		POP_MEMID();
 		return false;
 	}
+#ifdef GTA_OGC
+	gcBootLevelLoaded();   // B151: the boot's fixed data is in; from here the streaming floor applies
+#endif
 
 	LoadingScreen("Loading the Game", "Add Particles", nil);
 	CWorld::AddParticles();
@@ -523,13 +551,11 @@ bool CGame::Initialise(const char* datFile)
 	}
 	POP_MEMID();
 #ifdef GTA_OGC
-	BootLog("anims done");
 #endif
 
 	CStreaming::LoadInitialWeapons();
 	CStreaming::LoadAllRequestedModels(0);
 #ifdef GTA_OGC
-	BootLog("weapons done");
 #endif
 	CPed::Initialise();
 	CRouteNode::Initialise();
@@ -903,7 +929,7 @@ bool CGame::InitialiseWhenRestarting(void)
 void CGame::Process(void) 
 {
 	CPad::UpdatePads();
-#ifdef USE_CUSTOM_ALLOCATOR
+#if defined(USE_CUSTOM_ALLOCATOR) || defined(GTA_OGC)
 	ProcessTidyUpMemory();
 #endif
 #ifdef DEBUGMENU
@@ -935,19 +961,9 @@ void CGame::Process(void)
 	}
 #endif
 	uint32 startTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond();
-#ifdef GTA_OGC
-	// Streaming does synchronous SD reads inside the sim step; time it
-	// apart from the rest so we know whether the frame is game logic or
-	// blocking I/O before trying to fix either.
-	{
-		extern unsigned gxStreamUs;
-		unsigned long long t0 = gettime();
-		CStreaming::Update();
-		gxStreamUs = (unsigned)ticks_to_microsecs(gettime() - t0);
-	}
-#else
+	GC_PROF_BEGIN(tStream);
 	CStreaming::Update();
-#endif
+	GC_PROF_END(tStream, 0);
 	uint32 processTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond() - startTime;
 	CWindModifiers::Number = 0;
 	if (!CTimer::GetIsPaused())
@@ -968,7 +984,9 @@ void CGame::Process(void)
 		CWeather::Update();
 
 		PUSH_MEMID(MEMID_SCRIPT);
+		GC_PROF_BEGIN(tScript);
 		CTheScripts::Process();
+		GC_PROF_END(tScript, 1);
 		POP_MEMID();
 
 		CCollision::Update();
@@ -987,6 +1005,7 @@ void CGame::Process(void)
 		CEventList::Update();
 		CParticle::Update();
 		gFireManager.Update();
+		GC_PROF_BEGIN(tPop);
 
 		// Otherwise even on 30 fps most probably you won't see any peds around Ocean View Hospital
 #if defined FIX_BUGS && !defined SQUEEZE_PERFORMANCE
@@ -1000,6 +1019,7 @@ void CGame::Process(void)
 			CPopulation::Update(true);
 			processTime = CTimer::GetCurrentTimeInCycles() / CTimer::GetCyclesPerMillisecond() - startTime;
 		}
+		GC_PROF_END(tPop, 3);
 		CWeapon::UpdateWeapons();
 		if (!CCutsceneMgr::IsRunning())
 			CTheCarGenerators::Process();
@@ -1012,7 +1032,9 @@ void CGame::Process(void)
 		CReplay::Update();
 
 		PUSH_MEMID(MEMID_WORLD);
+		GC_PROF_BEGIN(tWorld);
 		CWorld::Process();
+		GC_PROF_END(tWorld, 2);
 		POP_MEMID();
 
 		gAccidentManager.Update();
@@ -1050,9 +1072,7 @@ void CGame::Process(void)
 #endif
 }
 
-#ifdef USE_CUSTOM_ALLOCATOR
-
-// TODO(MIAMI)
+#if defined(USE_CUSTOM_ALLOCATOR) || defined(GTA_OGC)
 
 int32 gNumMemMoved;
 
@@ -1061,7 +1081,7 @@ MoveMem(void** ptr)
 {
 	if (*ptr) {
 		gNumMemMoved++;
-		void* newPtr = gMainHeap.MoveMemory(*ptr);
+		void* newPtr = MemoryMgrMoveMemory(*ptr);
 		if (*ptr != newPtr) {
 			*ptr = newPtr;
 			return true;
@@ -1156,7 +1176,9 @@ MoveAtomicMemory(RpAtomic* atomic, bool onlyOne)
 {
 	RpGeometry* geo = RpAtomicGetGeometry(atomic);
 
-#if THIS_IS_COMPATIBLE_WITH_GTA3_RW31
+#if defined(GTA_OGC) && defined(LIBRW)
+	return rw::gx::gxMoveGeometryMemory(geo, MemoryMgrMoveMemory, onlyOne);
+#elif THIS_IS_COMPATIBLE_WITH_GTA3_RW31
 	if (MoveMem((void**)&geo->triangles) && onlyOne)
 		return true;
 	if (MoveMem((void**)&geo->matList.materials) && onlyOne)
@@ -1238,7 +1260,7 @@ bool
 TidyUpModelInfo(CBaseModelInfo* modelInfo, bool onlyone)
 {
 	if (modelInfo->GetColModel() && modelInfo->DoesOwnColModel())
-		if (MoveColModelMemory(*modelInfo->GetColModel(), onlyone))
+		if (MoveColModelMemory(*modelInfo->GetColModel(), onlyone) && onlyone)
 			return true;
 
 	RwObject* rwobj = modelInfo->GetRwObject();
@@ -1268,7 +1290,9 @@ TidyUpModelInfo(CBaseModelInfo* modelInfo, bool onlyone)
 
 void CGame::DrasticTidyUpMemory(bool flushDraw)
 {
-#ifdef USE_CUSTOM_ALLOCATOR
+#if defined(GTA_OGC)
+	TidyUpMemory(true, flushDraw);
+#elif defined(USE_CUSTOM_ALLOCATOR)
 	bool removedCol = false;
 
 	TidyUpMemory(true, flushDraw);
@@ -1301,19 +1325,37 @@ void CGame::DrasticTidyUpMemory(bool flushDraw)
 	if (!playingIntro)
 		CStreaming::RequestBigBuildings(currLevel);
 
+#ifdef GTA_OGC
+	{
+		// The island-change "Loading..." box: say what it cost on the disc.
+		extern "C" unsigned gIsoRdN, gIsoRdJumps;
+		unsigned r0 = gIsoRdN, j0 = gIsoRdJumps;
+		uint32 t0 = CTimer::GetTimeInMilliseconds();
+		int32 req = CStreaming::ms_numModelsRequested;
+		CStreaming::LoadAllRequestedModels(true);
+		printf("LEVEL load: %d files, %u reads %u seeks, %ums\n", req, gIsoRdN - r0, gIsoRdJumps - j0, (unsigned)(CTimer::GetTimeInMilliseconds() - t0));
+	}
+#else
 	CStreaming::LoadAllRequestedModels(true);
+#endif
 #endif
 }
 
 void CGame::TidyUpMemory(bool moveTextures, bool flushDraw)
 {
+#if defined(USE_CUSTOM_ALLOCATOR) || defined(GTA_OGC)
+	MemoryMgrBeginCompaction(SIZE_MAX);
+	gNumMemMoved = 0;
 #ifdef USE_CUSTOM_ALLOCATOR
 	printf("Largest free block before tidy %d\n", gMainHeap.GetLargestFreeBlock());
+#endif
 
 	if (moveTextures) {
 		if (flushDraw) {
 #ifdef GTA_PS2
 			for (int i = 0; i < sweMaxFlips + 1; i++) {
+#elif defined(GTA_OGC)
+			for (int i = 0; i < 1; i++) {
 #else
 			for (int i = 0; i < 5; i++) {	// probably more than needed
 #endif
@@ -1350,13 +1392,16 @@ void CGame::TidyUpMemory(bool moveTextures, bool flushDraw)
 		TidyUpModelInfo(mi, false);
 	}
 
+#ifdef USE_CUSTOM_ALLOCATOR
 	printf("Largest free block after tidy %d\n", gMainHeap.GetLargestFreeBlock());
+#endif
 #endif
 	}
 
 void CGame::ProcessTidyUpMemory(void)
 {
-#ifdef USE_CUSTOM_ALLOCATOR
+#if defined(USE_CUSTOM_ALLOCATOR) || defined(GTA_OGC)
+	MemoryMgrBeginCompaction(64*1024);
 	static int32 modelIndex = 0;
 	static int32 animIndex = 0;
 	static int32 txdIndex = 0;

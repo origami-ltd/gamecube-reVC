@@ -86,7 +86,8 @@ def convert_native(payload):
     if platform != PLATFORM_GAMECUBE or header[87] != GXFMT_RGB5A3:
         return payload, 0, 0
     old_size = struct.unpack_from("<I", body, GX_HEADER)[0]
-    if width == 0 or height == 0 or old_size != width * height * 2:
+    # CI8 tiles are 8x4; a width that is only RGB5A3's multiple of 4 stays RGB5A3.
+    if width == 0 or height == 0 or width % 8 or old_size != width * height * 2:
         return payload, 0, 0
     start = GX_HEADER + 4
     if start + old_size != len(body):

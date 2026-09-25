@@ -114,9 +114,15 @@ cAudioManager::Terminate()
 	}
 }
 
+#ifdef GTA_OGC
+int gcCutAudioTrace;   // B102: frames left to name every channel started after a cutscene begins (CutsceneMgr sets it)
+#endif
 void
 cAudioManager::Service()
 {
+#ifdef GTA_OGC
+	if(gcCutAudioTrace > 0) gcCutAudioTrace--;
+#endif
 	GenerateIntegerRandomNumberTable();
 	if (m_bTimerJustReset) {
 		ResetAudioLogicTimers(m_nTimer);
@@ -1328,6 +1334,16 @@ cAudioManager::ProcessActiveQueues()
 							SampleManager.SetChannel3DDistances(k, m_asActiveSamples[k].m_MaxDistance, 0.25f * m_asActiveSamples[k].m_MaxDistance);
 #endif
 							SampleManager.StartChannel(k);
+#ifdef GTA_OGC
+							if(gcCutAudioTrace > 0){
+								int32 ent = m_asActiveSamples[k].m_nEntityIndex;
+								printf("SND start ch%d sample=%u bank=%u vol=%u loop=%d ent=%d type=%d f=%u\n", k,
+								    (unsigned)m_asActiveSamples[k].m_nSampleIndex, (unsigned)m_asActiveSamples[k].m_nBankIndex,
+								    (unsigned)emittingVol, (int)m_asActiveSamples[k].m_nLoopCount, (int)ent,
+								    ent >= 0 && ent < NUM_AUDIOENTITIES ? (int)m_asAudioEntities[ent].m_nType : -1,
+								    (unsigned)CTimer::GetFrameCounter());
+							}
+#endif
 						}
 						m_asActiveSamples[k].m_bIsBeingPlayed = TRUE;
 						channelOffset++;

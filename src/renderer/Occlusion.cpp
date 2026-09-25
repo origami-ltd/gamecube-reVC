@@ -396,7 +396,7 @@ bool CActiveOccluder::IsPointWithinOcclusionArea(float pX, float pY, float area)
 
 bool COcclusion::IsAABoxOccluded(CVector pos, float width, float length, float height) {
 
-	CVector coors;
+	CVector coors, corner;
 	float outW, outH;
 
 	if (!NumActiveOccluders || !CalcScreenCoors(pos, &coors, &outW, &outH))
@@ -421,10 +421,10 @@ bool COcclusion::IsAABoxOccluded(CVector pos, float width, float length, float h
 				return true;
 
 			if (aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) {
-				if (CalcScreenCoors(minCorner, &coors) && !aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
-				if (CalcScreenCoors(CVector(maxCorner.x, maxCorner.y, minCorner.z), &coors) && !aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
-				if (CalcScreenCoors(CVector(maxCorner.x, minCorner.y, maxCorner.z), &coors) && !aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
-				if (CalcScreenCoors(CVector(minCorner.x, maxCorner.y, maxCorner.z), &coors, &outW, &outH) && !aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
+				if (CalcScreenCoors(minCorner, &corner) && !aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
+				if (CalcScreenCoors(CVector(maxCorner.x, maxCorner.y, minCorner.z), &corner) && !aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
+				if (CalcScreenCoors(CVector(maxCorner.x, minCorner.y, maxCorner.z), &corner) && !aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
+				if (CalcScreenCoors(CVector(minCorner.x, maxCorner.y, maxCorner.z), &corner, &outW, &outH) && !aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
 
 				return true;
 			}
@@ -498,16 +498,17 @@ void COcclusion::Render() {
 
 bool CEntity::IsEntityOccluded(void) {
 
-	CVector coors;
+	CVector coors, corner;
 	float width, height;
 
 	if (COcclusion::NumActiveOccluders == 0 || !CalcScreenCoors(GetBoundCentre(), &coors, &width, &height))
 		return false;
 
-	float area = Max(width, height) * GetBoundRadius() * 0.9f;
+	float radius = GetBoundRadius();
+	float area = Max(width, height) * radius * 0.9f;
 
 	for (int i = 0; i < COcclusion::NumActiveOccluders; i++) {
-		if (coors.z - (GetBoundRadius() * 0.85f) > COcclusion::aActiveOccluders[i].radius) {
+		if (coors.z - (radius * 0.85f) > COcclusion::aActiveOccluders[i].radius) {
 			if (COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, area)) {
 				return true;
 			}
@@ -516,10 +517,10 @@ bool CEntity::IsEntityOccluded(void) {
 				CVector min = m_matrix * CModelInfo::GetColModel(m_modelIndex)->boundingBox.min;
 				CVector max = m_matrix * CModelInfo::GetColModel(m_modelIndex)->boundingBox.max;
 
-				if (CalcScreenCoors(min, &coors) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
-				if (CalcScreenCoors(CVector(max.x, max.y, min.z), &coors) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
-				if (CalcScreenCoors(CVector(max.x, min.y, max.z), &coors) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
-				if (CalcScreenCoors(CVector(min.x, max.y, max.z), &coors) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(coors.x, coors.y, 0.0f)) continue;
+				if (CalcScreenCoors(min, &corner) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
+				if (CalcScreenCoors(CVector(max.x, max.y, min.z), &corner) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
+				if (CalcScreenCoors(CVector(max.x, min.y, max.z), &corner) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
+				if (CalcScreenCoors(CVector(min.x, max.y, max.z), &corner) && !COcclusion::aActiveOccluders[i].IsPointWithinOcclusionArea(corner.x, corner.y, 0.0f)) continue;
 
 				return true;
 			}

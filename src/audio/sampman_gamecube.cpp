@@ -37,8 +37,10 @@
 #include <gccore.h>
 #include <aesndlib.h>
 #include <ogc/aram.h>
+#include <ogc/arqueue.h>
 #include <ogc/cache.h>
 #include <ogc/lwp_watchdog.h>
+#include <ogc/machine/processor.h>
 #include <malloc.h>
 #include <math.h>
 #include <stdarg.h>
@@ -47,7 +49,6 @@
 #include <unistd.h>
 #include "vendor/librw/src/lodepng/lodepng.h"
 
-void GeckoLog(const char *msg);
 
 // Fail-loud audio: any sound that cannot be served stops the game on the
 // spot, with the reason on the card first. That was the right trade while
@@ -59,38 +60,14 @@ void GeckoLog(const char *msg);
 // and costs them the session. Audio that cannot be served is now a line on
 // the gecko and silence in that one channel; the game keeps running.
 // Re-enable it when hunting an audio bug, not otherwise.
-#define AUDIO_FAIL_LOUD
 
-#ifdef AUDIO_FAIL_LOUD
 static void
 gcAudioDie(const char *what, const char *detail)
 {
-	char line[200];
-	struct mallinfo mi = mallinfo();
-	snprintf(line, sizeof(line), "FATAL-AUDIO %s %s [libc-free=%uK]",
-	    what, detail ? detail : "", (unsigned)mi.fordblks/1024);
-	GeckoLog(line);
-	// Silence the DSP first: it keeps looping its last buffer through the
-	// crash otherwise (the user's "horrible beep").
-	AESND_Pause(true);
-	// gcFatalPark runs in thread context: writes crash.log, paints the park
-	// screen WITH this message (the register-dump red screen of a raw null
-	// store carries no text), and stops the world.
-	extern void gcFatalPark(const char *tag, const char *msg);
-	gcFatalPark("FATAL-AUDIO", line);
+	// A sound that cannot be served is one line and silence on that channel;
+	// the game keeps running.
+	printf("audio-miss %s %s\n", what, detail ? detail : "");
 }
-#else
-// Quiet, but not silent: the reason still goes out over the gecko, which
-// costs nothing and touches no filesystem. Losing the diagnostic entirely
-// was the other half of the old trade and it is not worth keeping.
-static void
-gcAudioDie(const char *what, const char *detail)
-{
-	char line[200];
-	snprintf(line, sizeof(line), "audio-miss %s %s", what, detail ? detail : "");
-	GeckoLog(line);
-}
-#endif
 
 cSampleManager SampleManager;
 bool8 _bSampmanInitialised = FALSE;
@@ -121,6 +98,8 @@ struct GcChannel {
 	int32    loopEnd;    // -1 = to the end of the sample
 	bool8    used;
 	volatile bool8 playing;   // cleared by the AESND callback when the buffer ends
+	struct GcVoiceStream *vs;  // ARAM streaming state, one per voice (B42)
+	bool8    streamed;        // this play is fed from ARAM, no whole-sample PCM
 };
 static GcChannel gChannels[MAXCHANNELS + MAX2DCHANNELS];
 
@@ -143,12 +122,27 @@ enum { GC_GENERIC_VOICES = GC_CHANNEL_VOICES - 1 };
 // AESND has no "is this voice still going" query, so the voice tells us. The
 // callback runs on the audio thread and only ever clears the flag, which is
 // why a plain volatile bool is enough — there is no read-modify-write to race.
+struct GcVoiceStream;
+static void gcVoiceStreamCallback(AESNDPB *pb, GcChannel *c);
 static void
 gcVoiceCallback(AESNDPB *pb, u32 state, void *arg)
 {
-	(void)pb;
 	if(state == VOICE_STATE_STOPPED)
 		((GcChannel*)arg)->playing = FALSE;
+	else if(state == VOICE_STATE_STREAM)
+		gcVoiceStreamCallback(pb, (GcChannel*)arg);
+}
+
+static void
+gcPlayVoice(AESNDPB *voice, u32 format, const void *buffer, u32 bytes,
+    f32 frequency, bool8 stream, bool8 loop)
+{
+	u32 level;
+	_CPU_ISR_Disable(level);
+	AESND_PlayVoice(voice, format, buffer, bytes, frequency, 0, stream || loop);
+	AESND_SetVoiceLoop(voice, loop && !stream);
+	AESND_SetVoiceStream(voice, stream);
+	_CPU_ISR_Restore(level);
 }
 
 // The sample index, read once from sfx.sdt. tSample is what the game already
@@ -165,9 +159,14 @@ static bool8  gPackedSfx;
 unsigned gStreamStarvedTotal;   // silence chunks served to starved voices
 unsigned gStreamDecPumps;       // chunks decoded by the decode thread
 static lwp_t gStreamDecThread = LWP_THREAD_NULL;
+static lwp_t gVoiceDecThread = LWP_THREAD_NULL;
 static mutex_t gStreamLock[MAX_STREAMS];
 static volatile bool8 gStreamDecQuit;
 static void *gcStreamDecMain(void *);
+static void *gcVoiceDecMain(void *);
+static mutex_t gSringLock = LWP_MUTEX_NULL;   // audio I/O ring (B68), defined further down
+static void gcSringService(bool8 wait);
+struct GcStream; static void gcStreamOpenStep(GcStream *st, int32 idx);
 struct GcStreamGuard {
 	mutex_t m;
 	GcStreamGuard(mutex_t mm) : m(mm) { LWP_MutexLock(m); }
@@ -217,11 +216,68 @@ enum { GC_DSP_RATE = (uint32)(54000000.0/1124.0 + 0.5) };
 // (the DSP's stair-step is the lesser evil against a 24MB arena).
 // A converted buffer is ~2.2x the native sample. 512KB covers 99.9% of the
 // bank (measured over sfx.sdt); the handful above it play native.
-enum { GC_CH_RESAMPLE_CAP = 512*1024 };
+enum { GC_CH_RESAMPLE_CAP = 512*1024 };   // FIR for everything that fits (AESND's ucode resamples by sample-repeat: gravel on speech) — B41 bridge until the ARAM streaming voices land
 // ...but 29 channels must not each hold one, so conversions also draw on a
 // shared MEM1 budget. Past it a sound plays native rather than failing: the
 // DSP's stair-step is the graceful degradation, an allocation failure is not.
-enum { GC_CONV_BUDGET = 2048*1024 };
+// Channel PCM arena (B38). B36's tour logged 337 refusals of a 176K channel
+// buffer with 1.7MB free: heap fragmentation, and every refusal is a sound
+// the game re-requests the next frame (crackle). One block carved at init,
+// first-fit spans with coalescing, nothing else ever allocates in it — a
+// voice's buffer either fits here or the voice does not play.
+enum { GC_CONV_BUDGET = 256*1024 };   // player talk and frontend shared PCM only (B47: ped comments stream from ARAM)
+static uint8 *gPcmArena;
+struct GcPcmSpan { uint32 addr, size; bool8 used; };
+static GcPcmSpan gPcmSpans[192];
+static int32 gPcmSpanCount;
+static void
+gcPcmArenaInit(void)
+{
+	if(gPcmArena) return;
+	gPcmArena = (uint8*)memalign(32, GC_CONV_BUDGET);
+	if(gPcmArena == nil) return;
+	gPcmSpans[0].addr = (uint32)gPcmArena; gPcmSpans[0].size = GC_CONV_BUDGET; gPcmSpans[0].used = FALSE;
+	gPcmSpanCount = 1;
+	printf("AUDIO pcm arena %uK\n", (unsigned)(GC_CONV_BUDGET/1024));
+}
+static void*
+gcPcmAlloc(uint32 size)
+{
+	if(gPcmArena == nil) return memalign(32, size);   // arena refused at init: plain heap
+	size = (size + 31) & ~31u;
+	for(int32 i = 0; i < gPcmSpanCount; i++){
+		GcPcmSpan *sp = &gPcmSpans[i];
+		if(sp->used || sp->size < size) continue;
+		if(sp->size > size){
+			if(gPcmSpanCount >= (int32)ARRAY_SIZE(gPcmSpans)) return nil;
+			memmove(sp+2, sp+1, sizeof(GcPcmSpan)*(gPcmSpanCount-i-1));
+			sp[1].addr = sp->addr + size; sp[1].size = sp->size - size; sp[1].used = FALSE;
+			sp->size = size; gPcmSpanCount++;
+		}
+		sp->used = TRUE;
+		return (void*)sp->addr;
+	}
+	return nil;
+}
+static void
+gcPcmFree(void *p)
+{
+	if(p == nil) return;
+	if(gPcmArena == nil || (uint8*)p < gPcmArena || (uint8*)p >= gPcmArena + GC_CONV_BUDGET){ free(p); return; }
+	for(int32 i = 0; i < gPcmSpanCount; i++){
+		if(gPcmSpans[i].addr != (uint32)p || !gPcmSpans[i].used) continue;
+		gPcmSpans[i].used = FALSE;
+		if(i+1 < gPcmSpanCount && !gPcmSpans[i+1].used){
+			gPcmSpans[i].size += gPcmSpans[i+1].size;
+			memmove(&gPcmSpans[i+1], &gPcmSpans[i+2], sizeof(GcPcmSpan)*(gPcmSpanCount-i-2)); gPcmSpanCount--;
+		}
+		if(i > 0 && !gPcmSpans[i-1].used){
+			gPcmSpans[i-1].size += gPcmSpans[i].size;
+			memmove(&gPcmSpans[i], &gPcmSpans[i+1], sizeof(GcPcmSpan)*(gPcmSpanCount-i-1)); gPcmSpanCount--;
+		}
+		return;
+	}
+}
 // Anything bigger than this goes back to the pool the moment its sound is
 // done. Measured before this existed: 1051 of 1338 sounds could not be
 // converted because the pool was full of buffers belonging to sounds that
@@ -237,22 +293,6 @@ static uint32 gConvBytes;
 // the number that says how much of it is left.
 static uint32 gConvOk, gConvFallback, gConvPeak;
 
-// Routine logging goes to the card ONLY when dvd:/autolog.txt exists.
-//
-// On Dolphin the card is a file on an SSD and these writes are free. On a
-// real Wii they are not: every line is a FAT directory walk, a write and a
-// flush on slow media, holding the same lock the streamer needs, against a
-// log file that only grows. The user's hang.log showed the main thread stuck
-// on ONE frame for about two minutes with the GP idle - blocked on I/O, not
-// crashed - and this is the most likely thing blocking it. main.cpp has had
-// the same gate (gLogToSd) for its own logs for a while; the audio backend
-// was still writing unconditionally.
-static bool8
-gcCardLogEnabled(void)
-{
-	extern bool gLogToSd;
-	return gLogToSd ? TRUE : FALSE;
-}
 
 // Frontend stereo pairs are unexpectedly long (the highlight alone is 1.14s
 // at 8.1kHz). Rapid navigation overlaps many copies; converting every voice
@@ -275,9 +315,28 @@ static uint8 gEffectsFade = 127, gMusicFade = 127;
 // ponytail: plain MEM1 malloc (~630KB); move to MEM2/ARAM staging if the
 // arena ever needs it back.
 static uint8 *gPedBuf;
+extern "C" { extern volatile const char *gMainWhere; }   // gamecube.cpp watchdog checkpoint
+extern "C" { volatile unsigned gDecTick, gAudioCbTick; }   // MemoryWatcher heartbeats
+extern volatile uint32 gMainTick;   // gamecube.cpp
+extern "C" { extern volatile unsigned gxLastDraw, gxLastGeoFlags, gxLastGeoVerts, gxDmaBusy, gCdTick, gCdState, gIsoRdBusy; }   // watchdog inputs
+// B47: the seven slots live in ARAM ("SFX straight from the disc, cached in
+// ARAM" — user); the voices stream them as 16-bit PCM blocks. sfx.raw only;
+// the DEFLATE pack (sfx.pak) still lands in MEM1 slots.
+static uint32 gPedAram;
 static int32  gPedSlotSfx[MAX_PEDSFX];
 static uint8  gCurrentPedSlot;
 static uint8 *gPlayerTalkData;
+// B123: sfx.adp packs EVERY sample (pack_sfx_adpcm.py --all). The resident
+// bank stays in ARAM as before; ped comments and player talk are read from
+// the pack on demand, and the 340 MB sfx.raw leaves the disc. Entry offsets
+// are implied by sfx.sdt: 512-byte blocks of 1017 samples, in table order.
+static bool8  gAdpAll;
+static uint32 gAdpDataStart, gSfxAdpLba, gSfxAdpSize;
+static bool8  gPedSlotAdpcm[MAX_PEDSFX];
+static uint32 gPedSlotBytes[MAX_PEDSFX];
+static inline int16 gcImaNibble(uint8 nib, int32 *pred, int32 *idx);
+static uint32 gcAdpBlocks(uint32 n) { return (gSampleIndex[n].nSize/2 + 1016)/1017; }
+static uint32 gcAdpOffset(uint32 n) { uint32 blocks = 0; for(uint32 j = 0; j < n; j++) blocks += gcAdpBlocks(j); return gAdpDataStart + blocks*512; }
 static uint32 gPlayerTalkSfx = 0xFFFFFFFF;
 
 // Read one sample into DSP-native big-endian PCM. The packed path reconstructs
@@ -290,6 +349,28 @@ gcReadSampleData(uint32 nSfx, uint8 *dst, uint32 capacity)
 		return FALSE;
 	uint32 rawSize = gSampleIndex[nSfx].nSize;
 
+	if(!gPackedSfx && gAdpAll){
+		// B123: decode the sample's ADPCM blocks from the pack straight into dst as native int16.
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/audio/sfx.adp", "rb");
+		if(f == nil || fseek(f, (long)gcAdpOffset(nSfx), SEEK_SET) != 0){ if(f) fclose(f); return FALSE; }
+		uint32 total = rawSize/2, out = 0, blocks = gcAdpBlocks(nSfx);
+		int16 *o = (int16*)dst;
+		uint8 blk[512];
+		bool8 ok = TRUE;
+		for(uint32 b = 0; ok && b < blocks && out < total; b++){
+			ok = fread(blk, 1, sizeof(blk), f) == sizeof(blk);
+			if(!ok) break;
+			int32 pred = (int16)((uint16)blk[0] | ((uint16)blk[1] << 8)), idx = blk[2] > 88 ? 88 : blk[2];
+			o[out++] = (int16)pred;
+			for(uint32 i = 4; i < sizeof(blk) && out < total; i++){
+				o[out++] = gcImaNibble(blk[i] & 15, &pred, &idx);
+				if(out < total) o[out++] = gcImaNibble(blk[i] >> 4, &pred, &idx);
+			}
+		}
+		fclose(f);
+		return ok;
+	}
 	if(!gPackedSfx){
 		DVD_FS_GUARD;
 		FILE *f = fopen("dvd:/audio/sfx.raw", "rb");
@@ -374,6 +455,41 @@ gcReadSampleData(uint32 nSfx, uint8 *dst, uint32 capacity)
 }
 
 // One bounded read shared by ped comments and player talk.
+#if !defined(HW_RVL)
+static uint32 align32(uint32 v);
+static void gcBankWrite(uint32 dst, const void *src, uint32 n);
+// A ped comment from sfx.raw straight into its ARAM slot: 32K pieces through
+// one staging buffer, byte-swapped like the old MEM1 path, DMA'd as they land.
+static bool8
+gcReadSampleToAram(uint32 nSfx, uint32 aram)
+{
+	if(gSampleIndex == nil || nSfx >= gNumSamples ||
+	   gSampleIndex[nSfx].nSize > PED_BLOCKSIZE)
+		return FALSE;
+	static uint8 stage[32*1024] __attribute__((aligned(32)));
+	uint32 size = gSampleIndex[nSfx].nSize, done = 0;
+	DVD_FS_GUARD;
+	FILE *f = fopen("dvd:/audio/sfx.raw", "rb");
+	if(f == nil)
+		return FALSE;
+	bool8 ok = fseek(f, (long)gSampleIndex[nSfx].nOffset, SEEK_SET) == 0;
+	while(ok && done < size){
+		uint32 chunk = size - done > sizeof(stage) ? (uint32)sizeof(stage) : size - done;
+		ok = fread(stage, 1, chunk, f) == chunk;
+		if(!ok) break;
+		for(uint32 b = 0; b + 1 < chunk; b += 2){
+			uint8 t = stage[b]; stage[b] = stage[b+1]; stage[b+1] = t;
+		}
+		uint32 w = align32(chunk);
+		if(w > chunk) memset(stage + chunk, 0, w - chunk);
+		gcBankWrite(aram + done, stage, w);
+		done += chunk;
+	}
+	fclose(f);
+	return ok;
+}
+#endif
+
 static bool8
 gcReadSample(uint32 nSfx, uint8 *dst)
 {
@@ -442,25 +558,25 @@ static void
 gcBankWrite(uint32 dst, const void *src, uint32 n)
 {
 	DCFlushRange((void*)src, n);
-	AR_StartDMA(AR_MRAMTOARAM, (u32)src, dst, n);
-	while(AR_GetDMAStatus())
-		;
+	ARQRequest request;
+	ARQ_PostRequest(&request, 0x47534155, ARQ_MRAMTOARAM, ARQ_PRIO_LO,
+	    dst, (u32)MEM_VIRTUAL_TO_PHYSICAL(src), n);
 }
 static void
 gcBankRead(void *dst, uint32 src, uint32 n)
 {
 	DCInvalidateRange(dst, n);
-	AR_StartDMA(AR_ARAMTOMRAM, (u32)dst, src, n);
-	while(AR_GetDMAStatus())
-		;
+	ARQRequest request;
+	ARQ_PostRequest(&request, 0x47534155, ARQ_ARAMTOMRAM, ARQ_PRIO_LO,
+	    src, (u32)MEM_VIRTUAL_TO_PHYSICAL(dst), n);
 }
 #endif
 
 // ---------------------------------------------------------------- lifecycle
 
 static void gcStreamsShutdown(void);   // defined with the stream machinery
+static void gcVoiceSlotsInit(void);    // defined with the ARAM voice machinery
 static void gcLoadTrackLengths(void);  // same
-static void gcAudioSelfTest(void);     // defined after the stream machinery
 
 
 bool8
@@ -468,9 +584,6 @@ cSampleManager::Initialise(void)
 {
 	if(_bSampmanInitialised)
 		return TRUE;
-
-	AESND_Init();
-	AESND_Pause(false);
 
 #if !defined(HW_RVL)
 	if(!AR_CheckInit()){
@@ -485,6 +598,34 @@ cSampleManager::Initialise(void)
 		AR_Init(aramBlocks, 300);
 	}
 #endif
+	// B115 (user): dvd:/noaudio.txt = no audio at all — the PC "no device"
+	// path (cAudioManager stays uninitialised, every DMAudio call is a no-op).
+	// ARAM is initialised above regardless, the texel store needs it.
+	{
+		FILE *f = fopen("dvd:/noaudio.txt", "rb");
+		if(f){
+			fclose(f);
+			printf("AUDIO: disabled by dvd:/noaudio.txt\n");
+			return FALSE;
+		}
+	}
+
+	// AUDIO REMOVED FOR THE MEMORY TEST (user directive 09-01): no sample
+	// bank in ARAM, no ped buffer, no AESND voices, no decode thread, no
+	// Vorbis radio streams, no per-channel PCM staging. Returning FALSE is the
+	// PC "no audio device" path: cAudioManager stays uninitialised, so
+	// MusicManager never starts and every DMAudio call is a no-op. ARAM is
+	// still initialised above with a real block table — the CdStream cache
+	// would otherwise AR_Init(nil, 0) and the first AR_Alloc writes through
+	// address zero. FMV audio (gcmovie's own AESND lifetime) is separate.
+	//
+	// Audio is back (user, 09-01 evening): the resident bank rides ARAM as
+	// IMA ADPCM (3.8MB in the 4MB the texel tier leaves), decoded on prepare;
+	// the Tremor streams stay; the streaming budget yields the MEM1.
+
+	AESND_Init();
+	AESND_Pause(false);
+	gcPcmArenaInit();
 
 	// Only as many as the budget allows: allocating all 44 slots would eat
 	// every voice and leave the streams none. Generics first, then the one
@@ -502,19 +643,18 @@ cSampleManager::Initialise(void)
 		if(pc->voice)
 			AESND_SetVoiceStop(pc->voice, true);
 	}
+	gcVoiceSlotsInit();
 
 	// Not fatal when the bank is absent. The card does not carry audio yet,
 	// and the null backend this replaces always reported success — failing
 	// init here would turn "no sound" into "no boot", which is a strictly
 	// worse way to be missing audio.
 	if(!InitialiseSampleBanks()){
-		GeckoLog("audio: no sfx bank, sound disabled");
 		gcAudioDie("sfx.sdt-open-or-read", "dvd:/audio/sfx.sdt");
 	}else if(!LoadSampleBank(SFX_BANK_0)){
 		// The OAL and Miles backends load the main bank inside their own
 		// Initialise; nothing game-side does it on the PC path. Without this
 		// no channel ever passes the loaded check and every effect is silent.
-		GeckoLog("audio: bank0 load failed");
 		gcAudioDie("bank0-load", "see BANK line above");
 	}
 
@@ -536,9 +676,13 @@ cSampleManager::Initialise(void)
 		    64*1024, 72) != 0)
 			gStreamDecThread = LWP_THREAD_NULL;
 	}
+	if(gVoiceDecThread == LWP_THREAD_NULL &&
+	   LWP_CreateThread(&gVoiceDecThread, gcVoiceDecMain, nil, nil, 16*1024, 73) != 0){
+		gVoiceDecThread = LWP_THREAD_NULL;
+		gcAudioDie("voice-worker", "thread creation failed");
+	}
 
 	_bSampmanInitialised = TRUE;
-	gcAudioSelfTest();          // no-op unless dvd:/audiotest.txt is present
 	return TRUE;
 }
 
@@ -547,8 +691,12 @@ cSampleManager::Terminate(void)
 {
 	if(!_bSampmanInitialised)
 		return;
+	gStreamDecQuit = TRUE;
+	if(gVoiceDecThread != LWP_THREAD_NULL){
+		LWP_JoinThread(gVoiceDecThread, nil);
+		gVoiceDecThread = LWP_THREAD_NULL;
+	}
 	if(gStreamDecThread != LWP_THREAD_NULL){
-		gStreamDecQuit = TRUE;
 		LWP_JoinThread(gStreamDecThread, nil);
 		gStreamDecThread = LWP_THREAD_NULL;
 	}
@@ -601,10 +749,10 @@ cSampleManager::InitialiseSampleBanks(void)
 	long len = ftell(f);
 	fseek(f, 0, SEEK_SET);
 	gNumSamples = (uint32)(len/sizeof(tSample));
-	gSampleIndex = (tSample*)malloc(gNumSamples*sizeof(tSample));
-	if(gSampleIndex == nil){ fclose(f); return FALSE; }
+	if(gNumSamples > TOTAL_AUDIO_SAMPLES) gNumSamples = TOTAL_AUDIO_SAMPLES;
+	gSampleIndex = m_aSamples;   // the 200K static the PC backend fills; this was a second malloc'd copy
 	if(fread(gSampleIndex, sizeof(tSample), gNumSamples, f) != gNumSamples){
-		free(gSampleIndex); gSampleIndex = nil; fclose(f); return FALSE;
+		gSampleIndex = nil; fclose(f); return FALSE;
 	}
 	fclose(f);
 
@@ -646,11 +794,100 @@ cSampleManager::InitialiseSampleBanks(void)
 	return TRUE;
 }
 
+// The resident bank as IMA ADPCM (tools/gamecube/pack_sfx_adpcm.py): the
+// same 512-byte blocks gcWavDecode reads for VOICE, one run per sample in
+// ARAM. Sample rates and loop points come from sfx.sdt exactly as before:
+// the decode yields the PCM sample count, so nothing downstream changes.
+static uint32 gBankAdpcmAddr[SAMPLEBANK_PED_START];
+static uint32 gBankAdpcmBytes[SAMPLEBANK_PED_START];
+static bool8  gBankAdpcm;
+static const uint8 gSfxAdpcmMagic[8] = { 'G','C','S','F','X','A','1',0 };
+
+static bool8
+gcLoadAdpcmBank(void)
+{
+	if(gBanks[0].loaded)
+		return TRUE;
+	uint8 hdr[16];
+	uint8 *table = nil;
+	uint32 count = 0, dataStart = 0, fileBytes = 0, addr = 0, bytes = 0;
+	bool8 ok = FALSE;
+	{
+		DVD_FS_GUARD;
+		FILE *f = fopen("dvd:/audio/sfx.adp", "rb");
+		if(f == nil)
+			return FALSE;
+		ok = fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
+		    memcmp(hdr, gSfxAdpcmMagic, sizeof(gSfxAdpcmMagic)) == 0;
+		if(ok){
+			count = gcReadBe32(hdr + 8);
+			dataStart = gcReadBe32(hdr + 12);
+			ok = count >= SAMPLEBANK_PED_START && count <= gNumSamples;   // B123: == SAMPLEBANK_PED_START (resident only) or every sample
+		}
+		if(ok){
+			table = (uint8*)malloc(count*8);
+			ok = table != nil && fread(table, 1, count*8, f) == count*8 &&
+			    fseek(f, 0, SEEK_END) == 0;
+		}
+		if(ok){
+			fileBytes = (uint32)ftell(f);
+			ok = fileBytes > dataStart;
+			bytes = align32(fileBytes - dataStart);
+			if(ok && count > SAMPLEBANK_PED_START){   // B123: ARAM gets the resident samples only
+				uint32 pedStart = gcReadBe32(table + SAMPLEBANK_PED_START*8);
+				if(pedStart > dataStart && pedStart <= fileBytes) bytes = align32(pedStart - dataStart);
+			}
+		}
+		if(ok){
+			addr = gcBankAlloc(bytes);
+			ok = addr != 0;
+		}
+		if(ok){
+			enum { STAGE = 64*1024 };
+			uint8 *stage = (uint8*)memalign(32, STAGE);
+			ok = stage != nil && fseek(f, (long)dataStart, SEEK_SET) == 0;
+			for(uint32 done = 0; ok && done < bytes; ){
+				uint32 chunk = bytes - done > STAGE ? STAGE : bytes - done;
+				size_t got = fread(stage, 1, chunk, f);
+				if(got == 0){ ok = FALSE; break; }
+				if(got < chunk) memset(stage + got, 0, chunk - got);   // file tail vs 32-alignment
+				gcBankWrite(addr + done, stage, chunk);
+				done += chunk;
+			}
+			free(stage);
+		}
+		fclose(f);
+	}
+	if(ok){
+		for(uint32 i = 0; i < count && i < SAMPLEBANK_PED_START; i++){
+			uint32 off = gcReadBe32(table + i*8);
+			gBankAdpcmAddr[i] = addr + (off - dataStart);
+			gBankAdpcmBytes[i] = gcReadBe32(table + i*8 + 4);
+			gBankSampleAddr[i] = gBankAdpcmAddr[i];
+		}
+		gAdpDataStart = dataStart;
+		gAdpAll = count >= gNumSamples;
+		if(gAdpAll && gcReadBe32(table + (count-1)*8) != gcAdpOffset(count-1)){
+			printf("BANK adp: implied offset of sample %u disagrees with the table; ped comments stay on sfx.raw\n", (unsigned)count-1);
+			gAdpAll = FALSE;
+		}
+		gBanks[0].aramAddr = addr;
+		gBanks[0].bytes = bytes;
+		gBanks[0].loaded = TRUE;
+		gBankAdpcm = TRUE;
+		printf("BANK 0 adpcm %uK in ARAM at %08x, pack holds %u samples%s\n", (unsigned)(bytes/1024), (unsigned)addr, (unsigned)count, gAdpAll ? " (all: ped comments from sfx.adp)" : "");
+	}
+	free(table);
+	return ok;
+}
+
 bool8
 cSampleManager::LoadSampleBank(uint8 nBank)
 {
 	if(nBank >= MAX_SFX_BANKS || gSampleIndex == nil)
 		return FALSE;
+	if(nBank == 0 && gcLoadAdpcmBank())
+		return TRUE;    // else the PCM bank from sfx.raw / sfx.pak, as before
 	if(gBanks[nBank].loaded)
 		return TRUE;
 
@@ -702,11 +939,8 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 			snprintf(bl, sizeof(bl), "BANK %s %uK aram addr=%08x\n",
 			    addr ? "ok" : "FAIL", (unsigned)(bytes/1024), (unsigned)addr);
 #endif
-			FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
-			if(al){ fputs(bl, al); fclose(al); }
 		}
 		if(addr == 0){
-			GeckoLog("audio: bank alloc failed");
 			return FALSE;
 		}
 	}
@@ -851,6 +1085,7 @@ cSampleManager::GetSampleLoopEndOffset(uint32 nSample)
 // microseconds for a typical effect, paid on the play that needs it.
 enum { GC_FIR_TAPS = 8, GC_FIR_PHASES = 64 };
 static f32 gFirTable[GC_FIR_PHASES][GC_FIR_TAPS];
+static int16 gFirTabI[GC_FIR_PHASES][GC_FIR_TAPS];   // Q15 copy: integer MAC, 3-4x cheaper than the float loop on the 750
 static bool8 gFirReady;
 
 static void
@@ -882,6 +1117,10 @@ gcBuildFir(void)
 		if(sum > 0.0001f || sum < -0.0001f)
 			for(int32 t = 0; t < GC_FIR_TAPS; t++)
 				gFirTable[ph][t] /= sum;
+		for(int32 t = 0; t < GC_FIR_TAPS; t++){
+			f32 q = gFirTable[ph][t]*32768.0f;
+			gFirTabI[ph][t] = (int16)(q > 32767.0f ? 32767.0f : q < -32768.0f ? -32768.0f : q + (q >= 0.0f ? 0.5f : -0.5f));
+		}
 	}
 	gFirReady = TRUE;
 }
@@ -891,7 +1130,7 @@ gcDiscardChannelPcm(GcChannel *c)
 {
 	if(c->pcmOwned){
 		gConvBytes -= c->allocBytes;
-		free(c->pcm);
+		gcPcmFree(c->pcm);
 	}
 	c->pcm = nil;
 	c->pcmBytes = 0;
@@ -924,7 +1163,7 @@ gcReleaseIdleFrontendPcm(void)
 				gChannels[ch].pcmFreq = 0;
 			}
 		gConvBytes -= shared->allocBytes;
-		free(shared->pcm);
+		gcPcmFree(shared->pcm);
 		memset(shared, 0, sizeof(*shared));
 	}
 }
@@ -953,6 +1192,254 @@ gcMakeConversionRoom(GcChannel *keep, uint32 need)
 // sample-repeat resampler. Bake the requested pitch into the FIR conversion
 // and hand AESND a 1:1 DSP-rate buffer instead. This also covers ped/player
 // speech, which used to bypass conversion entirely.
+static inline int16 gcImaNibble(uint8 nib, int32 *pred, int32 *idx);
+
+// ADPCM bank: DMA a few blocks at a time from ARAM and decode straight into
+// the channel's PCM buffer — the same buffer the resampler reads next.
+static void
+gcBankDecodeAdpcm(uint32 nSfx, int16 *dst, uint32 samples)
+{
+	static uint8 stage[4096] __attribute__((aligned(32)));
+	uint32 addr = gBankAdpcmAddr[nSfx], bytes = gBankAdpcmBytes[nSfx];
+	uint32 done = 0, out = 0;
+	while(done < bytes && out < samples){
+		uint32 chunk = bytes - done > sizeof(stage) ? (uint32)sizeof(stage) : align32(bytes - done);
+		gcBankRead(stage, addr + done, chunk);
+		for(uint32 b = 0; b + 512 <= chunk && out < samples; b += 512){
+			const uint8 *blk = stage + b;
+			int32 pred = (int16)((uint16)blk[0] | ((uint16)blk[1] << 8));
+			int32 idx = blk[2];
+			if(idx > 88) idx = 88;
+			dst[out++] = (int16)pred;
+			for(uint32 i = 4; i < 512 && out < samples; i++){
+				dst[out++] = gcImaNibble(blk[i] & 15, &pred, &idx);
+				if(out < samples)
+					dst[out++] = gcImaNibble(blk[i] >> 4, &pred, &idx);
+			}
+		}
+		done += chunk;
+	}
+	while(out < samples)
+		dst[out++] = 0;
+}
+
+// ---------------------------------------------------------------- ARAM voices
+//
+// "Usa ARAM" (user, 09-01): a bank sample never sits whole in MEM1 any more.
+// Each voice streams it — 512-byte ADPCM blocks DMA'd from ARAM one at a
+// time, decoded into a small ring, FIR-resampled to the DSP rate into a pair
+// of 48ms chunks the AESND callback swaps, exactly the pump the radio streams
+// use. MEM1 per voice is the struct below (~14K); the FIR's quality stays
+// (AESND's ucode resamples by sample-repeat, which is the gravel on speech
+// heard in B38/B39). Loop points are source-sample positions: a jump resets
+// the decode cursor to the block holding loopStart — every block is
+// self-contained, which is why the bank uses this block format.
+enum { GC_VCHUNK = 1152*4 };   // 48ms: 24ms starved 7 chunks in 3 min (B48) once the decode thread also had three Vorbis streams to feed
+enum { GC_VBLOCK = 512, GC_VBLOCK_SAMPLES = 1017, GC_VRING_HIST = 8 };
+struct GcVoiceStream {
+	GcChannel *chan;
+	volatile bool8 active;
+	uint32  aram, adpcmBytes;
+	uint32  totalSamples;
+	uint32  loopStart, loopEnd;
+	bool8   looping;
+	uint32  srcRate;
+	bool8   pcm16;            // 16-bit PCM blocks (ped comments) rather than ADPCM
+	uint32  blockBytes, blockSamples;   // 512/1017 for ADPCM, 1024/512 for PCM16
+	uint32  nextBlock;
+	uint32  ringCount;
+	uint32  ringSrcBase;      // source index of ring[GC_VRING_HIST]
+	int16   ring[GC_VRING_HIST + GC_VBLOCK_SAMPLES*2];
+	uint64  pos;              // 16.16 source position
+	int32   fill, play;
+	volatile bool8 bufReady, eof;
+	volatile uint32 starved;
+	uint8   blk[1024] __attribute__((aligned(32)));
+	uint8   pcm[2][GC_VCHUNK] __attribute__((aligned(32)));
+};
+static GcVoiceStream gVoiceStreams[GC_CHANNEL_VOICES];
+static mutex_t gVoiceLock = LWP_MUTEX_NULL;
+unsigned gVoiceStarvedTotal, gVoicePumps;
+
+// Every channel that got an AESND voice gets a stream slot (Initialise).
+static void
+gcVoiceSlotsInit(void)
+{
+	if(gVoiceLock == LWP_MUTEX_NULL)
+		LWP_MutexInit(&gVoiceLock, true);
+	int32 k = 0;
+	for(uint32 i = 0; i < ARRAY_SIZE(gChannels) && k < GC_CHANNEL_VOICES; i++)
+		if(gChannels[i].voice)
+			gChannels[i].vs = &gVoiceStreams[k++];
+}
+
+static void
+gcVoiceDecodeBlock(GcVoiceStream *vs)
+{
+	uint32 bs = vs->blockSamples, bb = vs->blockBytes;
+	if(vs->ringCount >= bs*2){
+		// Drop the front block; its last GC_VRING_HIST samples become the history.
+		memmove(vs->ring, vs->ring + bs,
+		    (GC_VRING_HIST + vs->ringCount - bs)*sizeof(int16));
+		vs->ringSrcBase += bs;
+		vs->ringCount -= bs;
+	}
+	uint32 off = vs->nextBlock*bb;
+	if(off >= vs->adpcmBytes)
+		return;
+	gcBankRead(vs->blk, vs->aram + off, bb);
+	uint32 first = vs->nextBlock*bs;
+	uint32 n = vs->totalSamples > first ? vs->totalSamples - first : 0;
+	if(n > bs) n = bs;
+	int16 *dst = vs->ring + GC_VRING_HIST + vs->ringCount;
+	uint32 out = 0;
+	if(vs->pcm16){
+		memcpy(dst, vs->blk, n*sizeof(int16));   // big-endian int16 in ARAM = native
+		out = n;
+	}else{
+		int32 pred = (int16)((uint16)vs->blk[0] | ((uint16)vs->blk[1] << 8));
+		int32 idx = vs->blk[2];
+		if(idx > 88) idx = 88;
+		if(out < n) dst[out++] = (int16)pred;
+		for(uint32 i = 4; i < GC_VBLOCK && out < n; i++){
+			dst[out++] = gcImaNibble(vs->blk[i] & 15, &pred, &idx);
+			if(out < n) dst[out++] = gcImaNibble(vs->blk[i] >> 4, &pred, &idx);
+		}
+	}
+	if(vs->ringCount == 0)
+		vs->ringSrcBase = first;
+	vs->ringCount += out;
+	vs->nextBlock++;
+}
+
+static void
+gcVoiceSeek(GcVoiceStream *vs, uint32 si)
+{
+	vs->nextBlock = si / vs->blockSamples;
+	vs->ringCount = 0;
+	vs->ringSrcBase = vs->nextBlock*vs->blockSamples;
+	memset(vs->ring, 0, GC_VRING_HIST*sizeof(int16));
+}
+
+// Fill the free chunk: 2304 output samples at the DSP rate from the source.
+static void
+gcVoicePump(GcVoiceStream *vs)
+{
+	if(!vs->active || vs->bufReady || vs->eof)
+		return;
+	int16 *out = (int16*)vs->pcm[vs->fill];
+	const uint32 outS = GC_VCHUNK/2;
+	uint32 step = (vs->srcRate << 16)/GC_DSP_RATE;
+	if(step == 0) step = 1;
+	gcBuildFir();
+	uint32 k = 0;
+	for(; k < outS; k++){
+		uint32 si = (uint32)(vs->pos >> 16);
+		if(vs->looping && si >= vs->loopEnd){
+			vs->pos -= ((uint64)(vs->loopEnd - vs->loopStart)) << 16;
+			si = (uint32)(vs->pos >> 16);
+			gcVoiceSeek(vs, si);
+		}else if(!vs->looping && si + 1 >= vs->totalSamples){
+			break;
+		}
+		while(si + GC_FIR_TAPS/2 + 1 > vs->ringSrcBase + vs->ringCount &&
+		      vs->nextBlock*vs->blockBytes < vs->adpcmBytes)
+			gcVoiceDecodeBlock(vs);
+		if(vs->ringCount == 0)
+			break;
+		int32 base = (int32)(si - vs->ringSrcBase);
+		const f32 *tap = gFirTable[(vs->pos >> 10) & (GC_FIR_PHASES-1)];
+		f32 acc = 0.0f;
+		for(int32 t = 0; t < GC_FIR_TAPS; t++){
+			int32 i = base + t - (GC_FIR_TAPS/2 - 1);
+			if(i < -GC_VRING_HIST) i = -GC_VRING_HIST;
+			else if(i >= (int32)vs->ringCount) i = (int32)vs->ringCount - 1;
+			acc += tap[t]*(f32)vs->ring[GC_VRING_HIST + i];
+		}
+		int32 v = (int32)(acc + (acc >= 0.0f ? 0.5f : -0.5f));
+		if(v > 32767) v = 32767; else if(v < -32768) v = -32768;
+		out[k] = (int16)v;
+		vs->pos += step;
+	}
+	if(k < outS){
+		memset(out + k, 0, (outS - k)*sizeof(int16));
+		vs->eof = TRUE;
+	}
+	DCFlushRange(vs->pcm[vs->fill], GC_VCHUNK);
+	vs->fill ^= 1;
+	vs->bufReady = TRUE;
+	gVoicePumps++;
+}
+
+static void
+gcVoiceStop(GcVoiceStream *vs)
+{
+	if(vs == nil) return;
+	LWP_MutexLock(gVoiceLock);
+	vs->active = FALSE;
+	vs->bufReady = FALSE;
+	LWP_MutexUnlock(gVoiceLock);
+}
+
+// Called from StartChannel: the channel's prepare left the ARAM run in vs.
+static void
+gcVoiceArm(GcChannel *c, bool8 looping)
+{
+	GcVoiceStream *vs = c->vs;
+	gMainWhere = "voice-arm";
+	LWP_MutexLock(gVoiceLock);
+	if(c->voice) AESND_SetVoiceStop(c->voice, true);   // the DSP may still run the old stream while vs is rewritten
+	vs->chan = c;
+	vs->looping = looping;
+	vs->loopStart = c->loopStart < vs->totalSamples ? c->loopStart : 0;
+	vs->loopEnd = c->loopEnd > 0 && (uint32)c->loopEnd <= vs->totalSamples ? (uint32)c->loopEnd : vs->totalSamples;
+	if(vs->loopEnd <= vs->loopStart){ vs->loopStart = 0; vs->loopEnd = vs->totalSamples; }
+	vs->pos = 0;
+	vs->nextBlock = 0; vs->ringCount = 0; vs->ringSrcBase = 0;
+	memset(vs->ring, 0, GC_VRING_HIST*sizeof(int16));
+	vs->fill = vs->play = 0;
+	vs->bufReady = FALSE; vs->eof = FALSE; vs->starved = 0;
+	vs->active = TRUE;
+	gcVoicePump(vs);                       // chunk 0
+	// The pump owns looping (source loop points); AESND's own loop flag
+	// would repeat the first 48ms chunk forever and never call back.
+	const void *first = vs->pcm[vs->play];
+	if(vs->bufReady){
+		vs->play ^= 1;
+		vs->bufReady = FALSE;
+		gcVoicePump(vs);                   // chunk 1 waits for the first callback
+	}
+	LWP_MutexUnlock(gVoiceLock);
+	c->playing = TRUE;
+	gcPlayVoice(c->voice, VOICE_MONO16, first, GC_VCHUNK, GC_DSP_RATE_F, TRUE, FALSE);
+}
+
+static void
+gcVoiceStreamCallback(AESNDPB *pb, GcChannel *c)
+{
+	gAudioCbTick++;
+	GcVoiceStream *vs = c->vs;
+	if(vs == nil || !vs->active){
+		c->playing = FALSE;
+		AESND_SetVoiceStop(pb, true);
+		return;
+	}
+	if(vs->bufReady){
+		AESND_SetVoiceBuffer(pb, vs->pcm[vs->play], GC_VCHUNK);
+		vs->play ^= 1;
+		vs->bufReady = FALSE;
+	}else if(vs->eof){
+		vs->active = FALSE;
+		c->playing = FALSE;
+		AESND_SetVoiceStop(pb, true);
+	}else{
+		static uint8 gVoiceSilence[GC_VCHUNK] __attribute__((aligned(32)));
+		AESND_SetVoiceBuffer(pb, gVoiceSilence, GC_VCHUNK);
+		vs->starved++;
+		gVoiceStarvedTotal++;
+	}
+}
+
 static bool8
 gcPrepareChannel(GcChannel *c, uint32 nChannel)
 {
@@ -973,6 +1460,7 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 	GcSharedPcm *shared = nSfx >= SFX_INFO_LEFT && nSfx <= SFX_FE_ERROR_RIGHT ?
 	    &gFrontendPcm[nSfx - SFX_INFO_LEFT] : nil;
 
+	c->streamed = FALSE;
 	if(shared && shared->pcm && shared->freq == targetFreq){
 		gcDiscardChannelPcm(c);
 		c->pcm = shared->pcm;
@@ -983,6 +1471,23 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 		return TRUE;
 	}
 
+	if(nSfx < SAMPLEBANK_PED_START && gBankAdpcm && c->vs){
+		// ARAM voice: nothing to allocate here; StartChannel arms the stream.
+		gcDiscardChannelPcm(c);
+		GcVoiceStream *vs = c->vs;
+		gcVoiceStop(vs);
+		vs->aram = gBankAdpcmAddr[nSfx];
+		vs->adpcmBytes = gBankAdpcmBytes[nSfx];
+		vs->totalSamples = inS;
+		vs->srcRate = targetFreq;
+		vs->pcm16 = FALSE; vs->blockBytes = GC_VBLOCK; vs->blockSamples = GC_VBLOCK_SAMPLES;
+		c->pcm48 = TRUE;          // 1:1 with the DSP; pitch changes scale from pcmFreq
+		c->pcmFreq = targetFreq;
+		c->pcmBytes = 0;
+		c->streamed = TRUE;
+		gConvOk++;
+		return TRUE;
+	}
 	if(nSfx < SAMPLEBANK_PED_START){
 		srcAddr = gBankSampleAddr[nSfx];
 		srcSkew = srcAddr & 31;
@@ -991,6 +1496,24 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 		memSrc = gPlayerTalkData;
 	else{
 		int32 slot = SampleManager._GetPedCommentSlot(nSfx);
+#if !defined(HW_RVL)
+		if(slot >= 0 && gPedAram && c->vs){
+			gcDiscardChannelPcm(c);
+			GcVoiceStream *vs = c->vs;
+			gcVoiceStop(vs);
+			vs->aram = gPedAram + align32(PED_BLOCKSIZE)*slot;
+			vs->totalSamples = inS;
+			vs->srcRate = targetFreq;
+			if(gPedSlotAdpcm[slot]){ vs->pcm16 = FALSE; vs->blockBytes = GC_VBLOCK; vs->blockSamples = GC_VBLOCK_SAMPLES; vs->adpcmBytes = gPedSlotBytes[slot]; }
+			else { vs->pcm16 = TRUE; vs->blockBytes = 1024; vs->blockSamples = 512; vs->adpcmBytes = align32(rawBytes); }
+			c->pcm48 = TRUE;
+			c->pcmFreq = targetFreq;
+			c->pcmBytes = 0;
+			c->streamed = TRUE;
+			gConvOk++;
+			return TRUE;
+		}
+#endif
 		if(slot < 0 || gPedBuf == nil){
 			snprintf(d, sizeof(d), "sfx=%u slot=%d", (unsigned)nSfx, (int)slot);
 			gcAudioDie("ped-comment-not-loaded", d);
@@ -1004,9 +1527,10 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 	if(resample){
 		uint32 need = outBytes + 64;
 		gcMakeConversionRoom(c, need);
-		uint32 held = c->pcmOwned ? c->allocBytes : 0;
-		if(need > held && gConvBytes - held + need > GC_CONV_BUDGET)
-			resample = FALSE;
+		// No fallback (user, B37): the budget is advisory — gcMakeConversionRoom
+		// already returned every idle buffer; a voice either resamples or, if
+		// the allocation below fails, does not play. Native-pitch PCM never.
+		(void)c->pcmOwned;
 	}
 	uint32 want = resample ? outBytes + 64 : readBytes;
 	if(want < readBytes)
@@ -1018,7 +1542,16 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 	}
 	if(c->allocBytes < want){
 		gcDiscardChannelPcm(c);
-		c->pcm = memalign(32, want);
+		c->pcm = gcPcmAlloc(want);
+		if(c->pcm == nil){
+			// Fragmented heap (B33: a 94K request refused at 2MB free): return
+			// every idle channel's buffer and ask once more.
+			for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++)
+				if(&gChannels[i] != c && !gChannels[i].playing && gChannels[i].pcmOwned)
+					gcDiscardChannelPcm(&gChannels[i]);
+			gcReleaseIdleFrontendPcm();
+			c->pcm = gcPcmAlloc(want);
+		}
 		c->allocBytes = c->pcm ? want : 0;
 		c->pcmOwned = c->pcm != nil;
 		gConvBytes += c->allocBytes;
@@ -1033,16 +1566,21 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 	uint32 tail = align32(want - readBytes);
 	if(tail + readBytes > want)
 		tail = 0;
-	if(nSfx < SAMPLEBANK_PED_START)
-		gcBankRead(base + tail, srcAddr - srcSkew, readBytes);
-	else
+	if(nSfx < SAMPLEBANK_PED_START){
+		if(gBankAdpcm)
+			gcBankDecodeAdpcm(nSfx, (int16*)(base + tail + srcSkew), rawBytes/2);
+		else
+			gcBankRead(base + tail, srcAddr - srcSkew, readBytes);
+	}else
 		memcpy(base + tail, memSrc, rawBytes);
 	const int16 *sp = (const int16*)(base + tail + srcSkew);
 
 	if(resample){
 		int16 *dst = (int16*)base;
 		uint32 step = (targetFreq << 16)/GC_DSP_RATE;
-		uint32 pos = 0;
+		// 64-bit: in 32 bits this wrapped past ~285K of output at 22kHz and the
+		// sample restarted from its first frame mid-buffer — the "double voice".
+		uint64 pos = 0;
 		gcBuildFir();
 		for(uint32 k = 0; k < outS; k++, pos += step){
 			int32 i0 = (int32)(pos >> 16);
@@ -1124,7 +1662,7 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 		}
 		if(nSfx != gPlayerTalkSfx || gPlayerTalkData == nil){
 			int32 slot = _GetPedCommentSlot(nSfx);
-			if(slot < 0 || gPedBuf == nil){
+			if(slot < 0 || (gPedBuf == nil && gPedAram == 0)){
 				snprintf(d, sizeof(d), "sfx=%u slot=%d", (unsigned)nSfx, (int)slot);
 				gcAudioDie("ped-comment-not-loaded", d);
 				return FALSE;
@@ -1132,6 +1670,9 @@ cSampleManager::InitialiseChannel(uint32 nChannel, uint32 nSfx, uint8 nBank)
 		}
 	}
 
+	AESND_SetVoiceStop(c->voice, true);
+	gcVoiceStop(c->vs);
+	c->playing = FALSE;
 	c->sample = nSfx;
 	c->freq = gSampleIndex[nSfx].nFrequency;
 	c->pcmBytes = 0;       // prepared at StartChannel, after pitch is known
@@ -1298,6 +1839,11 @@ cSampleManager::StartChannel(uint32 nChannel)
 	// it only that part of the buffer. Without this the bike engine looped its
 	// attack along with its sustain and restarted from the top every cycle -
 	// the user heard it as the engine never looping at all.
+	if(c->streamed && c->vs){
+		gcVoiceArm(c, looping);
+		return;
+	}
+	AESND_SetVoiceStream(c->voice, false);
 	uint8 *bufStart = (uint8*)c->pcm;
 	uint32 bufBytes = c->pcmBytes;
 	if(looping && (c->loopStart > 0 || c->loopEnd > 0)){
@@ -1325,9 +1871,8 @@ cSampleManager::StartChannel(uint32 nChannel)
 			}
 		}
 	}
-	AESND_SetVoiceBuffer(c->voice, bufStart, bufBytes);
 	c->playing = TRUE;
-	AESND_SetVoiceStop(c->voice, false);
+	gcPlayVoice(c->voice, VOICE_MONO16, bufStart, bufBytes, voiceFreq, FALSE, looping);
 }
 
 void
@@ -1338,6 +1883,7 @@ cSampleManager::StopChannel(uint32 nChannel)
 	GcChannel *c = &gChannels[nChannel];
 	if(c->voice)
 		AESND_SetVoiceStop(c->voice, true);
+	gcVoiceStop(c->vs);
 	c->playing = FALSE;
 	c->used = FALSE;
 	// Hand a large buffer back to the pool. Small ones stay put: they are the
@@ -1375,16 +1921,23 @@ cSampleManager::SetMusicMasterVolume(uint8 nVolume)
 	gMusicVolume = nVolume;
 }
 
+// B115: a fade to zero takes effect NOW. The fades used to be read only when
+// the next volume was set — by MusicManager/AudioManager in the game loop,
+// which does not run during a blocking load — so the frontend track and any
+// live channel kept their old volume through the whole loading bar.
+static void gcSilenceNow(void);   // defined with the stream table
 void
 cSampleManager::SetEffectsFadeVolume(uint8 nVolume)
 {
 	gEffectsFade = nVolume;
+	if(nVolume == 0) gcSilenceNow();
 }
 
 void
 cSampleManager::SetMusicFadeVolume(uint8 nVolume)
 {
 	gMusicFade = nVolume;
+	if(nVolume == 0) gcSilenceNow();
 }
 
 // Translate a track id to its file. Backslash to slash, and whatever
@@ -1403,7 +1956,7 @@ gcTrackPath(uint32 nFile, char *path, size_t cap)
 	// .wav, exactly the game's own file) and keeps its extension.
 	char *dot = strrchr(path, '.');
 	if(dot)
-		strcpy(dot, (dot[1] == 'w' || dot[1] == 'W') ? ".wav" : ".ogg");
+		strcpy(dot, nFile < 9 ? ".ogg" : ".wav");   // B122 (user): the nine radio stations (table 0-8) are Vorbis 32kHz stereo; every other stream is IMA ADPCM .wav at its native rate and channel count
 }
 
 // Per-TRACK lengths in ms. MusicManager reads these through
@@ -1444,6 +1997,8 @@ struct GcStream {
 	OggVorbis_File vf;
 	bool8    vfOpen;
 	AESNDPB *voice;
+	uint8    volume, pan;
+	bool8    effectVolume;
 	uint8   *buf[2];
 	int32    fill;          // which buffer the pump decodes into next
 	int32    play;          // which buffer the callback hands over next
@@ -1457,6 +2012,10 @@ struct GcStream {
 	uint32   lenSamples;
 	uint32   rate;          // the file's own sample rate; the voice follows it
 	uint32   channels;      // 1 or 2, from the file as well
+	volatile uint8 opening; // B73: 1 = wait for data then open, 2 = wait for data at the seek target then seek+prime+arm
+	uint32   openPos;       // ms position requested by StartStreamedFile
+	bool8    armed;
+	bool8    openHold;      // preload: prime but do not start
 	bool8    adpcm;         // native IMA ADPCM .wav (voice) rather than Vorbis
 	uint8    adpcmSpill[4224];  // decoded samples that did not fit the last chunk
 	uint32   adpcmSpillBytes;
@@ -1475,19 +2034,92 @@ struct GcStream {
 };
 static GcStream gStreams[MAX_STREAMS];
 
-// Stream decode moved off the game thread: one worker owns every gcStreamPump
-// so a Vorbis chunk never bites the frame. The per-stream recursive mutex
-// serialises the pump against Start/Stop/Preload/Pause from the game thread;
-// the AESND callback stays lock-free on the same bufReady contract as before.
-// Lock ORDER everywhere: stream mutex first, DVD_FS_GUARD inside.
-static void gcStreamPump(GcStream *st);
+struct GcStreamRequest {
+	uint32 generation, applied;
+	tTrack track;
+	uint32 position;
+	bool8 wanted, hold, paused;
+};
+static GcStreamRequest gStreamRequests[MAX_STREAMS];
+static void gcStreamApplyRequest(uint8 nStream);
+static void gcStreamArm(GcStream *st, uint8 nStream);
+
+static bool
+gcStreamDeferControl(void)
+{
+	return gStreamDecThread != LWP_THREAD_NULL && LWP_GetSelf() != gStreamDecThread;
+}
+
+static void
+gcStreamRequest(uint8 nStream, tTrack track, uint32 position, bool8 wanted, bool8 hold)
+{
+	u32 level;
+	_CPU_ISR_Disable(level);
+	GcStreamRequest *r = &gStreamRequests[nStream];
+	r->track = track;
+	r->position = position;
+	r->wanted = wanted;
+	r->hold = hold;
+	r->paused = FALSE;
+	r->generation++;
+	if(gStreams[nStream].voice)
+		AESND_SetVoiceStop(gStreams[nStream].voice, true);
+	_CPU_ISR_Restore(level);
+}
+
+static bool
+gcStreamCanPlay(uint8 nStream)
+{
+	u32 level;
+	_CPU_ISR_Disable(level);
+	const GcStreamRequest *r = &gStreamRequests[nStream];
+	bool canPlay = r->generation == r->applied && r->wanted && !r->hold && !r->paused;
+	_CPU_ISR_Restore(level);
+	return canPlay;
+}
+static void gcApplyStreamVolume(GcStream *st, uint8 nStream);
+// B115: see SetEffectsFadeVolume. Streams: the next SetStreamedVolumeAndPan
+// (every frame in game mode) restores them; channels re-read gEffectsFade
+// through gcApplyChannelVolume on the next Service.
+static void
+gcSilenceNow(void)
+{
+	for(int32 i = 0; i < MAX_STREAMS; i++)
+		if(gStreams[i].voice) AESND_SetVoiceVolume(gStreams[i].voice, 0, 0);
+	for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++)
+		if(gChannels[i].voice && gChannels[i].playing) AESND_SetVoiceVolume(gChannels[i].voice, 0, 0);
+}
+
+static void gcStreamPump(GcStream *st, bool prime = false);
 
 static void *
 gcStreamDecMain(void *)
 {
 	while(!gStreamDecQuit){
+		gDecTick++;
+		if(gSringLock != LWP_MUTEX_NULL && LWP_MutexTryLock(gSringLock) == 0){
+			gcSringService(FALSE);
+			LWP_MutexUnlock(gSringLock);
+		}
+		// Watchdog (B56): this thread keeps running through the silent freeze
+		// (MemoryWatcher, 09-01), so it can say where the main thread stopped.
+		if((gDecTick & 63) == 0){
+			static uint32 lastMain, same;
+			if(gMainTick == lastMain){
+				if(++same == 8 || (same > 8 && (same & 31) == 0))
+					printf("WATCHDOG main frozen %us at [%s] tick %u draw %x geo %x/%u dma %u cd %u/%u dvd %u\n",
+					    (unsigned)(same/4), (const char*)gMainWhere, (unsigned)gMainTick, gxLastDraw, gxLastGeoFlags, gxLastGeoVerts,
+					    gxDmaBusy, gCdTick, gCdState, gIsoRdBusy);
+			}else{ lastMain = gMainTick; same = 0; }
+		}
 		for(int32 i = 0; i < MAX_STREAMS; i++){
+			gcStreamApplyRequest(i);
 			GcStream *st = &gStreams[i];
+			if(st->opening){
+				GcStreamGuard g(gStreamLock[i]);
+				if(st->opening) gcStreamOpenStep(st, i);
+				continue;
+			}
 			if(!st->playing || st->paused || st->bufReady || st->eof)
 				continue;
 			GcStreamGuard g(gStreamLock[i]);
@@ -1501,6 +2133,27 @@ gcStreamDecMain(void *)
 	return nil;
 }
 
+static void *
+gcVoiceDecMain(void *)
+{
+	while(!gStreamDecQuit){
+		for(int32 i = 0; i < GC_CHANNEL_VOICES; i++){
+			GcVoiceStream *vs = &gVoiceStreams[i];
+			if(!vs->active || vs->bufReady || vs->eof)
+				continue;
+			LWP_MutexLock(gVoiceLock);
+			if(vs->active && !vs->bufReady && !vs->eof)
+				gcVoicePump(vs);
+			LWP_MutexUnlock(gVoiceLock);
+		}
+		usleep(4000);
+	}
+	return nil;
+}
+
+// B112: one silent chunk for every "nothing to play" case — starved callback,
+// a voice stopped between streams, a voice armed before its first chunk.
+static uint8 gStreamSilence[STREAM_CHUNK_BYTES] __attribute__((aligned(32)));
 static void
 gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 {
@@ -1514,6 +2167,10 @@ gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 	if(state != VOICE_STATE_STREAM)
 		return;
 	st->cbCount++;
+	if(!gcStreamCanPlay((uint8)(st - gStreams))){
+		AESND_SetVoiceStop(pb, true);
+		return;
+	}
 	if(st->bufReady){
 		AESND_SetVoiceBuffer(pb, st->buf[st->play], STREAM_CHUNK_BYTES);
 		st->play ^= 1;
@@ -1528,8 +2185,6 @@ gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 		// audio in a loop — the "radio static" heard the first time the
 		// menu opens, while its TXD loads monopolise the FS lock and the
 		// pump cannot refill. A dropout must SOUND like a dropout.
-		static uint8 gStreamSilence[STREAM_CHUNK_BYTES]
-		    __attribute__((aligned(32)));
 		AESND_SetVoiceBuffer(pb, gStreamSilence, STREAM_CHUNK_BYTES);
 		st->starved++;
 		gStreamStarvedTotal++;
@@ -1541,22 +2196,243 @@ gcStreamCallback(AESNDPB *pb, u32 state, void *arg)
 // doubles, and integer decode is what consoles use.
 // ponytail: direct reads are free under Dolphin; a real Mini-DVD wants a bulk
 // read-ahead ring here to kill the per-decode seeks.
+// ---------------------------------------------------------------- audio I/O ring (B68)
+//
+// The streams used to fread the disc 32K at a time between the world's reads.
+// On the real drive that is a 128ms seek per chunk, queued behind 700K TXD
+// pulls, against 250ms of PCM in hand: "snd starved 43" a census and the
+// volume pumping the user heard. Each stream now owns a 256K compressed
+// read-ahead ring in ARAM, filled 32K at a time by the CdStream worker on a
+// channel of its own, so one seek buys 8-16 seconds of audio and the decoder
+// never touches the disc. Ped comments ride the same channel, asynchronously.
+enum { GC_SRING_BYTES = 256*1024, GC_SRING_BLK = 32*1024, GC_AUDIO_CH = MAX_CDCHANNELS };
+struct GcSring {
+	uint32 aram;                 // ring base in ARAM (allocated once)
+	uint32 fileLba, fileSize;    // the file's extent on the disc
+	uint32 rd, wr, fetch;        // absolute file offsets: consumed, landed, requested
+	uint32 base;                 // first offset filled since the last flush (retained data = [max(base, wr-ring), wr))
+	bool8  active;               // a file is open on this ring
+	bool8  sync;                 // main thread owns it (open/seek): waits for the disc
+	uint8  bounce[8*1024] __attribute__((aligned(32)));
+};
+static GcSring gSring[MAX_STREAMS];
+static uint8   gSringStage[36*1024] __attribute__((aligned(32)));   // 32K ring block, or 17 sectors of a ped line
+static int32   gSringIo = -1;        // read in flight: stream index, -2 = ped comment, -1 idle
+static volatile bool8 gSringAbort;   // B178, gcSringCancel: stop the burst after the piece in hand
+static bool8   gSringStale;          // B178: the read in flight was cancelled; discard it on completion
+static uint32  gSringIoOff, gSringIoLen;
+static struct { bool8 active, adpcm; uint32 sfx, slot, aram, base, off, remain, skip; } gPedIo;
+static uint32  gSfxRawLba, gSfxRawSize;
+extern "C" int fsLookupLba(const char *path, u32 *lba, u32 *size);
+
+static inline uint32 gcSringAvail(GcSring *r) { return r->wr > r->rd ? r->wr - r->rd : 0; }
+
+// A finished read lands: ring block to ARAM, or a ped-line piece to its slot.
+static void
+gcSringComplete(void)
+{
+	if(gSringStale){   // cancelled while in flight: its ring was reset since
+		gSringStale = FALSE;
+		gSringAbort = FALSE;
+	}else if(gSringIo >= 0){
+		GcSring *r = &gSring[gSringIo];
+		if(r->active && gSringIoOff == r->wr)
+			r->wr += gSringIoLen;   // B177: gcSringSink already put the burst in ARAM
+	}else if(gSringIo == -2 && gPedIo.active){
+		uint8 *s = gSringStage + gPedIo.skip;
+		uint32 use = gSringIoLen;
+		if(!gPedIo.adpcm)   // PCM from sfx.raw is little-endian; ADPCM blocks are byte streams
+			for(uint32 b = 0; b + 1 < use; b += 2){ uint8 t = s[b]; s[b] = s[b+1]; s[b+1] = t; }
+		if(gPedIo.skip) memmove(gSringStage, s, use);
+		uint32 w = align32(use);
+		if(w > use) memset(gSringStage + use, 0, w - use);
+		gcBankWrite(gPedIo.aram + gPedIo.off, gSringStage, w);
+		gPedIo.off += use; gPedIo.remain -= use;
+		if(gPedIo.remain == 0){ gPedSlotSfx[gPedIo.slot] = (int32)gPedIo.sfx; gPedIo.active = FALSE; }
+	}
+	gSringIo = -1;
+}
+
+// B177: the ring used to top itself up the moment 32K of room opened, so in
+// steady state every 32K of audio was its own disc command between two
+// streamer reads: two long seeks (~100 ms each on the drive) per 32K. Now a
+// ring waits until GC_SRING_REFILL is free (96K left = 2.2 s of 44 kHz ADPCM,
+// 7 s of radio) and refills in one chained burst: the worker reads 32K,
+// hands it to this sink, reads the next sector with no seek in between.
+enum { GC_SRING_REFILL = 160*1024 };
+static uint32 gSringSinkOff;   // file offset of the next piece; set before the post, worker-owned after
+
+static int
+gcSringSink(const void *data, unsigned int bytes, void *ctx)
+{
+	if(gSringAbort)
+		return 0;
+	GcSring *r = (GcSring*)ctx;
+	gcBankWrite(r->aram + (gSringSinkOff % GC_SRING_BYTES), data, bytes);
+	gSringSinkOff += bytes;
+	return 1;
+}
+
+// Channel idle: the ped line first (the game is waiting for it), else the
+// hungriest ring that still has file left and room for a burst.
+static void
+gcSringIssue(void)
+{
+	if(gSringIo != -1) return;
+	if(gPedIo.active){
+		uint32 fileOff = gPedIo.base + gPedIo.off;
+		uint32 skip = fileOff & 2047;
+		uint32 use = gPedIo.remain > GC_SRING_BLK ? GC_SRING_BLK : gPedIo.remain;
+		uint32 nsec = (skip + use + 2047)/2048;
+		gPedIo.skip = skip; gSringIoLen = use;
+		if(CdStreamReadAbs(GC_AUDIO_CH, gSringStage, (gPedIo.adpcm ? gSfxAdpLba : gSfxRawLba) + fileOff/2048, nsec) == STREAM_SUCCESS){ gSringIo = -2; return; }
+		gPedIo.active = FALSE;   // could not queue: the game asks again
+		return;
+	}
+	int32 best = -1; uint32 bestFill = ~0u;
+	for(int32 i = 0; i < MAX_STREAMS; i++){
+		GcSring *r = &gSring[i];
+		if(!r->active || r->fetch >= r->fileSize || r->fetch - r->rd + GC_SRING_REFILL > GC_SRING_BYTES) continue;
+		uint32 fill = gcSringAvail(r);
+		if(fill < bestFill){ bestFill = fill; best = i; }
+	}
+	if(best < 0) return;
+	GcSring *r = &gSring[best];
+	// Whole 32K slots only: a piece may never overwrite bytes not yet consumed.
+	uint32 len = r->fileSize - r->fetch, room = (GC_SRING_BYTES - (r->fetch - r->rd)) & ~(GC_SRING_BLK-1);
+	if(len > room) len = room;
+	gSringIoOff = r->fetch; gSringIoLen = len; gSringSinkOff = r->fetch;
+	if(CdStreamReadAbsChunked(GC_AUDIO_CH, gSringStage, GC_SRING_BLK/2048, r->fileLba + r->fetch/2048,
+	                          (len + 2047)/2048, gcSringSink, r) == STREAM_SUCCESS){
+		gSringIo = best; r->fetch += len;
+	}
+}
+
+// Poll (decode thread) or wait (main thread, at open and seek). Caller holds gSringLock.
+static void
+gcSringService(bool8 wait)
+{
+	if(gSringIo != -1){
+		int32 st = CdStreamGetStatus(GC_AUDIO_CH);
+		if(st == STREAM_READING || st == STREAM_WAITING){
+			if(!wait) return;
+		}
+		CdStreamSync(GC_AUDIO_CH);
+		gcSringComplete();
+	}
+	gcSringIssue();
+}
+
+static void
+gcSringCancel(int32 idx)   // caller holds gSringLock: drop this stream's read in flight
+{
+	// B178: never wait here. Open/seek/close run on the main loop, which blocked
+	// 300-540 ms behind whatever DVD read the worker had in hand (b171 already,
+	// b178 worse with bursts: 'SLOW script 363ms where=cd-sync'). The burst stops
+	// after its current piece and the next service pass discards the result.
+	if(gSringIo == idx){ gSringAbort = TRUE; gSringStale = TRUE; }
+}
+
+static uint32
+gcSringRead(GcStream *st, void *dst, uint32 n)
+{
+	int32 idx = (int32)(st - gStreams);
+	GcSring *r = &gSring[idx];
+	uint8 *d = (uint8*)dst; uint32 got = 0;
+	while(n){
+		uint32 avail = gcSringAvail(r);
+		if(avail == 0){
+			if(r->fetch >= r->fileSize && r->rd >= r->wr && r->wr >= r->fileSize) break;   // true end of file
+			if(!r->sync) break;                 // decode thread: short read, the pump guard keeps this rare
+			LWP_MutexLock(gSringLock); gcSringService(TRUE); LWP_MutexUnlock(gSringLock);
+			continue;
+		}
+		uint32 idxb = r->rd % GC_SRING_BYTES;
+		uint32 a0 = idxb & ~31u;
+		uint32 c = n; if(c > avail) c = avail;
+		if(c > GC_SRING_BYTES - idxb) c = GC_SRING_BYTES - idxb;
+		if(idxb - a0 + c > sizeof(r->bounce)) c = sizeof(r->bounce) - (idxb - a0);
+		uint32 a1 = align32(idxb + c); if(a1 > GC_SRING_BYTES) a1 = GC_SRING_BYTES;
+		gcBankRead(r->bounce, r->aram + a0, a1 - a0);
+		memcpy(d, r->bounce + (idxb - a0), c);
+		d += c; r->rd += c; n -= c; got += c;
+	}
+	return got;
+}
+
+static int
+gcSringSeek(GcStream *st, ogg_int64_t offset, int whence)
+{
+	int32 idx = (int32)(st - gStreams);
+	GcSring *r = &gSring[idx];
+	ogg_int64_t t = whence == SEEK_SET ? offset : whence == SEEK_CUR ? (ogg_int64_t)r->rd + offset : (ogg_int64_t)r->fileSize + offset;
+	if(t < 0) t = 0;
+	if(t > (ogg_int64_t)r->fileSize) t = r->fileSize;
+	{
+		uint32 lo = r->fetch > GC_SRING_BYTES ? r->fetch - GC_SRING_BYTES : 0;   // B177: a burst in flight is already overwriting up to fetch
+		if(lo < r->base) lo = r->base;
+		if((uint32)t >= lo && (uint32)t <= r->wr){ r->rd = (uint32)t; return 0; }   // inside the retained window: free
+	}
+	LWP_MutexLock(gSringLock);
+	gcSringCancel(idx);
+	r->fetch = (uint32)t & ~(uint32)(GC_SRING_BLK-1);
+	r->wr = r->fetch; r->base = r->fetch; r->rd = (uint32)t;
+	LWP_MutexUnlock(gSringLock);
+	return 0;
+}
+static inline long gcSringTell(GcStream *st) { return (long)gSring[st - gStreams].rd; }
+
+static bool8
+gcSringOpen(GcStream *st, const char *path)
+{
+	int32 idx = (int32)(st - gStreams);
+	GcSring *r = &gSring[idx];
+	u32 lba, size;
+	if(!fsLookupLba(path, &lba, &size)) return FALSE;
+	if(gSringLock == LWP_MUTEX_NULL) LWP_MutexInit(&gSringLock, false);
+	if(r->aram == 0){ r->aram = gcBankAlloc(GC_SRING_BYTES); if(r->aram == 0) return FALSE; }
+	LWP_MutexLock(gSringLock);
+	gcSringCancel(idx);
+	r->fileLba = lba; r->fileSize = size; r->rd = r->wr = r->fetch = r->base = 0;
+	r->active = TRUE; r->sync = FALSE;   // B73: nobody waits on the disc; the decode thread opens when data has landed
+	LWP_MutexUnlock(gSringLock);
+	return TRUE;
+}
+static void
+gcSringClose(GcStream *st)
+{
+	int32 idx = (int32)(st - gStreams);
+	if(gSringLock == LWP_MUTEX_NULL) return;
+	LWP_MutexLock(gSringLock);
+	gcSringCancel(idx);
+	gSring[idx].active = FALSE;
+	LWP_MutexUnlock(gSringLock);
+}
+
 static size_t
 gcVorbisRead(void *ptr, size_t size, size_t nmemb, void *datasource)
 {
 	GcStream *st = (GcStream*)datasource;
-	if(st->file == nil)
+	if(!gSring[st - gStreams].active)
 		return 0;
-	return fread(ptr, size, nmemb, st->file);
+	// B67: Tremor hands a NULL buffer when its own malloc failed (heap
+	// exhausted after a scene load or the pause menu). fread(NULL) wrote at
+	// address 0 and Tremor then read the whole file forever on the main
+	// thread: the "freeze on unpause / at the cutscene". EOF it instead.
+	if(ptr == nil){
+		printf("AUDIO: vorbis buffer alloc failed on %s, stream aborted\n", st->path);
+		return 0;
+	}
+	return size ? gcSringRead(st, ptr, (uint32)(size*nmemb))/size : 0;
 }
 
 static int
 gcVorbisSeek(void *datasource, ogg_int64_t offset, int whence)
 {
 	GcStream *st = (GcStream*)datasource;
-	if(st->file == nil)
+	if(!gSring[st - gStreams].active)
 		return -1;
-	return fseek(st->file, (long)offset, whence);
+	return gcSringSeek(st, offset, whence);
 }
 
 static int
@@ -1569,7 +2445,7 @@ static long
 gcVorbisTell(void *datasource)
 {
 	GcStream *st = (GcStream*)datasource;
-	return st->file ? ftell(st->file) : -1;
+	return gSring[st - gStreams].active ? (long)gSring[st - gStreams].rd : -1;
 }
 
 static ov_callbacks gcVorbisCallbacks = {
@@ -1624,13 +2500,21 @@ gcAdpcmBlockSamples(uint32 blockAlign)
 {
 	return blockAlign > 4 ? 1 + (blockAlign - 4)*2 : 0;
 }
+// B122: frames per IMA block for 1 or 2 channels. A stereo block carries one
+// 4-byte header per channel, then 4-byte words alternating L/R (8 nibbles each).
+static inline uint32
+gcAdpcmBlockFrames(uint32 blockAlign, uint32 channels)
+{
+	if(channels == 2) return blockAlign > 8 ? 1 + (blockAlign - 8) : 0;
+	return gcAdpcmBlockSamples(blockAlign);
+}
 
 // Parse the RIFF header: rate, channels, block size and where data starts.
 static bool8
 gcWavOpen(GcStream *st)
 {
 	uint8 h[64];
-	if(fseek(st->file, 0, SEEK_SET) != 0 || fread(h, 1, 12, st->file) != 12)
+	if(gcSringSeek(st, 0, SEEK_SET) != 0 || gcSringRead(st, h, 12) != 12)
 		return FALSE;
 	if(memcmp(h, "RIFF", 4) != 0 || memcmp(h+8, "WAVE", 4) != 0)
 		return FALSE;
@@ -1638,12 +2522,12 @@ gcWavOpen(GcStream *st)
 	bool8 haveFmt = FALSE;
 	for(;;){
 		uint8 ck[8];
-		if(fread(ck, 1, 8, st->file) != 8)
+		if(gcSringRead(st, ck, 8) != 8)
 			return FALSE;
 		uint32 sz = (uint32)ck[4] | ((uint32)ck[5]<<8) | ((uint32)ck[6]<<16) | ((uint32)ck[7]<<24);
 		if(memcmp(ck, "fmt ", 4) == 0){
 			uint32 n = sz > sizeof(h) ? sizeof(h) : sz;
-			if(fread(h, 1, n, st->file) != n)
+			if(gcSringRead(st, h, n) != n)
 				return FALSE;
 			fmtTag       = (uint32)h[0] | ((uint32)h[1]<<8);
 			st->channels = (uint32)h[2] | ((uint32)h[3]<<8);
@@ -1651,27 +2535,27 @@ gcWavOpen(GcStream *st)
 			               ((uint32)h[6]<<16) | ((uint32)h[7]<<24);
 			st->blockAlign = (uint16)((uint32)h[12] | ((uint32)h[13]<<8));
 			haveFmt = TRUE;
-			if(sz > n && fseek(st->file, (long)(sz - n), SEEK_CUR) != 0)
+			if(sz > n && gcSringSeek(st, (long)(sz - n), SEEK_CUR) != 0)
 				return FALSE;
 		}else if(memcmp(ck, "data", 4) == 0){
 			if(!haveFmt)
 				return FALSE;
-			st->dataStart = (uint32)ftell(st->file);
+			st->dataStart = (uint32)gcSringTell(st);
 			st->dataBytes = sz;
 			break;
-		}else if(fseek(st->file, (long)((sz + 1) & ~1u), SEEK_CUR) != 0)
+		}else if(gcSringSeek(st, (long)((sz + 1) & ~1u), SEEK_CUR) != 0)
 			return FALSE;
 	}
-	if(st->channels != 1 || st->rate == 0)
-		return FALSE;           // every voice line in the game is mono
-	if(fmtTag == 17 && st->blockAlign > 4){
+	if((st->channels != 1 && st->channels != 2) || st->rate == 0)
+		return FALSE;           // B122: voice lines are mono, converted music/cutscene streams keep their stereo
+	if(fmtTag == 17 && st->blockAlign > 4*st->channels){
 		st->adpcm = TRUE;
-		uint32 bs = gcAdpcmBlockSamples(st->blockAlign);
+		uint32 bs = gcAdpcmBlockFrames(st->blockAlign, st->channels);
 		st->lenSamples = (st->dataBytes / st->blockAlign) * bs;
 	}else if(fmtTag == 1){
 		st->adpcm = FALSE;      // plain PCM: 28 of the 1120 files are 16-bit
 		st->blockAlign = 0;
-		st->lenSamples = st->dataBytes/2;
+		st->lenSamples = st->dataBytes/(2*st->channels);
 	}else
 		return FALSE;
 	return TRUE;
@@ -1685,7 +2569,7 @@ gcWavDecode(GcStream *st, uint8 *dst)
 	uint32 done = 0;
 	if(!st->adpcm){
 		// 16-bit PCM straight through, little-endian file to big-endian DSP.
-		size_t got = fread(dst, 1, STREAM_CHUNK_BYTES, st->file);
+		size_t got = gcSringRead(st, dst, STREAM_CHUNK_BYTES);
 		for(size_t b = 0; b + 1 < got; b += 2){
 			uint8 t = dst[b]; dst[b] = dst[b+1]; dst[b+1] = t;
 		}
@@ -1708,16 +2592,31 @@ gcWavDecode(GcStream *st, uint8 *dst)
 				memmove(st->adpcmSpill, st->adpcmSpill + n, st->adpcmSpillBytes);
 		}
 		while(done < STREAM_CHUNK_BYTES){
-			if(fread(blk, 1, ba, st->file) != ba)
+			if(gcSringRead(st, blk, ba) != ba)
 				break;
-			int32 pred = (int16)((uint16)blk[0] | ((uint16)blk[1] << 8));
-			int32 idx = blk[2];
-			if(idx > 88) idx = 88;
 			uint32 n = 0;
-			tmp[n++] = (int16)pred;
-			for(uint32 i = 4; i < ba && n + 2 <= ARRAY_SIZE(tmp); i++){
-				tmp[n++] = gcImaNibble(blk[i] & 15, &pred, &idx);
-				tmp[n++] = gcImaNibble(blk[i] >> 4, &pred, &idx);
+			if(st->channels == 2){
+				// B122: stereo block — two headers, then 4-byte words alternating L/R.
+				int32 pl = (int16)((uint16)blk[0] | ((uint16)blk[1] << 8)), il = blk[2] > 88 ? 88 : blk[2];
+				int32 pr = (int16)((uint16)blk[4] | ((uint16)blk[5] << 8)), ir = blk[6] > 88 ? 88 : blk[6];
+				tmp[n++] = (int16)pl; tmp[n++] = (int16)pr;
+				for(uint32 i = 8; i + 8 <= ba && n + 16 <= ARRAY_SIZE(tmp); i += 8){
+					int16 l[8], r[8];
+					for(uint32 k = 0; k < 4; k++){
+						l[2*k] = gcImaNibble(blk[i+k] & 15, &pl, &il);   l[2*k+1] = gcImaNibble(blk[i+k] >> 4, &pl, &il);
+						r[2*k] = gcImaNibble(blk[i+4+k] & 15, &pr, &ir); r[2*k+1] = gcImaNibble(blk[i+4+k] >> 4, &pr, &ir);
+					}
+					for(uint32 k = 0; k < 8; k++){ tmp[n++] = l[k]; tmp[n++] = r[k]; }
+				}
+			}else{
+				int32 pred = (int16)((uint16)blk[0] | ((uint16)blk[1] << 8));
+				int32 idx = blk[2];
+				if(idx > 88) idx = 88;
+				tmp[n++] = (int16)pred;
+				for(uint32 i = 4; i < ba && n + 2 <= ARRAY_SIZE(tmp); i++){
+					tmp[n++] = gcImaNibble(blk[i] & 15, &pred, &idx);
+					tmp[n++] = gcImaNibble(blk[i] >> 4, &pred, &idx);
+				}
 			}
 			uint32 bytes = n*2;
 			uint32 fit = STREAM_CHUNK_BYTES - done;
@@ -1734,7 +2633,7 @@ gcWavDecode(GcStream *st, uint8 *dst)
 	}
 	if(done < STREAM_CHUNK_BYTES)
 		memset(dst + done, 0, STREAM_CHUNK_BYTES - done);
-	st->posSamples += done/2;   // mono 16-bit
+	st->posSamples += done/(2*st->channels);   // 16-bit frames
 	return done;
 }
 
@@ -1759,11 +2658,12 @@ gcLoadTrackLengths(void)
 		const char *lext = strrchr(path, '.');
 		if(lext && (lext[1] == 'w' || lext[1] == 'W')){
 			// Native voice: length comes from the RIFF header, no decoder.
-			static GcStream probe; // includes the stream resampler buffer; not stack-sized
-			memset(&probe, 0, sizeof(probe));
-			probe.file = f;
-			if(gcWavOpen(&probe) && probe.rate)
-				gTrackLengthMs[i] = (uint32)((uint64)probe.lenSamples*1000/probe.rate);
+			GcStream *probe = &gStreams[0];   // idle at Initialise; was a 21K static
+			memset(probe, 0, sizeof(*probe));
+			probe->file = f;
+			if(gcWavOpen(probe) && probe->rate)
+				gTrackLengthMs[i] = (uint32)((uint64)probe->lenSamples*1000/probe->rate);
+			memset(probe, 0, sizeof(*probe));
 			fclose(f);
 			continue;
 		}
@@ -1788,7 +2688,7 @@ gcLoadTrackLengths(void)
 static uint32
 gcStreamDecodeNative(GcStream *st, uint8 *dst)
 {
-	if(st->file && !st->vfOpen)
+	if(gSring[st - gStreams].active && !st->vfOpen)
 		return gcWavDecode(st, dst);
 	if(!st->vfOpen)
 		return 0;
@@ -1885,16 +2785,20 @@ gcStreamDecode(GcStream *st, uint8 *dst)
 // Keep one decoded chunk ahead of the DSP. The callback consumes it with a
 // pointer swap; this refills on the decode thread (gcStreamDecMain).
 static void
-gcStreamPump(GcStream *st)
+gcStreamPump(GcStream *st, bool prime)
 {
-	if(!st->playing || st->paused || st->bufReady || st->eof || st->voice == nil)
+	if(st->opening || !st->playing || (st->paused && !prime) || st->bufReady || st->eof || st->voice == nil)
 		return;
 	uint8 *dst = st->buf[st->fill];
 	if(dst == nil)
 		return;
 	// Taken after the early-outs, so an idle stream does not contend with the
 	// streaming worker sixty times a second for nothing.
-	DVD_FS_GUARD;
+	{
+		GcSring *r = &gSring[st - gStreams];
+		if(r->active && !r->sync && r->fetch < r->fileSize && gcSringAvail(r) < 16*1024)
+			return;   // let the ring fill; the DSP still holds two chunks
+	}
 	uint32 got = gcStreamDecode(st, dst);
 	if(got == 0){
 		// The DECODER is dry, which is not the same as the SOUND being over:
@@ -1939,30 +2843,130 @@ static bool8 gStreamPreloading;
 static void
 gcStreamArm(GcStream *st, uint8 nStream)
 {
-	(void)nStream;
-	if(st->voice == nil)
+	if(st->voice == nil || st->armed || !gcStreamCanPlay(nStream))
 		return;
-	AESND_SetVoiceStream(st->voice, true);
+	const void *first = gStreamSilence;
 	if(!st->bufReady)
 		gcStreamPump(st);
 	if(st->bufReady){
-		AESND_SetVoiceBuffer(st->voice, st->buf[st->play], STREAM_CHUNK_BYTES);
+		first = st->buf[st->play];
 		st->play ^= 1;
 		st->bufReady = FALSE;
 		gcStreamPump(st);        // the next chunk waits for the first callback
+	}else{
+		// B112: no chunk yet — never unstop the voice on whatever buffer it
+		// held last. That buffer was the PREVIOUS stream's tail (the office
+		// scene's last chunk played at the start of the next scene: the "door
+		// slam for no reason"). Silence until the first callback asks.
+		first = gStreamSilence;
 	}
-	AESND_SetVoiceStop(st->voice, false);
+	gcApplyStreamVolume(st, nStream);
+	u32 level;
+	_CPU_ISR_Disable(level);
+	if(gcStreamCanPlay(nStream)){
+		st->armed = TRUE;
+		gcPlayVoice(st->voice, st->channels == 1 ? VOICE_MONO16 : VOICE_STEREO16,
+		    first, STREAM_CHUNK_BYTES, st->rate == GC_DSP_RATE ? (f32)st->rate : GC_DSP_RATE_F,
+		    TRUE, FALSE);
+	}
+	_CPU_ISR_Restore(level);
+}
+
+// B73: the deferred half of StartStreamedFile, on the decode thread. Waits for
+// the ring, opens, positions with one raw seek, primes and arms. Never blocks.
+static void
+gcStreamOpenStepSync(GcStream *st, int32 idx)
+{
+	GcSring *r = &gSring[idx];
+	if(st->opening == 1){
+		bool8 ok;
+		if(st->adpcm || (strrchr(st->path, '.') && (strrchr(st->path, '.')[1] == 'w' || strrchr(st->path, '.')[1] == 'W'))){
+			ok = gcWavOpen(st);
+			if(ok && st->openPos && st->rate){
+				uint32 want = (uint32)((uint64)st->openPos*st->rate/1000);
+				if(st->lenSamples) want %= st->lenSamples;
+				uint32 off = st->adpcm ? (want/gcAdpcmBlockFrames(st->blockAlign, st->channels))*st->blockAlign : want*2*st->channels;
+				if(gcSringSeek(st, (ogg_int64_t)(st->dataStart + off), SEEK_SET) == 0) st->posSamples = want;
+			}
+			if(!ok){ printf("AUDIO: wav open failed %s\n", st->path); st->opening = 0; st->playing = FALSE; return; }
+			st->opening = 3;
+		}else{
+			if(mallinfo().fordblks < 192*1024){ printf("AUDIO: no heap for stream %d, %s skipped\n", (int)idx, st->path); st->opening = 0; st->playing = FALSE; return; }
+			int ovrc = ov_open_callbacks(st, &st->vf, nil, 0, gcVorbisCallbacks);
+			if(ovrc < 0){ printf("AUDIO: vorbis open failed %s rc=%d\n", st->path, ovrc); st->opening = 0; st->playing = FALSE; return; }
+			st->vfOpen = TRUE;
+			vorbis_info *vi = ov_info(&st->vf, -1);
+			st->rate = vi ? (uint32)vi->rate : DIGITALRATE;
+			st->channels = vi && vi->channels == 1 ? 1 : 2;
+			st->lenSamples = (uint32)ov_pcm_total(&st->vf, -1);
+			if(st->openPos && st->lenSamples){
+				ogg_int64_t want = (ogg_int64_t)st->openPos*(st->rate/1000);
+				want %= (ogg_int64_t)st->lenSamples;
+				ogg_int64_t rawOff = (ogg_int64_t)r->fileSize * want / (ogg_int64_t)st->lenSamples;
+				gcSringSeek(st, rawOff, SEEK_SET);   // flush to the target; step 2 waits for it to land
+				st->opening = 2;
+				return;
+			}
+			st->opening = 3;
+		}
+	}
+	if(st->opening == 2){
+		uint32 need2 = 64*1024; if(gcSringAvail(r) < need2 && !(r->fetch >= r->fileSize)) return;
+		if(ov_raw_seek(&st->vf, (ogg_int64_t)r->rd) == 0){
+			st->posSamples = (uint32)ov_pcm_tell(&st->vf);
+			gcStreamDecode(st, st->buf[0]);   // discard: the first block after a raw seek is noise
+		}
+		st->opening = 3;
+	}
+	if(st->opening == 3){
+		if(gcSringAvail(r) < 32*1024 && !(r->fetch >= r->fileSize)) return;   // room for two chunks of decode
+		AESND_SetVoiceFormat(st->voice, st->channels == 1 ? VOICE_MONO16 : VOICE_STEREO16);
+		AESND_SetVoiceFrequency(st->voice, st->rate == GC_DSP_RATE ? (f32)st->rate : GC_DSP_RATE_F);
+		gcApplyStreamVolume(st, (uint8)idx);
+		st->opening = 0;
+		gcStreamPump(st, true);
+		if(!st->openHold && !st->paused) gcStreamArm(st, (uint8)idx);
+	}
+}
+
+// B83: the cutscene manager holds the picture until the dialogue stream is primed;
+// with the async open the animation used to start seconds before the audio.
+extern "C" int gcStreamPrimed(int n)
+{
+	if(n < 0 || n >= MAX_STREAMS) return TRUE;
+	u32 level;
+	_CPU_ISR_Disable(level);
+	bool primed = gStreamRequests[n].generation == gStreamRequests[n].applied &&
+	    !gStreams[n].opening && (!gStreams[n].playing || gStreams[n].armed || gStreams[n].bufReady);
+	_CPU_ISR_Restore(level);
+	return primed;
+}
+
+// B75: Tremor's ov_open scans BACKWARDS from the end of the file for the last
+// page. On a ring that answers "no data yet" with a 0-byte read it takes that
+// as EOF, steps back, reads 0 again, and spins forever at offset 0 -- and at
+// priority 72 this thread starved the main loop: B73 froze on the first
+// cutscene frame. While a stream is opening its ring reads therefore BLOCK
+// (sync), which only ever parks this thread, never the game.
+static void
+gcStreamOpenStep(GcStream *st, int32 idx)
+{
+	GcSring *r = &gSring[idx];
+	if(!r->active) { st->opening = 0; return; }
+	uint32 need = r->fileSize < 96*1024 ? r->fileSize : 96*1024;
+	if(gcSringAvail(r) < need && !(r->fetch >= r->fileSize && r->wr >= r->fileSize)) return;
+	r->sync = TRUE;
+	gcStreamOpenStepSync(st, idx);
+	r->sync = FALSE;
 }
 
 void
 cSampleManager::Service(void)
 {
+	gMainWhere = "audio-service";
 	// AESND mixes on the DSP; what the CPU owes it each frame is the next
 	// block of stream data. Reading from disc here rather than in the voice
 	// callback keeps file I/O off the audio path.
-	// gxAudioUs: what this costs the frame, for the a= profile field — the
-	// number that decides whether radio decode is the stutter.
-	extern unsigned gxAudioUs;
 	u64 t0 = gettime();
 	// Volume and pan can change while a sound is already playing - the pause
 	// menu drops the effects fade to zero, and without this refresh every
@@ -1983,44 +2987,7 @@ cSampleManager::Service(void)
 	// Streams are pumped by the decode thread now (gcStreamDecMain) — a
 	// Vorbis chunk on this thread was a 10-16ms bite out of every eighth
 	// frame, the metronome behind "constant stutters".
-	gxAudioUs = (unsigned)ticks_to_microsecs(gettime() - t0);
 
-	// AHB: the audio system's own heartbeat, to the card every ~5s. One line
-	// answers the questions the mute reports keep raising: are CHANNELS being
-	// started at all (SFX requested), are the streams open/playing/paused,
-	// and did anything die since the last beat.
-	{
-		static u64 lastBeat;
-		if(ticks_to_millisecs(gettime() - lastBeat) >= 5000){
-			lastBeat = gettime();
-			int used = 0, playing = 0;
-			for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++){
-				if(gChannels[i].used) used++;
-				if(gChannels[i].playing) playing++;
-			}
-			char sline[64]; int sn = 0;
-			for(int32 i = 0; i < MAX_STREAMS; i++)
-				sn += snprintf(sline+sn, sizeof(sline)-sn, " s%d=%c%c",
-				    i, gStreams[i].file ? 'F' : '-',
-				    gStreams[i].playing ? (gStreams[i].paused ? 'p' : 'P') : '-');
-			// Unguarded, this raced the streaming worker inside libfat every
-			// 5s of gameplay — the binary junk blocks in audio.log were the
-			// visible half; the smashed heap (_calloc_r/__sflush_r deaths at
-			// 0xC) was the other.
-			DVD_FS_GUARD;
-			FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
-			if(al){
-				fprintf(al, "AHB ch=%d/%d%s vol=%u/%u conv=%u/%u pool=%uK/%uK/%uK\n",
-				    playing, used, sline,
-				    (unsigned)gEffectsVolume, (unsigned)gMusicVolume,
-				    (unsigned)gConvOk, (unsigned)(gConvOk + gConvFallback),
-				    (unsigned)(gConvBytes/1024),
-				    (unsigned)(gConvPeak/1024),
-				    (unsigned)(GC_CONV_BUDGET/1024));
-				fclose(al);
-			}
-		}
-	}
 }
 
 bool8
@@ -2103,6 +3070,41 @@ cSampleManager::LoadPedComment(uint32 nComment)
 	if(MusicManager.IsInitialised() &&
 	   MusicManager.GetMusicMode() == MUSICMODE_CUTSCENE)
 		return FALSE;
+#if !defined(HW_RVL)
+	if(!gPackedSfx){
+		if(gPedAram == 0){
+			gPedAram = gcBankAlloc(align32(PED_BLOCKSIZE)*MAX_PEDSFX);
+			if(gPedAram == 0)
+				return FALSE;
+			for(int32 i = 0; i < MAX_PEDSFX; i++)
+				gPedSlotSfx[i] = -1;
+		}
+		// B68: asynchronous. The line lands on the audio channel a few frames
+		// later and IsPedCommentLoaded reports it; the caller asks every tick.
+		if(gPedIo.active)
+			return FALSE;
+		if(gSampleIndex == nil || nComment >= gNumSamples || gSampleIndex[nComment].nSize > PED_BLOCKSIZE)
+			return FALSE;
+		bool8 adp = gAdpAll;
+		if(adp && gSfxAdpLba == 0 && !fsLookupLba("dvd:/audio/sfx.adp", &gSfxAdpLba, &gSfxAdpSize))
+			adp = FALSE;
+		if(!adp && gSfxRawLba == 0 && !fsLookupLba("dvd:/audio/sfx.raw", &gSfxRawLba, &gSfxRawSize))
+			return FALSE;
+		if(gSringLock == LWP_MUTEX_NULL) LWP_MutexInit(&gSringLock, false);
+		LWP_MutexLock(gSringLock);
+		gPedIo.active = TRUE; gPedIo.adpcm = adp; gPedIo.sfx = nComment; gPedIo.slot = gCurrentPedSlot;
+		gPedIo.aram = gPedAram + align32(PED_BLOCKSIZE)*gCurrentPedSlot;
+		if(adp){ gPedIo.base = gcAdpOffset(nComment); gPedIo.remain = gcAdpBlocks(nComment)*512; }
+		else   { gPedIo.base = gSampleIndex[nComment].nOffset; gPedIo.remain = gSampleIndex[nComment].nSize; }
+		gPedIo.off = 0; gPedIo.skip = 0;
+		gPedSlotAdpcm[gCurrentPedSlot] = adp; gPedSlotBytes[gCurrentPedSlot] = gPedIo.remain;
+		gPedSlotSfx[gCurrentPedSlot] = -1;
+		if(++gCurrentPedSlot >= MAX_PEDSFX)
+			gCurrentPedSlot = 0;
+		LWP_MutexUnlock(gSringLock);
+		return FALSE;
+	}
+#endif
 	if(gPedBuf == nil){
 #ifdef HW_RVL
 		gPedBuf = (uint8*)gcBankAlloc(align32(PED_BLOCKSIZE*MAX_PEDSFX));
@@ -2161,61 +3163,56 @@ cSampleManager::SetChannel3DDistances(uint32 nChannel, float fMax, float fMin)
 void
 cSampleManager::PreloadStreamedFile(tTrack nFile, uint8 nStream)
 {
-	if(nStream >= MAX_STREAMS)
+	if(!_bSampmanInitialised || nStream >= MAX_STREAMS || (uint32)nFile >= ARRAY_SIZE(StreamedNameTable))
 		return;
-	GcStreamGuard sg(gStreamLock[nStream]);
-	gStreamPreloading = TRUE;
-	bool8 ok = StartStreamedFile(nFile, 0, nStream);
-	gStreamPreloading = FALSE;
-	if(ok){
-		// Held: opened and primed, voice silent and still holding chunk one,
-		// until the scene asks for it.
-		GcStream *st = &gStreams[nStream];
-		st->paused = TRUE;
-		if(st->voice)
-			AESND_SetVoiceStop(st->voice, true);
-	}
+	gcStreamRequest(nStream, nFile, 0, TRUE, TRUE);
+	if(!gcStreamDeferControl()) gcStreamApplyRequest(nStream);
 }
 
 void
 cSampleManager::PauseStream(bool8 nPauseFlag, uint8 nStream)
 {
-	if(nStream >= MAX_STREAMS)
-		return;
-	GcStreamGuard sg(gStreamLock[nStream]);
-	GcStream *st = &gStreams[nStream];
-	st->paused = nPauseFlag;
-	if(st->voice)
-		AESND_SetVoiceStop(st->voice, nPauseFlag || !st->playing);
+	if(nStream >= MAX_STREAMS) return;
+	u32 level;
+	_CPU_ISR_Disable(level);
+	gStreamRequests[nStream].paused = nPauseFlag;
+	if(nPauseFlag && gStreams[nStream].voice)
+		AESND_SetVoiceStop(gStreams[nStream].voice, true);
+	_CPU_ISR_Restore(level);
 }
 
 void
 cSampleManager::StartPreloadedStreamedFile(uint8 nStream)
 {
-	if(nStream >= MAX_STREAMS)
-		return;
-	GcStreamGuard sg(gStreamLock[nStream]);
-	GcStream *st = &gStreams[nStream];
-	st->paused = FALSE;
-	// Re-arm rather than merely un-stop: see gcStreamArm.
-	gcStreamArm(st, nStream);
+	if(nStream >= MAX_STREAMS) return;
+	u32 level;
+	_CPU_ISR_Disable(level);
+	gStreamRequests[nStream].hold = FALSE;
+	_CPU_ISR_Restore(level);
 }
 
 bool8
 cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 {
+	if(!_bSampmanInitialised)
+		return FALSE;
 	if(nStream >= MAX_STREAMS)
 		return FALSE;
+	if((uint32)nFile >= ARRAY_SIZE(StreamedNameTable))
+		return FALSE;
+	if(gcStreamDeferControl()){
+		gcStreamRequest(nStream, nFile, nPos, TRUE, FALSE);
+		return TRUE;
+	}
 	GcStreamGuard sg(gStreamLock[nStream]);
 	GcStream *st = &gStreams[nStream];
-	u64 tOpen = gettime();
 	StopStreamedFile(nStream);
 	st->srcFrames = 0;
 	st->srcPos = 0;
 	st->srcEof = FALSE;
-	// Spans the fopen, ov_open_callbacks (which reads headers) and the priming
-	// pump. The lock is recursive, so the nested guards inside are free.
-	DVD_FS_GUARD;
+	// B71: no FS guard here. The ring's first fill is done by the CdStream
+	// worker, which takes the same lock; holding it across ov_open deadlocked
+	// the worker against our own wait (read timeout, park).
 
 	// StreamedNameTable in sampman.h already maps every track to its file —
 	// "AUDIO\\WILD.ADF" and so on — so translate that rather than inventing a
@@ -2227,38 +3224,21 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	{
 		char gl[96];
 		snprintf(gl, sizeof(gl), "STRM start s%d %s pos=%u", (int)nStream, path, (unsigned)nPos);
-		GeckoLog(gl);
+		printf("%s\n", gl);   // B120: was built and never printed — 20 minutes of log with no stream line
 	}
 	strncpy(st->path, path, sizeof(st->path)-1);
 	st->path[sizeof(st->path)-1] = '\0';
-	st->file = fopen(path, "rb");
-	if(st->file == nil){
-		// A silent FALSE here is a silent GAME: cutscene speech and radio
-		// both die invisibly on a bad path. Card, not Gecko — Gecko drops it.
-		FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
-		if(al){ fprintf(al, "STRM OPEN-FAIL s%d %s\n", (int)nStream, path); fclose(al); }
-		gcAudioDie("stream-open", path);
+	if(!gcSringOpen(st, path)){
+		// B119: a missing stream is silence, not a park (user: fail-loud off;
+		// the radio stations are deliberately absent). One line per path.
+		static uint32 said;
+		if(said++ < 12) printf("STRM missing %s\n", path);
 		return FALSE;
-	}
-	{
-		struct mallinfo smi = mallinfo();
-		unsigned openMs = (unsigned)ticks_to_millisecs(gettime() - tOpen);
-		FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
-		if(al){ fprintf(al, "STRM ok s%d %s pos=%u free=%uK open=%ums\n",
-		    (int)nStream, path, (unsigned)nPos,
-		    (unsigned)smi.fordblks/1024, openMs); fclose(al); }
-	}
-	// stdio buffering for this stream must not depend on the allocator: at
-	// 441K free the fread inside ov_open failed its buffer malloc and the
-	// open died OV_EREAD on a perfectly good file.
-	{
-		static char stdioBuf[MAX_STREAMS][32*1024] __attribute__((aligned(32)));
-		setvbuf(st->file, stdioBuf[nStream], _IOFBF, sizeof(stdioBuf[0]));
 	}
 
 	if(st->voice == nil){
 		st->voice = AESND_AllocateVoiceWithArg(gcStreamCallback, st);
-		if(st->voice == nil){ fclose(st->file); st->file = nil; return FALSE; }
+		if(st->voice == nil){ gcSringClose(st); return FALSE; }
 	}
 	for(int32 i = 0; i < 2; i++)
 		if(st->buf[i] == nil){
@@ -2270,108 +3250,29 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 				memset(st->buf[i], 0, STREAM_CHUNK_BYTES);
 		}
 	if(st->buf[0] == nil || st->buf[1] == nil){
-		fclose(st->file); st->file = nil; return FALSE;
+		gcSringClose(st); return FALSE;
 	}
 
 	// Voice is native: no Vorbis, no decode state, no allocation.
 	const char *ext = strrchr(path, '.');
-	bool8 isWav = ext && (ext[1] == 'w' || ext[1] == 'W');
-	if(isWav){
-		if(!gcWavOpen(st)){
-			fclose(st->file); st->file = nil;
-			gcAudioDie("stream-open-wav", path);
-			return FALSE;
-		}
-		st->posSamples = 0;
-		if(nPos && st->rate){
-			uint32 want = (uint32)((uint64)nPos*st->rate/1000);
-			if(st->lenSamples) want %= st->lenSamples;
-			uint32 off = st->adpcm ?
-			    (want/gcAdpcmBlockSamples(st->blockAlign))*st->blockAlign :
-			    want*2;
-			if(fseek(st->file, (long)(st->dataStart + off), SEEK_SET) == 0)
-				st->posSamples = want;
-		}
-	}else{
-	int ovrc = ov_open_callbacks(st, &st->vf, nil, 0, gcVorbisCallbacks);
-	if(ovrc < 0){
-		fclose(st->file); st->file = nil;
-		// OV_EFAULT here is usually Tremor failing to malloc its decode
-		// state, not a bad file — the rc tells them apart.
-		char od[100];
-		snprintf(od, sizeof(od), "%s rc=%d", path, ovrc);
-		gcAudioDie("stream-open-vorbis", od);
-		return FALSE;
-	}
-	st->vfOpen = TRUE;
-	// The voice plays at the file's rate. Feeding the DSP below its 48kHz
-	// output makes the ucode resample by sample-repeat — no interpolation —
-	// and the aliasing images were measured as loud as the real top octave
-	// (the "metallic" radio). 48kHz files sidestep the resampler entirely.
-	vorbis_info *vi = ov_info(&st->vf, -1);
-	st->rate = vi ? (uint32)vi->rate : DIGITALRATE;
-	st->channels = vi && vi->channels == 1 ? 1 : 2;
-	st->lenSamples = (uint32)ov_pcm_total(&st->vf, -1);
-	// The radio is wall-clock synced: the game hands the station's position in
-	// ms and expects playback from there, not from the top of the tape.
-	st->posSamples = 0;
-	if(nPos){
-		ogg_int64_t want = (ogg_int64_t)nPos*(st->rate/1000);
-		if(st->lenSamples)
-			want %= (ogg_int64_t)st->lenSamples;
-		// PAGE seek, not sample-accurate seek. ov_pcm_seek bisects the file
-		// and then decodes forward to land on the exact sample; over a 70MB
-		// station on SD that was measured at up to 148ms inside one frame -
-		// the largest single number in the whole profile and the stutter the
-		// user reported. Radio is wall-clock synced to within a page (a few
-		// tens of ms), which nobody can hear, and the page seek skips the
-		// decode-forward entirely.
-		if(ov_pcm_seek_page(&st->vf, want) == 0){
-			st->posSamples = (uint32)ov_pcm_tell(&st->vf);
-			// THROW THE FIRST BLOCK AWAY. Vorbis reconstructs every block from
-			// the overlapped half of the one before it, and a raw page seek
-			// lands mid-stream with that half missing - so the first decode
-			// after one is a burst of noise, not audio. That burst is the white
-			// noise in the menu: the frontend plays the tuned station and starts
-			// it at a wall-clock position, so every restart played it, while the
-			// radio-select screen sounded clean because it starts from zero.
-			// One discarded chunk (84ms) costs nothing and the decoder is fully
-			// primed by the next one.
-			gcStreamDecode(st, st->buf[0]);
-		}
-	}
-	}
+	st->adpcm = ext && (ext[1] == 'w' || ext[1] == 'W');   // native voice line; the header decides the real format
+	// B73: nothing below touches the disc. The decode thread opens the file
+	// once the ring holds its first blocks (gcStreamOpenStep), seeks, primes
+	// and arms. StartStreamedFile used to stall the frame for every station
+	// change and every cutscene line (headers + position seek at drive speed).
+	st->armed = FALSE;
 	st->fill = 0;
 	st->play = 0;
-	st->adpcmSpillBytes = 0;   // no carry from the previous line
+	st->adpcmSpillBytes = 0;
 	st->bufReady = FALSE;
 	st->eof = FALSE;
 	st->starved = 0;
-	st->paused = FALSE;
+	st->posSamples = 0;
+	st->openPos = nPos;
+	st->openHold = gStreamPreloading;
+	st->paused = gStreamPreloading;
 	st->playing = TRUE;
-
-	AESND_SetVoiceFormat(st->voice, st->channels == 1 ? VOICE_MONO16 : VOICE_STEREO16);
-	AESND_SetVoiceFrequency(st->voice,
-	    st->rate == GC_DSP_RATE ? (f32)st->rate : GC_DSP_RATE_F);
-	AESND_SetVoiceVolume(st->voice, 255, 255);
-
-	// Arm the voice for streaming BEFORE handing it a buffer - that is the
-	// order AESND's stream voices expect, and reversing it wedged the fourth
-	// stream of a sweep. The white noise this was chasing came from the chunk
-	// allocation being uninitialised, not from the ordering: the buffers are
-	// zeroed at allocation now, so the window between arming and the first
-	// chunk plays silence instead of whatever MEM1 held.
-	if(gStreamPreloading){
-		// Prime only: one chunk decoded and held, nothing handed over.
-		gcStreamPump(st);
-	}else
-		gcStreamArm(st, nStream);
-	if(!st->bufReady && st->posSamples == 0){
-		// Nothing decoded. Say so rather than let silence pass for success.
-		DVD_FS_GUARD;
-		FILE *al = gcCardLogEnabled() ? fopen("dvd:/audio.log", "a") : nil;
-		if(al){ fprintf(al, "STRM PRIME-EMPTY s%d %s\n", (int)nStream, path); fclose(al); }
-	}
+	st->opening = 1;
 	return TRUE;
 }
 
@@ -2380,18 +3281,24 @@ cSampleManager::StopStreamedFile(uint8 nStream)
 {
 	if(nStream >= MAX_STREAMS)
 		return;
+	if(gcStreamDeferControl()){
+		gcStreamRequest(nStream, (tTrack)0, 0, FALSE, FALSE);
+		return;
+	}
 	GcStreamGuard sg(gStreamLock[nStream]);
 	GcStream *st = &gStreams[nStream];
 	if(st->vfOpen){
 		char gl[32];
 		snprintf(gl, sizeof(gl), "STRM stop s%d", (int)nStream);
-		GeckoLog(gl);
 	}
-	if(st->voice)
+	if(st->voice){
 		AESND_SetVoiceStop(st->voice, true);
-	DVD_FS_GUARD;
+		AESND_SetVoiceBuffer(st->voice, gStreamSilence, STREAM_CHUNK_BYTES);   // B112: nothing stale left to resume
+	}
+	st->armed = FALSE;
+	st->opening = 0;
 	if(st->vfOpen){ ov_clear(&st->vf); st->vfOpen = FALSE; }
-	if(st->file){ fclose(st->file); st->file = nil; }
+	gcSringClose(st);   // waits for the worker if a fill is in flight: no FS guard above it
 	st->playing = FALSE;
 	st->posSamples = 0;
 }
@@ -2402,6 +3309,12 @@ cSampleManager::GetStreamedFilePosition(uint8 nStream)
 	// In milliseconds, which is what the music manager expects.
 	if(nStream >= MAX_STREAMS)
 		return 0;
+	u32 level;
+	_CPU_ISR_Disable(level);
+	GcStreamRequest request = gStreamRequests[nStream];
+	_CPU_ISR_Restore(level);
+	if(request.generation != request.applied)
+		return request.wanted ? request.position : 0;
 	GcStream *st = &gStreams[nStream];
 	return (int32)((uint64)st->posSamples*1000/(st->rate ? st->rate : DIGITALRATE));
 }
@@ -2418,12 +3331,48 @@ cSampleManager::GetStreamedFileLength(uint8 nStream)
 bool8
 cSampleManager::IsStreamPlaying(uint8 nStream)
 {
-	// OAL parity: a paused stream reads as NOT playing (CStream::IsPlaying
-	// returns false under m_bPaused). MusicManager's mode-change handshake
-	// depends on it — reading TRUE here made Service stop a preloaded
-	// (paused) cutscene track instead of completing the switch cleanly.
-	return nStream < MAX_STREAMS && gStreams[nStream].playing &&
-	       !gStreams[nStream].paused ? TRUE : FALSE;
+	if(nStream >= MAX_STREAMS) return FALSE;
+	u32 level;
+	_CPU_ISR_Disable(level);
+	const GcStreamRequest *r = &gStreamRequests[nStream];
+	bool playing = r->wanted && !r->hold && !r->paused &&
+	    (r->generation != r->applied || gStreams[nStream].playing);
+	_CPU_ISR_Restore(level);
+	return playing;
+}
+
+static void
+gcStreamApplyRequest(uint8 nStream)
+{
+	u32 level;
+	_CPU_ISR_Disable(level);
+	GcStreamRequest request = gStreamRequests[nStream];
+	_CPU_ISR_Restore(level);
+	GcStream *st = &gStreams[nStream];
+	if(request.generation != request.applied){
+		if(request.wanted){
+			gStreamPreloading = request.hold;
+			SampleManager.StartStreamedFile(request.track, request.position, nStream);
+			gStreamPreloading = FALSE;
+		}else
+			SampleManager.StopStreamedFile(nStream);
+		_CPU_ISR_Disable(level);
+		gStreamRequests[nStream].applied = request.generation;
+		_CPU_ISR_Restore(level);
+	}
+	_CPU_ISR_Disable(level);
+	request = gStreamRequests[nStream];
+	bool pause = request.hold || request.paused;
+	bool changed = st->paused != pause;
+	st->openHold = request.hold;
+	st->paused = pause;
+	if(st->voice && (request.generation != request.applied || !request.wanted || pause))
+		AESND_SetVoiceStop(st->voice, true);
+	else if(st->voice && changed && st->armed && st->playing)
+		AESND_SetVoiceStop(st->voice, false);
+	_CPU_ISR_Restore(level);
+	if(!st->opening && !st->armed && st->playing && gcStreamCanPlay(nStream))
+		gcStreamArm(st, nStream);
 }
 
 static void
@@ -2431,11 +3380,32 @@ gcStreamsShutdown(void)
 {
 	for(int32 i = 0; i < MAX_STREAMS; i++){
 		SampleManager.StopStreamedFile(i);
+		memset(&gStreamRequests[i], 0, sizeof(gStreamRequests[i]));
 		if(gStreams[i].voice){
 			AESND_FreeVoice(gStreams[i].voice);
 			gStreams[i].voice = nil;
 		}
 	}
+}
+
+// B155: what the mixer is playing right now — channel:sample/volume for the
+// live voices and the stream paths — for the "city noise under the office
+// cutscene" hunt (gamecube.cpp prints it every 5 s while a cutscene runs).
+extern "C" int gcVoiceCensusLine(char *out, int cap)
+{
+	int n = 0, live = 0;
+	for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++){
+		GcChannel *c = &gChannels[i];
+		if(c->voice == nil || !c->playing) continue;
+		live++;
+		if(live <= 16 && n < cap - 24)
+			n += snprintf(out + n, cap - n, " %u:s%u/v%u", (unsigned)i, (unsigned)c->sample, (unsigned)c->volume);
+	}
+	for(int32 s = 0; s < MAX_STREAMS && n < cap - 40; s++)
+		if(gStreams[s].playing)
+			n += snprintf(out + n, cap - n, " strm%d:%s%s", (int)s, gStreams[s].path, gStreams[s].paused ? "(paused)" : "");
+	if(n < cap - 12) snprintf(out + n, cap - n, " | %d live", live);
+	return live;
 }
 
 // Diagnostics for the autoradio health line.
@@ -2561,15 +3531,15 @@ cSampleManager::~cSampleManager(void)
 // MusicManager calls this every frame — it is how the radio fades, ducks for
 // dialogue, and follows the music volume preference. Same 0..127 → 0..255
 // linear split as StartChannel.
-void
-cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffectFlag, uint8 nStream)
+static void
+gcApplyStreamVolume(GcStream *st, uint8 nStream)
 {
-	if(nStream >= MAX_STREAMS)
-		return;
-	GcStream *st = &gStreams[nStream];
 	if(st->voice == nil)
 		return;
-	uint32 vol = nVolume*(nEffectFlag ? gEffectsVolume : gMusicVolume)/127;
+	u32 level;
+	_CPU_ISR_Disable(level);
+	bool8 nEffectFlag = st->effectVolume;
+	uint32 vol = st->volume*(nEffectFlag ? gEffectsVolume : gMusicVolume)/127;
 	// Reference OAL behavior: mission streams 1/2 follow the effects slider
 	// but deliberately bypass the effects fade. During scene transitions that
 	// fade reaches zero; applying it here muted lines such as intro1 even while
@@ -2578,13 +3548,29 @@ cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffect
 		vol = vol*(nEffectFlag ? gEffectsFade : gMusicFade)/127;
 	if(vol > 127) vol = 127;
 	uint32 base = vol*255/127;
-	uint32 pan = nPan > 127 ? 127 : nPan;
+	uint32 pan = st->pan > 127 ? 127 : st->pan;
 	// Same model as the channels: full scale at centre, pan attenuates only.
 	uint32 lf = 127 - pan, rf = pan;
 	uint32 l32 = lf >= 63 ? base : base*lf/63;
 	uint32 r32 = rf >= 63 ? base : base*rf/63;
 	AESND_SetVoiceVolume(st->voice,
 	    (u16)(l32 > 255 ? 255 : l32), (u16)(r32 > 255 ? 255 : r32));
+	_CPU_ISR_Restore(level);
+}
+
+void
+cSampleManager::SetStreamedVolumeAndPan(uint8 nVolume, uint8 nPan, bool8 nEffectFlag, uint8 nStream)
+{
+	if(nStream >= MAX_STREAMS)
+		return;
+	GcStream *st = &gStreams[nStream];
+	u32 level;
+	_CPU_ISR_Disable(level);
+	st->volume = nVolume;
+	st->pan = nPan;
+	st->effectVolume = nEffectFlag;
+	gcApplyStreamVolume(st, nStream);
+	_CPU_ISR_Restore(level);
 }
 
 #endif // AUDIO_GAMECUBE
@@ -2629,7 +3615,6 @@ gcTestLog(const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
-	GeckoLog(line);
 	// Buffered: one file write at the end. Opening dvd:/ per line put libfat
 	// in the middle of the very thing being measured.
 	uint32 n = (uint32)strlen(line);
@@ -2645,99 +3630,4 @@ gcTestFlush(void)
 {
 	FILE *f = fopen("mc:/audiotest.log", "w");
 	if(f){ fwrite(gTestBuf, 1, gTestLen, f); fclose(f); }
-}
-
-static void
-gcAudioSelfTest(void)
-{
-	{
-		DVD_FS_GUARD;
-		FILE *f = fopen("dvd:/audiotest.txt", "r");
-		if(f == nil)
-			return;
-		fclose(f);
-	}
-	gEffectsVolume = 127;
-	gEffectsFade = 127;
-	gMusicVolume = 127;
-	gMusicFade = 127;
-	gcTestLog("AUDIOTEST begin");
-
-	// --- streams first: the nine stations, then ambience and voice. Opening
-	// one proves nothing; the RMS of a decoded chunk is the evidence.
-	for(uint32 t = 0; t < 12 && t < ARRAY_SIZE(StreamedNameTable); t++){
-		char path[80];
-		gcTrackPath(t, path, sizeof(path));
-		if(!SampleManager.StartStreamedFile(t, 0, 0)){
-			gcTestLog("STREAM %u %s OPEN-FAILED", (unsigned)t, path);
-			continue;
-		}
-		GcStream *st = &gStreams[0];
-		uint32 rms = 0;
-		// StartStreamedFile has already handed buffer zero to the DSP and
-		// filled buffer `play` for the callback. The old test cleared
-		// bufReady and pumped again just to obtain an RMS value; that overwrote
-		// buffer zero while the DSP was reading it and invalidated the capture.
-		// Observe the queued buffer, exactly as the callback will, without
-		// changing producer/consumer state.
-		for(uint32 tries = 0; tries < 6 && rms == 0; tries++){
-			if(st->bufReady)
-				rms = gcRms((const int16*)st->buf[st->play],
-				    STREAM_CHUNK_BYTES/2);
-			if(rms == 0){
-				SampleManager.Service();
-				usleep(5*1000);
-			}
-		}
-		gcTestLog("STREAM %u %s %uHz ch%u len=%u rms=%u%s",
-		    (unsigned)t, path, (unsigned)st->rate, (unsigned)st->channels,
-		    (unsigned)st->lenSamples, (unsigned)rms,
-		    rms == 0 ? "  SILENT" : "");
-		gcTestFlush();          // partial sweeps must still leave evidence
-		SampleManager.SetStreamedVolumeAndPan(127, 63, 0, 0);
-		// In normal gameplay Service() runs once per frame and keeps one
-		// decoded block ahead of the DSP. Sleeping here used to starve that
-		// producer, so the capture contained only the primed ~0.2 seconds and
-		// then silence. Exercise the exact runtime path for the full two-second
-		// comparison window.
-		for(uint32 frame = 0; frame < 400; frame++){
-			SampleManager.Service();
-			usleep(5*1000);
-		}
-		SampleManager.StopStreamedFile(0);
-		usleep(1000*1000);   // gap: the host segments the dump on silence
-	}
-
-	// --- bank effects across the rate and size range
-	for(uint32 i = 0; i < ARRAY_SIZE(gAudioTestSfx); i++){
-		uint32 sfx = gAudioTestSfx[i];
-		if(sfx >= gNumSamples){
-			gcTestLog("SFX %u OUT-OF-TABLE", (unsigned)sfx);
-			continue;
-		}
-		if(!SampleManager.InitialiseChannel(0, sfx, 0)){
-			gcTestLog("SFX %u INIT-FAILED", (unsigned)sfx);
-			continue;
-		}
-		SampleManager.SetChannelFrequency(0, gSampleIndex[sfx].nFrequency);
-		SampleManager.SetChannelVolume(0, 127);
-		SampleManager.SetChannelPan(0, 63);
-		SampleManager.SetChannelLoopCount(0, 1);
-		SampleManager.StartChannel(0);
-		GcChannel *c = &gChannels[0];
-		uint32 rms = gcRms((const int16*)c->pcm, c->pcmBytes/2);
-		gcTestLog("SFX %u src=%uB %uHz -> %uB conv=%d rms=%u",
-		    (unsigned)sfx, (unsigned)gSampleIndex[sfx].nSize,
-		    (unsigned)gSampleIndex[sfx].nFrequency,
-		    (unsigned)c->pcmBytes, (int)c->pcm48, (unsigned)rms);
-		gcTestFlush();
-		usleep(2000*1000);
-		SampleManager.StopChannel(0);
-		usleep(1000*1000);
-	}
-
-	gcTestLog("AUDIOTEST end");
-	gcTestFlush();
-	extern void gcFatalPark(const char *tag, const char *msg);
-	gcFatalPark("AUDIOTEST", "sweep complete; see mc:/audiotest.log");
 }

@@ -2,6 +2,7 @@
 
 #include "AnimBlendSequence.h"
 #include "MemoryHeap.h"
+#include "MemoryMgr.h"
 
 CAnimBlendSequence::CAnimBlendSequence(void)
 {
@@ -193,18 +194,18 @@ CAnimBlendSequence::RemoveUncompressedData(void)
 	keyFrames = nil;
 }
 
-#ifdef USE_CUSTOM_ALLOCATOR
+#if defined(USE_CUSTOM_ALLOCATOR) || defined(GTA_OGC)
 bool
 CAnimBlendSequence::MoveMemory(void)
 {
 	if(keyFrames){
-		void *newaddr = gMainHeap.MoveMemory(keyFrames);
+		void *newaddr = MemoryMgrMoveMemory(keyFrames);
 		if(newaddr != keyFrames){
 			keyFrames = newaddr;
 			return true;
 		}
 	}else if(keyFramesCompressed){
-		void *newaddr = gMainHeap.MoveMemory(keyFramesCompressed);
+		void *newaddr = MemoryMgrMoveMemory(keyFramesCompressed);
 		if(newaddr != keyFramesCompressed){
 			keyFramesCompressed = newaddr;
 			return true;

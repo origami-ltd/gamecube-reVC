@@ -101,14 +101,14 @@ static int mc_open(struct _reent *r, void *fd, const char *path, int flags, int 
 		// game (LoadSettings' header/version check then falls back to
 		// defaults) instead of valid-length with a garbage tail.
 		f->size = got < len ? got : len;
+		if(strcmp(f->name, "reVC.ini") == 0)
+			while(f->size && f->buf[f->size-1] == 0) f->size--;
 	}else if(!f->writable){
 		free(f->buf); f->buf = NULL;
 		r->_errno = ENOENT;
 		return -1;
 	}
-	if(have && !f->size)
-		; // zero-length card file: nothing read, buffer stays
-	if(f->writable && (flags & O_TRUNC))
+		if(f->writable && (flags & O_TRUNC))
 		f->size = 0;
 	if(flags & O_APPEND)
 		f->pos = f->size;
@@ -127,8 +127,11 @@ static int mc_close(struct _reent *r, void *fd)
 			u8 *nb = (u8*)memalign(32, padded);
 			if(nb){ memcpy(nb, f->buf, f->size); free(f->buf); f->buf = nb; f->cap = padded; }
 		}
-		if(padded <= f->cap)
-			memset(f->buf + f->size, 0, padded - f->size);
+		if(padded > f->cap){
+			r->_errno = ENOMEM; ret = -1;
+			goto out;
+		}
+		memset(f->buf + f->size, 0, padded - f->size);
 		card_file cf;
 		int have = CARD_Open(CARD_SLOTA, f->name, &cf) >= 0;
 		if(have && (u32)cf.len != padded){
@@ -148,6 +151,7 @@ static int mc_close(struct _reent *r, void *fd)
 				r->_errno = EIO; ret = -1;
 			}
 		CARD_Close(&cf);
+		printf("mc: %s %s (%u bytes)\n", f->name, ret == 0 ? "saved" : "write failed", f->size);
 	}
 out:
 	free(f->buf);

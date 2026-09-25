@@ -352,7 +352,11 @@ ReadTweakValueTable(char *fp, InterpolatedValue &interp)
  * Neo Vehicle pipe
  */
 
-int8 VehiclePipeSwitch = VEHICLEPIPE_NEO;   // GC default: neo vehicle pipe
+#ifdef GTA_OGC
+int8 VehiclePipeSwitch = VEHICLEPIPE_MATFX;
+#else
+int8 VehiclePipeSwitch = VEHICLEPIPE_NEO;
+#endif
 float VehicleShininess = 1.0f;
 float VehicleSpecularity = 1.0f;
 InterpolatedFloat Fresnel(0.4f);

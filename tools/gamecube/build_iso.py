@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Build a bootable GameCube El Torito ISO9660 mini-DVD image.
 
-macOS' hdiutil creates the ISO/Joliet tree and boot catalog. The GameCube
-Linux Team generic boot header supplies the disc header and apploader which
-loads the no-emulation DOL from that catalog.
+xorriso creates the ISO/Joliet tree with a controlled physical file order.
+The GameCube Linux Team header supplies the apploader for the El Torito DOL.
 """
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 
 MINI_DVD_BYTES = 1_459_978_240
@@ -20,6 +22,78 @@ EL_TORITO_BOOT_RECORD_SECTOR = 17
 EL_TORITO_CATALOG_POINTER = 71
 EL_TORITO_DEFAULT_ENTRY = 0x20
 EL_TORITO_SECTOR_COUNT = EL_TORITO_DEFAULT_ENTRY + 6
+
+
+def iso_files(path):
+    files = {}
+    with open(path, 'rb') as image:
+        image.seek(16*ISO_SECTOR_BYTES)
+        pvd = image.read(ISO_SECTOR_BYTES)
+        if pvd[:7] != b'\x01CD001\x01':
+            raise ValueError('Invalid ISO9660 primary volume descriptor')
+        pending = [('', struct.unpack_from('<I', pvd, 158)[0],
+                    struct.unpack_from('<I', pvd, 166)[0])]
+        while pending:
+            parent, sector, size = pending.pop()
+            image.seek(sector*ISO_SECTOR_BYTES)
+            data = image.read(size)
+            cursor = 0
+            while cursor < size:
+                length = data[cursor]
+                if length == 0:
+                    cursor = (cursor//ISO_SECTOR_BYTES+1)*ISO_SECTOR_BYTES
+                    continue
+                record = data[cursor:cursor+length]
+                name = record[33:33+record[32]]
+                cursor += length
+                if name in (b'\0', b'\1'):
+                    continue
+                name = name.decode('ascii').split(';')[0].lower()
+                full = parent+'/'+name
+                lba, count = struct.unpack_from('<I', record, 2)[0], struct.unpack_from('<I', record, 10)[0]
+                if record[25] & 2:
+                    pending.append((full, lba, count))
+                else:
+                    files[full] = {'sector': lba, 'bytes': count}
+    return files
+
+
+def disc_order(path):
+    name = path.as_posix().lower()
+    if name == 'revc.dol':
+        return (0, name)
+    if name == 'disc_pad.bin':
+        return (2, name)
+    if name.startswith('audio/') and name.endswith('.ogg'):
+        return (3, name)
+    if name in {'audio/city.wav', 'audio/beachamb.wav', 'audio/water.wav',
+                'audio/hotel.wav', 'audio/police.wav', 'audio/sfx.adp'}:
+        return (4, name)
+    if name in {'models/gta3.dir', 'models/gta3.img'}:
+        return (5, name)
+    return (1, name)
+
+
+def verify_files(image_path, work):
+    layout = iso_files(image_path)
+    with open(image_path, 'rb') as image:
+        for source in Path(work).rglob('*'):
+            if not source.is_file() or source.name == 'disc_pad.bin':
+                continue
+            name = '/'+source.relative_to(work).as_posix().lower()
+            entry = layout.get(name)
+            if entry is None or entry['bytes'] != source.stat().st_size:
+                raise ValueError(f'ISO file missing or truncated: {name}')
+            expected, actual = hashlib.sha256(), hashlib.sha256()
+            image.seek(entry['sector']*ISO_SECTOR_BYTES)
+            with source.open('rb') as src:
+                while chunk := src.read(1024*1024):
+                    expected.update(chunk)
+                    actual.update(image.read(len(chunk)))
+            if expected.digest() != actual.digest():
+                raise ValueError(f'ISO payload mismatch: {name}')
+            entry['sha256'] = actual.hexdigest()
+    return layout
 
 
 def hardlink_tree(source, destination):
@@ -65,8 +139,8 @@ def main():
     for label, path in (("root", args.root), ("DOL", args.dol), ("GBI header", args.gbi)):
         if not os.path.exists(path):
             sys.exit(f"{label} not found: {path}")
-    if shutil.which("hdiutil") is None:
-        sys.exit("hdiutil is required on macOS")
+    if shutil.which("xorriso") is None:
+        sys.exit("xorriso is required (brew install xorriso)")
     if os.path.getsize(args.gbi) != 32768:
         sys.exit("gbi.hdr must occupy the 16-sector ISO system area")
 
@@ -91,20 +165,32 @@ def main():
         if os.path.exists(boot_dol):
             os.unlink(boot_dol)
         shutil.copy2(args.dol, boot_dol)
-        command = [
-            "hdiutil", "makehybrid", "-ov", "-o", image_path,
-            "-iso", "-joliet", "-iso-volume-name", "REVC",
-            "-joliet-volume-name", "REVC", "-no-emul-boot",
-            "-eltorito-boot", boot_dol, work,
-        ]
-        result = subprocess.run(command)
-        if result.returncode:
-            sys.exit("hdiutil failed to build the ISO")
+        padding = Path(work)/'disc_pad.bin'
+        if padding.exists():
+            sys.exit('disc_pad.bin is reserved for the disc layout')
+        padding.write_bytes(b'\0'*ISO_SECTOR_BYTES)
+        ordered = sorted((p.relative_to(work) for p in Path(work).rglob('*') if p.is_file()), key=disc_order)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.weights') as weights:
+            for rank, path in enumerate(ordered):
+                weights.write(f'{len(ordered)-rank} /{path.as_posix()}\n')
+            weights.flush()
+            command = [
+                'xorriso', '-as', 'mkisofs', '-iso-level', '2', '-J', '-joliet-long',
+                '-allow-lowercase', '-allow-multidot', '-V', 'REVC', '-no-pad',
+                '-b', 'revc.dol', '-c', 'boot.catalog', '-no-emul-boot',
+                '--sort-weight-list', weights.name, '-o', image_path, work,
+            ]
+            subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+            payload_size = os.path.getsize(image_path)
+            spare = MINI_DVD_BYTES - 32768 - payload_size
+            if spare < 0:
+                sys.exit(f'ISO exceeds the mini-DVD data budget by {-spare} bytes')
+            with padding.open('r+b') as pad:
+                pad.truncate(ISO_SECTOR_BYTES + spare//ISO_SECTOR_BYTES*ISO_SECTOR_BYTES)
+            os.unlink(image_path)
+            subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
 
-        # hdiutil hard-codes the no-emulation boot count to four 512-byte
-        # sectors. Cubeboot uses that field as the DOL length and rejects any
-        # real application as truncated. Patch it to the complete DOL size;
-        # the field is outside the catalog validation-entry checksum.
+        # Cubeboot reads the complete DOL length from the El Torito entry.
         dol_sectors = (os.path.getsize(args.dol) + 511) // 512
         if dol_sectors > 0xFFFF:
             sys.exit("DOL is too large for the El Torito sector-count field")
@@ -122,9 +208,11 @@ def main():
         payload_size = os.path.getsize(image_path)
         if payload_size > MINI_DVD_BYTES:
             sys.exit(f"ISO is {payload_size - MINI_DVD_BYTES} bytes over mini-DVD capacity")
-        # Dolphin and real DVD reads are 32 KiB aligned. hdiutil stops at the
-        # last ISO sector, so a valid final file can still make the last aligned
-        # read cross EOF. GameCube discs have a fixed physical size: pad to it.
+        layout = verify_files(image_path, work)
+        archive = layout['/models/gta3.img']
+        archive_end = archive['sector']*ISO_SECTOR_BYTES + archive['bytes']
+        if MINI_DVD_BYTES - archive_end > 64*1024:
+            sys.exit('ISO layout failed: gta3.img is not at the outer end of the disc')
         with open(image_path, "r+b") as image:
             image.truncate(MINI_DVD_BYTES)
         size = os.path.getsize(image_path)
@@ -144,6 +232,10 @@ def main():
         # validation.  Existing readers retain the old inode instead of seeing
         # hdiutil truncate and rewrite the file underneath them.
         os.replace(image_path, output)
+        Path(output+'.layout.json').write_text(json.dumps({
+            'iso': output, 'bytes': size, 'files': layout,
+            'order': ['/'+p.as_posix() for p in ordered],
+        }, indent=2)+'\n')
         print(f"PASS: {output} ({size} bytes, "
               f"{MINI_DVD_BYTES - payload_size} bytes padding)")
     finally:

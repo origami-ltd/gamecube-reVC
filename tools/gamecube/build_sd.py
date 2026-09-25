@@ -56,6 +56,7 @@ GCC_TXD_IMAGES = (("gc_controller", "gamecube_controller.tga"),
 STAGED_GXT_LABELS = {
     "portuguese.gxt": (
         ("FED_WDP", "GOTAS DE CHUVA"),
+        ("FED_HST", "STATS NA TELA"),
         ("GCL_LFO", "L: Centralizar / clique: Olhar para trás"),
         ("GCL_RFO", "R: Mirar / clique: Atirar"),
         ("GCL_MOV", "Alavanca: Mover"),
@@ -82,6 +83,7 @@ STAGED_GXT_LABELS = {
     ),
     "russian.gxt": (
         ("FED_WDP", "КАПЛИ ДОЖДЯ"),
+        ("FED_HST", "STATS HUD"),
         ("GCL_LFO", "L: Центр / нажатие: взгляд назад"),
         ("GCL_RFO", "R: Прицел / нажатие: огонь"),
         ("GCL_MOV", "Стик: Движение"),

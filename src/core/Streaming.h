@@ -4,6 +4,10 @@
 #include "Game.h"
 
 enum {
+#ifdef GTA_OGC
+	STREAM_HD_M = 80,
+	STREAM_HD_NEAR_M = 60,
+#endif
 	STREAM_OFFSET_TXD = MODELINFOSIZE,
 	STREAM_OFFSET_COL = STREAM_OFFSET_TXD+TXDSTORESIZE,
 	STREAM_OFFSET_ANIM = STREAM_OFFSET_COL+COLSTORESIZE,
@@ -18,6 +22,8 @@ enum StreamFlags
 	STREAMFLAGS_PRIORITY    = 0x08,
 	STREAMFLAGS_NOFADE      = 0x10,
 	STREAMFLAGS_20          = 0x20,	// TODO(MIAMI): what's this
+	STREAMFLAGS_PREFETCH    = 0x40,
+	STREAMFLAGS_LOD         = 0x80,
 
 	STREAMFLAGS_CANT_REMOVE = STREAMFLAGS_DONT_REMOVE|STREAMFLAGS_SCRIPTOWNED,
 	STREAMFLAGS_KEEP_IN_MEMORY = STREAMFLAGS_DONT_REMOVE|STREAMFLAGS_SCRIPTOWNED|STREAMFLAGS_DEPENDENCY,
@@ -132,7 +138,7 @@ public:
 	static bool CanRemoveCol(int32 id) { return CanRemoveModel(id+STREAM_OFFSET_COL); }
 	static bool CanRemoveAnim(int32 id) { return CanRemoveModel(id+STREAM_OFFSET_ANIM); }
 	static void RequestModel(int32 model, int32 flags);
-	static void ReRequestModel(int32 model) { RequestModel(model, ms_aInfoForModel[model].m_flags); }
+	static void ReRequestModel(int32 model, int32 flags = 0) { RequestModel(model, ms_aInfoForModel[model].m_flags | flags); }
 	static void RequestTxd(int32 txd, int32 flags) { RequestModel(txd + STREAM_OFFSET_TXD, flags); }
 	static void ReRequestTxd(int32 txd) { ReRequestModel(txd + STREAM_OFFSET_TXD); }
 	static void RequestCol(int32 col, int32 flags) { RequestModel(col + STREAM_OFFSET_COL, flags); }
@@ -161,7 +167,11 @@ public:
 	static void RemoveIslandsNotUsed(eLevelName level);
 	static void RemoveBigBuildings(eLevelName level);
 	static bool RemoveLoadedVehicle(void);
-	static bool RemoveLeastUsedModel(uint32 excludeMask);
+	static bool RemoveLeastUsedModel(uint32 excludeMask, uint32 minBytes = 0, bool ignoreRecent = false);   // B124: prefer a far victim at least this big; B140: emergency second pass ignores LoadedRecently
+	// GameCube eviction policy: the renderer stamps how close each model
+	// stood this frame; eviction goes farthest-first and spares the near set.
+	static void NoteModelDistance(int32 id, float dist);
+	static uint32 ModelDistNow(int32 id);
 	static void RemoveAllUnusedModels(void);
 	static void RemoveUnusedModelsInLoadedList(void);
 	static bool RemoveLoadedZoneModel(void);

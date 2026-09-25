@@ -1058,12 +1058,6 @@ RtBMPImageRead(const RwChar *imageName)
 			FILE *probe = p ? fopen(p, "rb") : nil;
 			long sz = 0;
 			if(probe){ fseek(probe, 0, SEEK_END); sz = ftell(probe); fclose(probe); }
-			FILE *lg = fopen("dvd:/automenu.log", "a");
-			if(lg){
-				fprintf(lg, "SKINP norm=%d open=%ld path=%s\n",
-				    p != nil, sz, p ? p : "(nil)");
-				fclose(lg);
-			}
 		}
 		if(p){
 			// Decoded by hand. The file opens and reads whole (measured:

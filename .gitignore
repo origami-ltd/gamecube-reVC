@@ -368,3 +368,7 @@ src/extras/GitSHA1.cpp
 # Game-derived data (Rockstar IP) lives here, never in the public repo.
 assets/*
 !assets/README.md
+
+# Private research material (disc images, disassembly); never published.
+/research/
+.DS_Store

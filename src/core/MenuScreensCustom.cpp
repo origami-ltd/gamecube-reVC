@@ -152,7 +152,12 @@ void RestoreDefGraphics(int8 action) {
 	    		FrontEndMenuManager.m_PrefsIslandLoading = FrontEndMenuManager.ISLAND_LOADING_LOW;
 	#endif
 	#ifdef GRAPHICS_MENU_OPTIONS // otherwise Frontend will handle those
+#ifdef GTA_OGC
+		FrontEndMenuManager.m_PrefsFrameLimiter = CMenuManager::FRAMELIMIT_30;
+		CustomPipes::VehiclePipeSwitch = CustomPipes::VEHICLEPIPE_MATFX;
+#else
 		FrontEndMenuManager.m_PrefsFrameLimiter = true;
+#endif
 		FrontEndMenuManager.m_PrefsVsyncDisp = true;
 		#ifdef LEGACY_MENU_OPTIONS
 			FrontEndMenuManager.m_PrefsVsync = true;

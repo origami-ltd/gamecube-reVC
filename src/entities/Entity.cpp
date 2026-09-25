@@ -117,6 +117,7 @@ CEntity::CreateRwObject(void)
 	CBaseModelInfo *mi;
 
 	mi = CModelInfo::GetModelInfo(m_modelIndex);
+	mi->AddRef();
 
 	PUSH_MEMID(MEMID_WORLD);
 	m_rwObject = mi->CreateInstance();
@@ -130,8 +131,8 @@ CEntity::CreateRwObject(void)
 		else if(RwObjectGetType(m_rwObject) == rpCLUMP)
 			GetMatrix().AttachRW(RwFrameGetMatrix(RpClumpGetFrame((RpClump *)m_rwObject)), false);
 
-		mi->AddRef();
-	}
+	}else
+		mi->RemoveRef();
 }
 
 void

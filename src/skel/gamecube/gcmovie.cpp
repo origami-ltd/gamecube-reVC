@@ -14,7 +14,6 @@
 #include <theora/theoradec.h>
 #include <tremor/ivorbiscodec.h>
 
-extern void GeckoLog(const char *msg);
 extern "C" void CdStreamFsLock(void);
 extern "C" void CdStreamFsUnlock(void);
 extern void *gxMovieXfb;
@@ -50,7 +49,6 @@ movieTrace(const char *line)
 	// Normal boot stdout is redirected to OSReport after RenderWare starts, so
 	// this reaches Dolphin/hardware diagnostics without touching the XFB.
 	printf("%s\n", line);
-	GeckoLog(line);
 }
 
 struct FsGuard {

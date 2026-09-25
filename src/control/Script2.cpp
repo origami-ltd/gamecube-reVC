@@ -387,6 +387,10 @@ int8 CRunningScript::ProcessCommands300To399(int32 command)
 		return 0;
 	case COMMAND_DO_FADE:
 		CollectParameters(&m_nIp, 2);
+#ifdef GTA_OGC
+		printf("SCRIPT %.8s DO_FADE %d %s t=%u f=%u\n", m_abScriptName, ScriptParams[0], ScriptParams[1] ? "IN" : "OUT",
+		    (unsigned)CTimer::GetTimeInMilliseconds(), (unsigned)CTimer::GetFrameCounter());
+#endif
 		TheCamera.Fade(ScriptParams[0] / 1000.0f, ScriptParams[1]);
 		return 0;
 	case COMMAND_GET_FADING_STATUS:

@@ -11,7 +11,7 @@
 
 using namespace rw;
 typedef uint8 u8;
-enum { GXFMT_RGB5A3 = 0x5, GXFMT_CMPR = 0xE, GXNATIVE_HEADER = 88 };
+enum { GXFMT_IA4 = 0x2, GXFMT_RGB5A3 = 0x5, GXFMT_CMPR = 0xE, GXNATIVE_HEADER = 88 };
 
 static inline uint16 get16be(const u8 *p){ return (uint16)((p[0]<<8) | p[1]); }
 
@@ -70,6 +70,21 @@ static void untileRGB5A3(const u8 *in, u8 *rgb, int tw, int th)
 	}
 }
 
+// IA4: 8x4 tiles, one byte per texel, high nibble alpha, low nibble intensity.
+static void untileIA4(const u8 *in, u8 *rgb, int tw, int th)
+{
+	for(int ty = 0; ty < th; ty += 4)
+	for(int tx = 0; tx < tw; tx += 8){
+		for(int y = 0; y < 4; y++)
+		for(int x = 0; x < 8; x++){
+			u8 i = (u8)((in[y*8 + x] & 0xF) * 17);
+			u8 *d = rgb + ((size_t)(ty+y)*tw + tx+x)*3;
+			d[0] = d[1] = d[2] = i;
+		}
+		in += 32;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	if(argc < 3){ fprintf(stderr, "usage: %s in_gx.txd outdir\n", argv[0]); return 1; }
@@ -111,14 +126,15 @@ int main(int argc, char **argv)
 		u8 fmt = q[87];
 		uint32 dataSize = *(uint32*)(q+GXNATIVE_HEADER);
 		u8 *data = q + GXNATIVE_HEADER + 4;
-		uint32 expect = fmt == GXFMT_CMPR ? (uint32)tw*th/2 : (uint32)tw*th*2;
+		uint32 expect = fmt == GXFMT_CMPR ? (uint32)tw*th/2 : fmt == GXFMT_IA4 ? (uint32)tw*th : (uint32)tw*th*2;
 		printf("  %-20s plat=%u %dx%d fmt=%02x size=%u (expect %u) %s\n",
 		    name, plat, tw, th, fmt, dataSize, expect,
 		    dataSize == expect ? "OK" : "MISMATCH");
 		if(dataSize == expect){
 			u8 *rgb = (u8*)calloc((size_t)tw*th*3, 1);
-			if(fmt == GXFMT_CMPR) untileCMPR(data, rgb, tw, th);
-			else                  untileRGB5A3(data, rgb, tw, th);
+			if(fmt == GXFMT_CMPR)     untileCMPR(data, rgb, tw, th);
+			else if(fmt == GXFMT_IA4) untileIA4(data, rgb, tw, th);
+			else                      untileRGB5A3(data, rgb, tw, th);
 			char path[512];
 			snprintf(path, sizeof(path), "%s/gxnative_%02d_%s.ppm", argv[2], n, name);
 			writePPM(path, rgb, tw, th);

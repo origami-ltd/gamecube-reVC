@@ -25,6 +25,32 @@
 bool gGravityCheat;
 #endif
 
+#ifdef GTA_OGC
+static bool
+ValidPhysicalBounds(const CRect &bounds)
+{
+	return isfinite(bounds.left) && isfinite(bounds.right) &&
+	       isfinite(bounds.top) && isfinite(bounds.bottom) &&
+	       bounds.left <= bounds.right && bounds.top <= bounds.bottom &&
+	       bounds.left >= WORLD_MIN_X && bounds.right < WORLD_MAX_X &&
+	       bounds.top >= WORLD_MIN_Y && bounds.bottom < WORLD_MAX_Y;
+}
+
+static void
+ReportInvalidPhysicalBounds(CPhysical *entity, const CRect &bounds)
+{
+	static uint32 reported;
+	if(reported++ < 16){
+		const CVector &pos = entity->GetPosition();
+		const CVector &speed = entity->m_vecMoveSpeed;
+		printf("PHYS invalid bounds model %d type %d status %d pos %.3f %.3f %.3f speed %.3f %.3f %.3f radius %.3f rect %.3f %.3f %.3f %.3f\n",
+		       entity->GetModelIndex(), entity->GetType(), entity->GetStatus(),
+		       pos.x, pos.y, pos.z, speed.x, speed.y, speed.z, entity->GetBoundRadius(),
+		       bounds.left, bounds.top, bounds.right, bounds.bottom);
+	}
+}
+#endif
+
 
 CPhysical::CPhysical(void)
 {
@@ -98,6 +124,12 @@ CPhysical::Add(void)
 	CPtrList *list;
 
 	CRect bounds = GetBoundRect();
+#ifdef GTA_OGC
+	if(!ValidPhysicalBounds(bounds)){
+		ReportInvalidPhysicalBounds(this, bounds);
+		return;
+	}
+#endif
 	xstart = CWorld::GetSectorIndexX(bounds.left);
 	xend   = CWorld::GetSectorIndexX(bounds.right);
 	xmid   = CWorld::GetSectorIndexX((bounds.left + bounds.right)/2.0f);
@@ -163,6 +195,12 @@ CPhysical::RemoveAndAdd(void)
 	CPtrList *list;
 
 	CRect bounds = GetBoundRect();
+#ifdef GTA_OGC
+	if(!ValidPhysicalBounds(bounds)){
+		ReportInvalidPhysicalBounds(this, bounds);
+		return;
+	}
+#endif
 	xstart = CWorld::GetSectorIndexX(bounds.left);
 	xend   = CWorld::GetSectorIndexX(bounds.right);
 	xmid   = CWorld::GetSectorIndexX((bounds.left + bounds.right)/2.0f);
@@ -2085,6 +2123,20 @@ CPhysical::ProcessShift(void)
 		bIsStuck = false;
 		bIsInSafePosition = true;
 		m_fDistanceTravelled = (GetPosition() - matrix.GetPosition()).Magnitude();
+#ifdef GTA_OGC
+		CRect bounds = GetBoundRect();
+		if(!ValidPhysicalBounds(bounds)){
+			ReportInvalidPhysicalBounds(this, bounds);
+			GetMatrix() = matrix;
+			m_vecMoveSpeed = CVector(0.0f, 0.0f, 0.0f);
+			m_vecTurnSpeed = m_vecMoveSpeed;
+			m_vecMoveFriction = m_vecMoveSpeed;
+			m_vecTurnFriction = m_vecMoveSpeed;
+			m_fDistanceTravelled = 0.0f;
+			bIsStuck = true;
+			return;
+		}
+#endif
 		RemoveAndAdd();
 	}
 }

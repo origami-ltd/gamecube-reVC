@@ -1,3 +1,6 @@
+#ifdef GTA_OGC
+extern "C" signed char gcStatsHud;   // gamecube.cpp (B97)
+#endif
 #include <csignal>
 #define WITHWINDOWS
 #include "common.h"
@@ -231,7 +234,11 @@ CustomFrontendOptionsPopulate(void)
 
 #ifdef LOAD_INI_SETTINGS
 #define MINI_CASE_SENSITIVE
+#ifdef GTA_OGC
+#include "ini_gc.h"   // B177: mINI's fstreams cost 444K of MEM1
+#else
 #include "ini.h"
+#endif
 
 #if defined(GTA_OGC) && !defined(HW_RVL)
 // Straight to the memory card with the rest of the userfiles.
@@ -243,7 +250,7 @@ mINI::INIStructure cfg;
 
 bool ReadIniIfExists(const char *cat, const char *key, uint32 *out)
 {
-	mINI::INIMap<std::string> section = cfg.get(cat);
+	auto section = cfg.get(cat);
 	if (section.has(key)) {
 		char *endPtr;
 		*out = strtoul(section.get(key).c_str(), &endPtr, 0);
@@ -254,7 +261,7 @@ bool ReadIniIfExists(const char *cat, const char *key, uint32 *out)
 
 bool ReadIniIfExists(const char *cat, const char *key, uint8 *out)
 {
-	mINI::INIMap<std::string> section = cfg.get(cat);
+	auto section = cfg.get(cat);
 	if (section.has(key)) {
 		char *endPtr;
 		*out = strtoul(section.get(key).c_str(), &endPtr, 0);
@@ -265,7 +272,7 @@ bool ReadIniIfExists(const char *cat, const char *key, uint8 *out)
 
 bool ReadIniIfExists(const char *cat, const char *key, bool *out)
 {
-	mINI::INIMap<std::string> section = cfg.get(cat);
+	auto section = cfg.get(cat);
 	if (section.has(key)) {
 		char *endPtr;
 		*out = strtoul(section.get(key).c_str(), &endPtr, 0);
@@ -276,7 +283,7 @@ bool ReadIniIfExists(const char *cat, const char *key, bool *out)
 
 bool ReadIniIfExists(const char *cat, const char *key, int32 *out)
 {
-	mINI::INIMap<std::string> section = cfg.get(cat);
+	auto section = cfg.get(cat);
 	if (section.has(key)) {
 		char *endPtr;
 		*out = strtol(section.get(key).c_str(), &endPtr, 0);
@@ -287,7 +294,7 @@ bool ReadIniIfExists(const char *cat, const char *key, int32 *out)
 
 bool ReadIniIfExists(const char *cat, const char *key, int8 *out)
 {
-	mINI::INIMap<std::string> section = cfg.get(cat);
+	auto section = cfg.get(cat);
 	if (section.has(key)) {
 		char *endPtr;
 		*out = strtol(section.get(key).c_str(), &endPtr, 0);
@@ -298,7 +305,7 @@ bool ReadIniIfExists(const char *cat, const char *key, int8 *out)
 
 bool ReadIniIfExists(const char *cat, const char *key, float *out)
 {
-	mINI::INIMap<std::string> section = cfg.get(cat);
+	auto section = cfg.get(cat);
 	if (section.has(key)) {
 		char *endPtr;
 		*out = strtof(section.get(key).c_str(), &endPtr);
@@ -309,7 +316,7 @@ bool ReadIniIfExists(const char *cat, const char *key, float *out)
 
 bool ReadIniIfExists(const char *cat, const char *key, char *out, int size)
 {
-	mINI::INIMap<std::string> section = cfg.get(cat);
+	auto section = cfg.get(cat);
 	if (section.has(key)) {
 		strncpy(out, section.get(key).c_str(), size - 1);
 		out[size - 1] = '\0';
@@ -520,7 +527,11 @@ void SaveINIControllerSettings()
 #endif
 	StoreIni("Controller", "PadButtonsInited", ControlsManager.ms_padButtonsInited);
 
+#if defined(GTA_OGC)
+	if(!ini.generate(cfg)) printf("SETTINGS: memory card write failed\n");
+#else
 	ini.write(cfg);
+#endif
 }
 
 bool LoadINISettings()
@@ -542,6 +553,11 @@ bool LoadINISettings()
 	ReadIniIfExists("Controller", "InvertMouseVertically", &MousePointerStateHelper.bInvertVertically);
 	ReadIniIfExists("Controller", "DisableMouseSteering", &CVehicle::m_bDisableMouseSteering);
 	ReadIniIfExists("Controller", "Vibration", &FrontEndMenuManager.m_PrefsUseVibration);
+#ifdef GTA_OGC
+	int8 padMode = 0;
+	if(ReadIniIfExists("Controller", "Layout", &padMode) && padMode >= 0 && padMode < 4)
+		CPad::GetPad(0)->Mode = padMode;
+#endif
 	ReadIniIfExists("Audio", "SfxVolume", &FrontEndMenuManager.m_PrefsSfxVolume);
 	ReadIniIfExists("Audio", "MusicVolume", &FrontEndMenuManager.m_PrefsMusicVolume);
 	ReadIniIfExists("Audio", "MP3BoostVolume", &FrontEndMenuManager.m_PrefsMP3BoostVolume);
@@ -651,6 +667,9 @@ void SaveINISettings()
 	StoreIni("Controller", "InvertMouseVertically", MousePointerStateHelper.bInvertVertically);
 	StoreIni("Controller", "DisableMouseSteering", CVehicle::m_bDisableMouseSteering);
 	StoreIni("Controller", "Vibration", FrontEndMenuManager.m_PrefsUseVibration);
+#ifdef GTA_OGC
+	StoreIni("Controller", "Layout", (int8)CPad::GetPad(0)->GetMode());
+#endif
 	StoreIni("Audio", "SfxVolume", FrontEndMenuManager.m_PrefsSfxVolume);
 	StoreIni("Audio", "MusicVolume", FrontEndMenuManager.m_PrefsMusicVolume);
 	StoreIni("Audio", "MP3BoostVolume", FrontEndMenuManager.m_PrefsMP3BoostVolume);
@@ -723,7 +742,11 @@ void SaveINISettings()
 	}
 #endif
 
+#if defined(GTA_OGC)
+	if(!ini.generate(cfg)) printf("SETTINGS: memory card write failed\n");
+#else
 	ini.write(cfg);
+#endif
 }
 
 #endif

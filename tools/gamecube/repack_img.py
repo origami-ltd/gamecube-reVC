@@ -15,7 +15,7 @@ conversion moved here, loading a TXD is a read into a correctly sized buffer.
 
 Modelled on dca3's imgtool (https://gitlab.com/skmp/dca3-game).
 
-Usage: repack_img.py [--exclude-list FILE] [--max-dim N]
+Usage: repack_img.py [--exclude-list FILE] [--max-dim N] [--shrink H PCT]
                      <in.img> <in.dir> <out.img> <out.dir> <txdconv>
 
 --exclude-list drops entries whose base name (without extension) appears in
@@ -72,6 +72,8 @@ def main():
     ap.add_argument('--exclude-list', help='file of base names to drop')
     ap.add_argument('--max-dim', type=int,
                     help='cap the largest texture axis, passed to txdconv')
+    ap.add_argument('--shrink', nargs=2, metavar=('H', 'PCT'),
+                    help='resample textures taller than H to PCT%%, passed to txdconv')
     ap.add_argument('in_img'); ap.add_argument('in_dir')
     ap.add_argument('out_img'); ap.add_argument('out_dir')
     ap.add_argument('txdconv')
@@ -113,6 +115,8 @@ def main():
             cmd = [txdconv]
             if args.max_dim:
                 cmd += ['--max-dim', str(args.max_dim)]
+            if args.shrink:
+                cmd += ['--shrink', *args.shrink]
             cmd += [a, b]
             r = subprocess.run(cmd,
                                stdout=subprocess.DEVNULL,

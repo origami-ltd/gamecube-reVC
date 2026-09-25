@@ -1252,7 +1252,6 @@ CAnimManager::LoadAnimFiles(void)
 		return false;
 	}
 #ifdef GTA_OGC
-	BootLog("  assoc groups");
 #endif
 	CreateAnimAssocGroups();
 	return true;
@@ -1302,14 +1301,12 @@ bool
 CAnimManager::LoadAnimFile(const char *filename)
 {
 #ifdef GTA_OGC
-	BootLog("  ifp open");
 #endif
 	RwStream *stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD, filename);
 	if(stream == nil)
 		return false;
 	bool success = LoadAnimFile(stream, true);
 #ifdef GTA_OGC
-	BootLog(success ? "  ifp parsed" : "  ifp parse FAILED");
 #endif
 	RwStreamClose(stream, nil);
 	return success;
@@ -1413,7 +1410,7 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 	IfpHeader anpk, info, name, dgan, cpan, anim, keys;
 	uint64 anpkEnd, infoEnd, nameEnd, dganEnd, cpanEnd, animEnd, keysEnd;
 	char buf[256];
-	char blockName[MAX_ANIMBLOCK_NAME];
+	char blockName[MAX_ANIMBLOCK_NAME] = {};
 	int32 fileNumAnims;
 	int32 firstIndex = 0;
 	int32 createdHierarchies = 0;
@@ -1421,7 +1418,7 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 	int32 oldNumAnimations = ms_numAnimations;
 	CAnimBlock *animBlock = nil;
 	bool newBlock = false;
-	int j, k, l;
+	int j = -1, k = -1, l = -1;
 	float fbuf[11];
 
 	if(stream == nil ||
@@ -1472,7 +1469,6 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 		if(j > 0 && j % 100 == 0){
 			char line[64];
 			snprintf(line, sizeof(line), "  anim %d/%d", j, fileNumAnims);
-			BootLog(line);
 		}
 #endif
 		CAnimBlendHierarchy *hier = &ms_aAnimations[firstIndex + j];
@@ -1667,6 +1663,10 @@ CAnimManager::LoadAnimFile(RwStream *stream, bool compress, char (*uncompressedA
 	return true;
 
 fail:
+#ifdef GTA_OGC
+	printf("IFP load failed block %s byte %u anim %d sequence %d frame %d\n",
+	       blockName, (unsigned)reader.position, j, k, l);
+#endif
 	for(j = 0; j < createdHierarchies; j++)
 		ms_aAnimations[firstIndex + j].Shutdown();
 	ms_numAnimBlocks = oldNumAnimBlocks;

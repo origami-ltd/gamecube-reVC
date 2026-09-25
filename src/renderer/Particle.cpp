@@ -684,7 +684,6 @@ void CParticle::Initialise()
 	// The first few missing indices are named because the type number says
 	// which effect it is, and a table-wide zero would end the question outright.
 	{
-		extern void GeckoLog(const char*);
 		char line[64];
 		int missing = 0, first[4] = { -1, -1, -1, -1 };
 		for(int32 i = 0; i < MAX_PARTICLES; i++){
@@ -696,10 +695,7 @@ void CParticle::Initialise()
 		}
 		snprintf(line, sizeof(line), "PART miss%d %d %d %d %d",
 		    missing, first[0], first[1], first[2], first[3]);
-		GeckoLog(line);
 		DVD_FS_GUARD;
-		FILE *f = fopen("dvd:/automenu.log", "a");
-		if(f){ fprintf(f, "%s\n", line); fclose(f); }
 	}
 #endif
 	debug("CParticle ready");
@@ -1332,6 +1328,14 @@ void CParticle::Update()
 				|| psystem->m_Type == PARTICLE_RAINDROP_2D )
 			{
 				int32 nMaxDrops = int32(6.0f * TheCamera.m_CameraAverageSpeed + 1.0f);
+#if defined(GTA_OGC) && defined(SCREEN_DROPLETS)
+				// B188: rain already puts water on the lens through the screen
+				// droplets; these old PARTICLE_WATERDROPs made MBlur grab the
+				// whole frame a second time on every rain frame. Car and boat
+				// splashes keep them.
+				if ( psystem->m_Type != PARTICLE_CAR_SPLASH && psystem->m_Type != PARTICLE_BOAT_SPLASH )
+					nMaxDrops = 0;
+#endif
 				float fDistToCam = 0.0f;
 				
 				if ( psystem->m_Type == PARTICLE_BOAT_SPLASH || psystem->m_Type == PARTICLE_CAR_SPLASH )

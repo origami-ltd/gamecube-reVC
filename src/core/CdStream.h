@@ -29,6 +29,12 @@ enum
 
 void CdStreamInit(int numChannels);
 int CdStreamRead(int channel, void *buffer, unsigned int offset, unsigned int size);
+int CdStreamReadAbs(int channel, void *buffer, unsigned int lba, unsigned int sectors);   // absolute disc sectors (audio channel, B69)
+// B177: one sequential burst through a small stage; the worker hands each
+// piece to sink before reading the next, so nothing else seeks in between.
+// The sink returns 0 to end the burst early (a cancel waits one piece, not all).
+typedef int (*CdStreamSink)(const void *data, unsigned int bytes, void *ctx);
+int CdStreamReadAbsChunked(int channel, void *stage, unsigned int stageSectors, unsigned int lba, unsigned int sectors, CdStreamSink sink, void *ctx);
 int CdStreamGetStatus(int channel);
 int CdStreamGetLastPosn(void);
 int CdStreamSync(int channel);

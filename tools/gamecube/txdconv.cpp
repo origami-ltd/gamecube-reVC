@@ -13,21 +13,29 @@
 // layer. We do not need the HLE layer: the tiling is plain byte manipulation
 // over rw::Raster, so it compiles for the host untouched.
 //
-// Textures keep their full resolution. The GameCube has the memory for it once
-// the conversion churn is gone; downsampling is a Dreamcast concession.
+// Textures keep their full resolution unless --shrink asks otherwise (09-03:
+// MEM1 ran out with the world at full size, and the cut was the user's call).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <algorithm>
+#include <stdexcept>
+#include <vector>
 #include <rw.h>
 
 using namespace rw;
 typedef uint8 u8;
 
-enum { GXFMT_RGB5A3 = 0x5, GXFMT_CMPR = 0xE };
+enum { GXFMT_IA4 = 0x2, GXFMT_RGB5A3 = 0x5, GXFMT_CMPR = 0xE };
 
 // Largest texture axis kept, in texels. 512 is the original; halving to 256
 // quarters the bytes of every texture above it. Set with --max-dim.
 static int gMaxDim = 512;
+// --shrink H PCT: every texture taller than H texels is resampled to PCT% on
+// both axes. Dimensions round up to the 8-texel tile so w == tw and the tiler
+// never pads (the runtime builds its TexObj from the raster's real w/h).
+static int gShrinkH = 0, gShrinkPct = 100;
 
 // ---- the same tiling the console backend uses, byte for byte ---------------
 static inline void
@@ -42,6 +50,9 @@ sampleSrc(const u8 *src, int w, int h, int dx, int dy, int tw, int th,
 
 static inline uint16 to565(u8 r, u8 g, u8 b)
 { return (uint16)(((r>>3)<<11) | ((g>>2)<<5) | (b>>3)); }
+
+static inline u8 luma(u8 r, u8 g, u8 b)
+{ return (u8)((r*77 + g*150 + b*29) >> 8); }
 
 // GX stores these 16-bit fields big-endian. The console wrote them with plain
 // stores because it *is* big-endian; a little-endian host has to swap, or the
@@ -61,6 +72,27 @@ tileRGB5A3(u8 *dst, const u8 *src, int w, int h, int tw, int th)
 			    (uint16)(0x8000 | ((r>>3)<<10) | ((g>>3)<<5) | (b>>3)) :
 			    (uint16)(((a>>5)<<12) | ((r>>4)<<8) | ((g>>4)<<4) | (b>>4));
 			put16be(dst + (y*4 + x)*2, v);
+		}
+		dst += 32;
+	}
+}
+
+// IA4: 4-bit intensity + 4-bit alpha, one byte per texel (high nibble alpha,
+// low nibble intensity — the order the GP decodes), tiles 8 wide x 4 high.
+// Half of RGB5A3 for a grayscale-plus-alpha texture, and no worse: RGB5A3
+// stores any texel with a soft alpha as 4-bit colour / 3-bit alpha, IA4 gives
+// 4-bit grey / 4-bit alpha. dca3's rule — the smallest native format each
+// texture fits — applied to the GameCube's IA4.
+static void
+tileIA4(u8 *dst, const u8 *src, int w, int h, int tw, int th)
+{
+	for(int ty = 0; ty < th; ty += 4)
+	for(int tx = 0; tx < tw; tx += 8){
+		for(int y = 0; y < 4; y++)
+		for(int x = 0; x < 8; x++){
+			u8 r,g,b,a;
+			sampleSrc(src, w, h, tx+x, ty+y, tw, th, &r,&g,&b,&a);
+			dst[y*8 + x] = (u8)((a & 0xF0) | (luma(r,g,b) >> 4));
 		}
 		dst += 32;
 	}
@@ -146,6 +178,44 @@ struct Conv {
 	uint32 size;
 };
 
+// Area-average resample to any smaller size: each destination texel is the
+// coverage-weighted mean of the source texels it overlaps, colour weighted by
+// alpha so transparent (usually black) texels do not darken cut-out edges.
+// The 2x2 halving loop in convertImage is this filter's power-of-two case.
+static u8*
+resampleArea(u8 *src, int w, int h, int nw, int nh)
+{
+	u8 *dst = (u8*)malloc((size_t)nw*nh*4);
+	double sx = (double)w/nw, sy = (double)h/nh;
+	for(int y = 0; y < nh; y++){
+		double y0 = y*sy, y1 = y0 + sy;
+		for(int x = 0; x < nw; x++){
+			double x0 = x*sx, x1 = x0 + sx;
+			double rgb[3] = {0,0,0}, plain[3] = {0,0,0}, alpha = 0, cover = 0;
+			for(int j = (int)y0; j < h && j < y1; j++){
+				double wy = fmin(y1, j+1.0) - fmax(y0, (double)j);
+				for(int i = (int)x0; i < w && i < x1; i++){
+					double wt = wy*(fmin(x1, i+1.0) - fmax(x0, (double)i));
+					const u8 *p = src + ((size_t)j*w + i)*4;
+					for(int c = 0; c < 3; c++){ rgb[c] += p[c]*p[3]*wt; plain[c] += p[c]*wt; }
+					alpha += p[3]*wt;
+					cover += wt;
+				}
+			}
+			// Fully transparent texels keep the artists' bled colour (plain
+			// mean) so GX bilinear filtering at cut-out edges does not blend
+			// towards black the way a zeroed RGB would.
+			u8 *o = dst + ((size_t)y*nw + x)*4;
+			for(int c = 0; c < 3; c++)
+				o[c] = alpha > 0 ? (u8)(rgb[c]/alpha + 0.5) :
+				       cover > 0 ? (u8)(plain[c]/cover + 0.5) : 0;
+			o[3] = cover > 0 ? (u8)(alpha/cover + 0.5) : 0;
+		}
+	}
+	free(src);
+	return dst;
+}
+
 // Takes an Image rather than a Texture so the same tiling serves both inputs:
 // a dictionary read off disc, and a loose TGA. Destroys img.
 static bool
@@ -173,6 +243,10 @@ convertImage(Image *img, const char *name, const char *mask,
 
 	u8 *rgba = (u8*)malloc((size_t)w*h*4);
 	bool gradientAlpha = false;
+	// Grayscale test, for the IA4 decision below: count opaque texels whose
+	// channels disagree by more than a hair. A texture that is (near) pure
+	// grey wastes 8 of RGB5A3's 16 bits on three equal colour channels.
+	long opaque = 0, coloured = 0;
 	for(int y = 0; y < h; y++)
 	for(int x = 0; x < w; x++){
 		u8 *s = img->pixels + (size_t)y*img->stride + (size_t)x*img->bpp;
@@ -180,7 +254,17 @@ convertImage(Image *img, const char *name, const char *mask,
 		d[0]=s[0]; d[1]=s[1]; d[2]=s[2];
 		d[3] = img->bpp >= 4 ? s[3] : 255;
 		if(d[3] > 16 && d[3] < 240) gradientAlpha = true;
+		if(d[3] > 16){
+			opaque++;
+			int mx = d[0] > d[1] ? d[0] : d[1]; if(d[2] > mx) mx = d[2];
+			int mn = d[0] < d[1] ? d[0] : d[1]; if(d[2] < mn) mn = d[2];
+			if(mx - mn > 8) coloured++;
+		}
 	}
+	// Conservative: only a texture that is essentially all grey (<1% of its
+	// opaque texels carry real colour) takes IA4. The foliage in generic.txd
+	// is 7-62% coloured and stays RGB5A3; fonts and effect sprites are 0%.
+	bool grayscale = opaque > 0 && coloured*100 < opaque;
 
 	// Box filter, one halving at a time. Averaging 2x2 rather than dropping
 	// every other texel matters here: point sampling a diffuse texture down
@@ -203,27 +287,46 @@ convertImage(Image *img, const char *name, const char *mask,
 		free(rgba); rgba = dst; w = nw; h = nh;
 	}
 
+	// --shrink: textures taller than gShrinkH go to gShrinkPct% on both axes,
+	// rounded up to the 8-texel tile. Non-power-of-two sizes are fine for
+	// CLAMP and for Dolphin; hardware GX_REPEAT/MIRROR expect powers of two.
+	if(gShrinkH > 0 && h > gShrinkH){
+		int nw = (w*gShrinkPct/100 + 7) & ~7, nh = (h*gShrinkPct/100 + 7) & ~7;
+		if(nw > w) nw = w;
+		if(nh > h) nh = h;
+		if(nw < w || nh < h){
+			rgba = resampleArea(rgba, w, h, nw, nh);
+			w = nw; h = nh;
+		}
+	}
+
 	// CMPR is 4bpp and fine for anything without a gradient alpha ramp;
 	// RGB5A3 is 16bpp and keeps the ramp. Full resolution either way.
 	// Small textures stay RGB5A3 outright: at 64px and below CMPR saves a
 	// few KB total while its 4x4 blocks butcher soft effect gradients —
 	// the additive rain drip drew its DXT block edges as a square halo.
-	bool cmpr = !gradientAlpha;
+	// Three native formats, smallest that fits each texture (dca3's rule):
+	//   CMPR  4bpp  — no gradient alpha (opaque diffuse, the bulk of the map)
+	//   IA4   8bpp  — gradient alpha AND grayscale (fonts, shadows, most FX)
+	//   RGB5A3 16bpp — gradient alpha WITH colour (blood, arrows, foliage)
 	// (No small-size floor: the reference card tree compresses even 16px
 	// textures, and a 64px RGB5A3 floor inflated the archive from 174MB
 	// to 207MB, enough to put the streamer into permanent eviction thrash.)
-	int align = cmpr ? 7 : 3;
+	u8 gxFmt = !gradientAlpha ? GXFMT_CMPR : grayscale ? GXFMT_IA4 : GXFMT_RGB5A3;
+	int align = gxFmt == GXFMT_RGB5A3 ? 3 : 7;
 	int tw = (w + align) & ~align;
 	int th = (h + align) & ~align;
 	if(tw < align+1) tw = align+1;
 	if(th < align+1) th = align+1;
-	out->size = cmpr ? (uint32)tw*th/2 : (uint32)tw*th*2;
+	out->size = gxFmt == GXFMT_CMPR ? (uint32)tw*th/2 :
+	            gxFmt == GXFMT_IA4  ? (uint32)tw*th   : (uint32)tw*th*2;
 	out->tiled = (u8*)malloc(out->size);
-	if(cmpr) tileCMPR(out->tiled, rgba, w, h, tw, th);
-	else     tileRGB5A3(out->tiled, rgba, w, h, tw, th);
+	if(gxFmt == GXFMT_CMPR)      tileCMPR(out->tiled, rgba, w, h, tw, th);
+	else if(gxFmt == GXFMT_IA4)  tileIA4(out->tiled, rgba, w, h, tw, th);
+	else                         tileRGB5A3(out->tiled, rgba, w, h, tw, th);
 
 	out->tw = tw; out->th = th;
-	out->gxFmt = cmpr ? GXFMT_CMPR : GXFMT_RGB5A3;
+	out->gxFmt = gxFmt;
 	out->format = format;
 	out->filterAddressing = filterAddressing;
 	memset(out->name, 0, 32); strncpy(out->name, name, 31);
@@ -360,9 +463,195 @@ writeNative(StreamFile *s, Conv *c)
 	writeChunkHeader(s, ID_EXTENSION, 0);
 }
 
+static void
+decode5A3(uint16 v, u8 *p)
+{
+	if(v & 0x8000){
+		for(int c = 0; c < 3; c++){
+			int n = (v >> (10 - 5*c)) & 31;
+			p[c] = (n << 3) | (n >> 2);
+		}
+		p[3] = 255;
+	}else{
+		for(int c = 0; c < 3; c++) p[c] = ((v >> (8 - 4*c)) & 15)*17;
+		p[3] = ((v >> 12) & 7)*255/7;
+	}
+}
+
+static u8*
+decodeNative(const u8 *src, int w, int h, int fmt)
+{
+	u8 *rgba = (u8*)malloc((size_t)w*h*4);
+	if(rgba == nil) throw std::runtime_error("out of host memory");
+	if(fmt == GXFMT_CMPR){
+		for(int ty = 0; ty < h; ty += 8)
+		for(int tx = 0; tx < w; tx += 8)
+		for(int sub = 0; sub < 4; sub++, src += 8){
+			uint16 c0 = (src[0] << 8) | src[1], c1 = (src[2] << 8) | src[3];
+			u8 pal[4][4];
+			for(int k = 0; k < 2; k++){
+				uint16 v = k ? c1 : c0;
+				int r = v >> 11, g = (v >> 5) & 63, b = v & 31;
+				pal[k][0] = (r << 3) | (r >> 2);
+				pal[k][1] = (g << 2) | (g >> 4);
+				pal[k][2] = (b << 3) | (b >> 2);
+				pal[k][3] = 255;
+			}
+			for(int c = 0; c < 3; c++){
+				pal[2][c] = c0 > c1 ? (2*pal[0][c] + pal[1][c])/3 : (pal[0][c] + pal[1][c])/2;
+				pal[3][c] = c0 > c1 ? (pal[0][c] + 2*pal[1][c])/3 : pal[2][c];
+			}
+			pal[2][3] = 255;
+			pal[3][3] = c0 > c1 ? 255 : 0;
+			for(int y = 0; y < 4; y++)
+			for(int x = 0; x < 4; x++){
+				int px = tx + (sub & 1)*4 + x, py = ty + (sub >> 1)*4 + y;
+				memcpy(rgba + ((size_t)py*w + px)*4, pal[(src[4+y] >> (6-2*x)) & 3], 4);
+			}
+		}
+	}else{
+		int tileW = fmt == GXFMT_RGB5A3 ? 4 : 8;
+		const u8 *palette = src + w*h;
+		for(int ty = 0; ty < h; ty += 4)
+		for(int tx = 0; tx < w; tx += tileW)
+		for(int y = 0; y < 4; y++)
+		for(int x = 0; x < tileW; x++){
+			u8 *p = rgba + ((size_t)(ty+y)*w + tx+x)*4;
+			if(fmt == GXFMT_RGB5A3){
+				decode5A3((src[0] << 8) | src[1], p); src += 2;
+			}else if(fmt == GXFMT_IA4){
+				p[0] = p[1] = p[2] = (*src & 15)*17;
+				p[3] = (*src >> 4)*17; src++;
+			}else{
+				const u8 *v = palette + 2*(*src++);
+				decode5A3((v[0] << 8) | v[1], p);
+			}
+		}
+	}
+	return rgba;
+}
+
+static void
+tileCI8(u8 *dst, const u8 *rgba, int w, int h, const u8 *palette)
+{
+	int pal[256][4];
+	for(int i = 0; i < 256; i++){
+		u8 p[4]; decode5A3((palette[i*2] << 8) | palette[i*2+1], p);
+		for(int c = 0; c < 3; c++) pal[i][c] = p[c]*p[3]/255;
+		pal[i][3] = p[3];
+	}
+	for(int ty = 0; ty < h; ty += 4)
+	for(int tx = 0; tx < w; tx += 8)
+	for(int y = 0; y < 4; y++)
+	for(int x = 0; x < 8; x++){
+		const u8 *p = rgba + ((size_t)(ty+y)*w + tx+x)*4;
+		int target[4] = {p[0]*p[3]/255, p[1]*p[3]/255, p[2]*p[3]/255, p[3]};
+		int best = 0, bestError = 0x7fffffff;
+		for(int i = 0; i < 256; i++){
+			int error = 0;
+			for(int c = 0; c < 4; c++){
+				int d = pal[i][c] - target[c]; error += d*d;
+			}
+			if(error < bestError){ bestError = error; best = i; }
+			if(error == 0) break;
+		}
+		*dst++ = best;
+	}
+	memcpy(dst, palette, 512);
+}
+
+static std::vector<u8>
+halveNativeStruct(const u8 *body, size_t length)
+{
+	if(length < 92 || readLE32(body) != PLATFORM_GAMECUBE)
+		throw std::runtime_error("expected a GX native texture");
+	int w = readLE16(body+80), h = readLE16(body+82), fmt = body[87];
+	if(fmt != GXFMT_CMPR && fmt != GXFMT_RGB5A3 && fmt != GXFMT_IA4 && fmt != 9)
+		throw std::runtime_error("unsupported GX texture format");
+	int tileW = fmt == GXFMT_RGB5A3 ? 4 : 8, tileH = fmt == GXFMT_CMPR ? 8 : 4;
+	if(w <= 0 || h <= 0 || w > 1024 || h > 1024 || w % tileW || h % tileH || body[85] != 1)
+		throw std::runtime_error("invalid GX texture dimensions or mip count");
+	uint32 size = readLE32(body+88);
+	auto nativeSize = [fmt](int width, int height){
+		return fmt == GXFMT_CMPR ? width*height/2 : fmt == GXFMT_RGB5A3 ? width*height*2 :
+		       width*height + (fmt == 9 ? 512 : 0);
+	};
+	if(size != (uint32)nativeSize(w, h)) throw std::runtime_error("invalid GX texture size");
+	if(readLE32(body+4) & 0x80000000u){
+		if(length != 100) throw std::runtime_error("invalid shared reference");
+		return std::vector<u8>(body, body+length);
+	}
+	if(length != 92+size) throw std::runtime_error("truncated GX texture");
+	int nw = std::max(tileW, w/2), nh = std::max(tileH, h/2);
+	if(nw % tileW || nh % tileH) throw std::runtime_error("half size is not tile aligned");
+	if(nw == w && nh == h) return std::vector<u8>(body, body+length);
+	u8 *rgba = resampleArea(decodeNative(body+92, w, h, fmt), w, h, nw, nh);
+	std::vector<u8> out(92 + nativeSize(nw, nh));
+	memcpy(out.data(), body, 88);
+	writeLE16(out.data()+80, nw); writeLE16(out.data()+82, nh);
+	writeLE32(out.data()+88, out.size()-92);
+	if(fmt == GXFMT_CMPR) tileCMPR(out.data()+92, rgba, nw, nh, nw, nh);
+	else if(fmt == GXFMT_RGB5A3) tileRGB5A3(out.data()+92, rgba, nw, nh, nw, nh);
+	else if(fmt == GXFMT_IA4) tileIA4(out.data()+92, rgba, nw, nh, nw, nh);
+	else tileCI8(out.data()+92, rgba, nw, nh, body+92+w*h);
+	free(rgba);
+	return out;
+}
+
+static std::vector<u8>
+halveNativeChunks(const u8 *data, size_t length, uint32 parent)
+{
+	std::vector<u8> out;
+	for(size_t p = 0; p < length; ){
+		if(std::all_of(data+p, data+length, [](u8 b){ return b == 0; })) break;
+		if(length-p < 12) throw std::runtime_error("truncated chunk header");
+		uint32 id = readLE32(data+p), size = readLE32(data+p+4);
+		if(size > length-p-12) throw std::runtime_error("chunk overruns parent");
+		const u8 *body = data+p+12;
+		std::vector<u8> next;
+		if(id == ID_TEXDICTIONARY || id == ID_TEXTURENATIVE)
+			next = halveNativeChunks(body, size, id);
+		else if(id == ID_STRUCT && parent == ID_TEXTURENATIVE)
+			next = halveNativeStruct(body, size);
+		else next.assign(body, body+size);
+		size_t start = out.size();
+		out.insert(out.end(), data+p, data+p+12);
+		writeLE32(out.data()+start+4, next.size());
+		out.insert(out.end(), next.begin(), next.end());
+		p += 12+size;
+	}
+	return out;
+}
+
+static int
+halveNativeFile(const char *input, const char *output)
+{
+	try{
+		FILE *f = fopen(input, "rb");
+		if(!f) throw std::runtime_error("cannot open input");
+		fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+		if(len < 12){ fclose(f); throw std::runtime_error("truncated input"); }
+		std::vector<u8> data(len);
+		size_t n = fread(data.data(), 1, data.size(), f); fclose(f);
+		if(n != data.size() || readLE32(data.data()) != ID_TEXDICTIONARY)
+			throw std::runtime_error("invalid texture dictionary");
+		std::vector<u8> out = halveNativeChunks(data.data(), data.size(), 0);
+		f = fopen(output, "wb");
+		if(!f) throw std::runtime_error("cannot open output");
+		n = fwrite(out.data(), 1, out.size(), f); int closed = fclose(f);
+		if(n != out.size() || closed) throw std::runtime_error("cannot write output");
+		return 0;
+	}catch(const std::exception &e){
+		fprintf(stderr, "%s: %s\n", input, e.what());
+		return 1;
+	}
+}
+
 int
 main(int argc, char **argv)
 {
+	if(argc == 4 && strcmp(argv[1], "--native-half") == 0)
+		return halveNativeFile(argv[2], argv[3]);
 	// --max-dim N caps the largest texture axis, halving in powers of two.
 	// Texture data is 191.6MB of the 329.8MB archive, so this is the only
 	// lever on disc size worth pulling.
@@ -380,6 +669,14 @@ main(int argc, char **argv)
 			gMaxDim = atoi(argv[argi+1]);
 			if(gMaxDim < 8) gMaxDim = 8;
 			argi += 2;
+		}else if(strcmp(argv[argi], "--shrink") == 0 && argi+2 < argc){
+			gShrinkH = atoi(argv[argi+1]);
+			gShrinkPct = atoi(argv[argi+2]);
+			if(gShrinkH < 1 || gShrinkPct < 1 || gShrinkPct > 100){
+				fprintf(stderr, "bad --shrink %s %s\n", argv[argi+1], argv[argi+2]);
+				return 1;
+			}
+			argi += 3;
 		}else if(strcmp(argv[argi], "--image") == 0 && argi+1 < argc){
 			char *eq = strchr(argv[argi+1], '=');
 			if(eq == nil || nimg >= 16){
@@ -397,9 +694,10 @@ main(int argc, char **argv)
 		}
 	}
 	if(argc - argi < (nimg ? 1 : 2)){
-		fprintf(stderr, "usage: %s [--max-dim N] in.txd out.txd\n"
-		                "       %s --image name=img.tga [...] out.txd\n",
-		    argv[0], argv[0]);
+		fprintf(stderr, "usage: %s [--max-dim N] [--shrink H PCT] in.txd out.txd\n"
+		                "       %s --image name=img.tga [...] out.txd\n"
+		                "       %s --native-half in-gx.txd out-gx.txd\n",
+		    argv[0], argv[0], argv[0]);
 		return 1;
 	}
 

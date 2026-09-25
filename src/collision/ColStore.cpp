@@ -222,7 +222,7 @@ CColStore::RequestCollision(const CVector2D &pos)
 	int i;
 
 	for(i = 1; i < COLSTORESIZE; i++)
-		if(GetSlot(i) && GetBoundingBox(i).IsPointInside(pos, -115.0f))
+		if(GetSlot(i) && GetBoundingBox(i).IsPointInside(pos, -200.0f))   // B76: 115 left 5m of slack over the 110m ensure margin; at car speed on a ~128ms-seek drive that is the "Loading..." flash
 			CStreaming::RequestCol(i, STREAMFLAGS_PRIORITY);
 }
 

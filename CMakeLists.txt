@@ -11,9 +11,9 @@ include(GetGitRevisionDescription)
 get_git_head_revision(GIT_REFSPEC GIT_SHA1 "ALLOW_LOOKING_ABOVE_CMAKE_SOURCE_DIR")
 message(STATUS "Building ${CMAKE_PROJECT_NAME} GIT SHA1: ${GIT_SHA1}")
 
-# GameCube and Wii share the same toolchain, libogc and GX GPU. Wii is used as
-# a boot vehicle (Dolphin emulates its SD card); the memory budget stays
-# GameCube-sized, so allocations must live in MEM1 and never touch MEM2.
+# GameCube and Wii share the same toolchain, libogc and GX GPU. The GameCube
+# build is MEM1 + ARAM only; the Wii build boots from SD/USB and lets malloc
+# use MEM2 (REVC_WII_MEM2, src/CMakeLists.txt).
 if(NINTENDO_GAMECUBE OR NINTENDO_WII)
     set(NINTENDO_OGC TRUE)
 endif()
@@ -83,6 +83,17 @@ if(NINTENDO_OGC)
     # Cost: a crash walks the stack with the frame-pointer chain instead of
     # unwind tables, which gcPanic already does by hand (it follows frame[0]).
     add_compile_options(-fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables)
+    # dca3's rule, copied: -Os everywhere to conserve RAM (the code lives in
+    # MEM1 too — 3.4MB of text at -O2), with -O3 only on the short hot list
+    # each source directory marks (world, collision, math, the render backend).
+    # Last -O wins on the command line, and per-source COMPILE_OPTIONS come
+    # after these directory options, so the hot files keep their -O3.
+    add_compile_options(-Os)
+    # LTO, as dca3's liberty build (-flto=auto): whole-program inlining and
+    # dead-code removal across librw and the game. Measured 09-01 on the -Os
+    # build: text 2693K -> 2504K, data -13K; B23 ran clean on it.
+    add_compile_options(-flto=auto -ffat-lto-objects)
+    add_link_options(-flto=auto)
 endif()
 
 option(${PROJECT}_VENDORED_LIBRW "Use vendored librw" ON)

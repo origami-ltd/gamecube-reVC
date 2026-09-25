@@ -1039,6 +1039,29 @@ int8 CRunningScript::ProcessOneCommand()
 	int32 command = (uint16)CTheScripts::Read2BytesFromScript(&m_nIp);
 	m_bNotFlag = (command & 0x8000);
 	command &= 0x7FFF;
+#ifdef GTA_OGC
+	// B98: the commands that gate New Game -> first cutscene, with script name,
+	// game time and frame, so the log shows which frame fades in and which loads.
+	{
+		const char *nm = nil;
+		switch(command){
+		case 0x03CB: nm = "LOAD_SCENE"; break;
+		case 0x02E4: nm = "LOAD_CUTSCENE"; break;
+		case 0x02E7: nm = "START_CUTSCENE"; break;
+		case 0x02EA: nm = "CLEAR_CUTSCENE"; break;
+		case 0x038B: nm = "LOAD_ALL_MODELS_NOW"; break;
+		case 0x03AF: nm = "SWITCH_STREAMING"; break;
+		case 0x01B4: nm = "SET_PLAYER_CONTROL"; break;
+		case 0x023C: nm = "LOAD_SPECIAL_CHARACTER"; break;
+		case 0x0417: nm = "LOAD_AND_LAUNCH_MISSION"; break;
+		case 0x03EF: nm = "MAKE_PLAYER_SAFE_FOR_CUTSCENE"; break;
+		case 0x04BB: nm = "SET_AREA_VISIBLE"; break;
+		}
+		if(nm)
+			printf("SCRIPT %.8s %s ip=%x t=%u f=%u\n", m_abScriptName, nm, (unsigned)(m_nIp - 2),
+			    (unsigned)CTimer::GetTimeInMilliseconds(), (unsigned)CTimer::GetFrameCounter());
+	}
+#endif
 #ifdef USE_ADVANCED_SCRIPT_DEBUG_OUTPUT
 	LogBeforeProcessingCommand(command);
 #endif

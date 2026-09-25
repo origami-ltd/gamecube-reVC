@@ -4831,8 +4831,6 @@ CPed::PreRender(void)
 							    (int)ba->animId, ba->blendAmount,
 							    ba->IsPartial() ? "p" : "");
 						DVD_FS_GUARD;
-						FILE *bf = fopen("dvd:/anim.log", "a");
-						if(bf){ fprintf(bf, "%s\n", bl); fclose(bf); }
 					}
 				}
 			}
@@ -4880,8 +4878,6 @@ CPed::PreRender(void)
 				}
 			}
 			DVD_FS_GUARD;
-			FILE *af = fopen("dvd:/anim.log", "a");
-			if(af){ fprintf(af, "%s\n", ln); fclose(af); }
 		}
 	}
 #endif

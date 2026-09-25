@@ -9,7 +9,6 @@
 
 // Freeze watchdog breadcrumb (gamecube.cpp). The frame-phase markers narrowed
 // the hang to DoRWStuffEndOfFrame; these narrow it inside the menu itself.
-extern const char *gPhase;
 #include "Font.h"
 #include "Pad.h"
 #include "Text.h"
@@ -28,6 +27,8 @@ extern const char *gPhase;
 #include "ControllerConfig.h"
 #include "Vehicle.h"
 #include "MBlur.h"
+#include "custompipes.h"
+#include "postfx.h"
 #include "screendroplets.h"
 #include "PlayerSkin.h"
 #include "PlayerInfo.h"
@@ -42,6 +43,9 @@ extern const char *gPhase;
 #include "sampman.h"
 #include "Sprite.h"
 #include "Lights.h"
+#ifdef GTA_OGC
+extern "C" void gcHeapCensusDump(const char *why);   // gamecube.cpp (B155)
+#endif
 
 // Similar story to Hud.cpp:
 // Game has colors inlined in code.
@@ -138,6 +142,7 @@ uint32 TimeToStopPadShaking;
 static RpClump *gFrontendControllerClump;
 static float gFrontendControllerTilt;
 extern void gcFatalPark(const char *tag, const char *msg);
+extern volatile int gcEssentialLoad;   // Streaming.cpp: shed may take LOD/shown models, blocks >4K may use the 256K arena
 #endif
 #endif
 
@@ -544,7 +549,11 @@ CMenuManager::CMenuManager()
 #else
 	m_PrefsVsyncDisp = 1;
 #endif
+#ifdef GTA_OGC
+	m_PrefsFrameLimiter = FRAMELIMIT_30;
+#else
 	m_PrefsFrameLimiter = 1;
+#endif
 	m_PrefsLanguage = 0;
 	field_54 = 0;
 	m_PrefsAllowNastyGame = 1;
@@ -2378,7 +2387,6 @@ void
 CMenuManager::DrawFrontEnd()
 {
 #ifdef GTA_OGC
-	gPhase = "menu-draw";
 #endif
 	CFont::SetAlphaFade(255.0f);
 	CSprite2d::InitPerFrame();
@@ -3129,7 +3137,6 @@ CMenuManager::LoadAllTextures()
 	// through CFileMgr. Which of those four it is decides everything: a stall in
 	// MakeSpaceFor is the streamer evicting, a stall in LoadTxd is the file
 	// path, and they call for opposite fixes.
-	gPhase = "menu-loadtex";
 #endif
 	if (m_bSpritesLoaded)
 		return;
@@ -3144,7 +3151,6 @@ CMenuManager::LoadAllTextures()
 	m_LeftMostRadioX = MENU_X_LEFT_ALIGNED(MENURADIO_ICON_FIRST_X - MENURADIO_ICON_SIZE);
 	CTimer::Stop();
 
-	gPhase = "menu-space1";
 	printf("GCLOAD frontend space1 begin used=%zuK avail=%zuK\n",
 	    CStreaming::ms_memoryUsed / 1024, CStreaming::ms_memoryAvailable / 1024);
 	CStreaming::MakeSpaceFor(350 * CDSTREAM_SECTOR_SIZE); // twice of it in mobile
@@ -3160,7 +3166,6 @@ CMenuManager::LoadAllTextures()
 		frontendTxdSlot1 = CTxdStore::AddTxdSlot("frontend1");
 
 	printf("LOAD frontend1\n");
-	gPhase = "menu-fronten1";
 	CTxdStore::LoadTxd(frontendTxdSlot1, "MODELS/FRONTEN1.TXD");
 	CTxdStore::AddRef(frontendTxdSlot1);
 	CTxdStore::SetCurrentTxd(frontendTxdSlot1);
@@ -3171,11 +3176,9 @@ CMenuManager::LoadAllTextures()
 	}
 
 	CTxdStore::PopCurrentTxd();
-	gPhase = "menu-usedmem";
 	CStreaming::IHaveUsedStreamingMemory();
 
 	if (!m_OnlySaveMenu) {
-		gPhase = "menu-space2";
 		CStreaming::MakeSpaceFor(692 * CDSTREAM_SECTOR_SIZE); // twice of it in mobile
 		CStreaming::ImGonnaUseStreamingMemory();
 		CTxdStore::PushCurrentTxd();
@@ -3186,7 +3189,6 @@ CMenuManager::LoadAllTextures()
 			frontendTxdSlot2 = CTxdStore::AddTxdSlot("frontend2");
 
 		printf("LOAD frontend2\n");
-		gPhase = "menu-fronten2";
 		CTxdStore::LoadTxd(frontendTxdSlot2, "MODELS/FRONTEN2.TXD");
 		CTxdStore::AddRef(frontendTxdSlot2);
 		CTxdStore::SetCurrentTxd(frontendTxdSlot2);
@@ -3211,6 +3213,7 @@ CMenuManager::LoadAllTextures()
 	CTimer::Update();
 #ifdef GTA_OGC
 	printf("GCLOAD frontend complete\n");
+	gcHeapCensusDump("frontend");   // B155: the fixed set before any world is streamed
 #endif
 }
 
@@ -3218,7 +3221,11 @@ void
 CMenuManager::LoadSettings()
 {
 	CFileMgr::SetDirMyDocuments();
+#if defined(GTA_OGC) && !defined(HW_RVL)
+	int fileHandle = CFileMgr::OpenFile("mc:/gta_vc.set", "r");
+#else
 	int fileHandle = CFileMgr::OpenFile("gta_vc.set", "r");
+#endif
 
 	int32 prevLang = m_PrefsLanguage;
 	MousePointerStateHelper.bInvertVertically = true;
@@ -3273,14 +3280,7 @@ CMenuManager::LoadSettings()
 			CFileMgr::Read(fileHandle, gString, 4);
 			CFileMgr::Read(fileHandle, gString, 1);
 #ifdef LEGACY_MENU_OPTIONS
-#ifdef GTA_OGC
-			// Read and discard: the boot state is OFF by decision (see the
-			// default above), and honouring a saved ON here would re-arm the
-			// quantisation the user asked to keep away from cold start.
-			{ int8 savedVsync; CFileMgr::Read(fileHandle, (char*)&savedVsync, 1); }
-#else
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsVsyncDisp, 1);
-#endif
 			CFileMgr::Read(fileHandle, (char*)&CMBlur::BlurOn, 1);
 #else
 			CFileMgr::Read(fileHandle, gString, 1);
@@ -3292,16 +3292,7 @@ CMenuManager::LoadSettings()
 			CFileMgr::Read(fileHandle, (char*)&CVehicle::m_bDisableMouseSteering, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsSfxVolume, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsMusicVolume, 1);
-#ifdef GTA_OGC
-			// Both-zero volumes are the fossil of the era when audio was
-			// dead and the sliders did nothing ("it's all muted"). Nobody
-			// wants a silent game as a preference; deliberate near-silence
-			// can be 1.
-			if(m_PrefsSfxVolume == 0 && m_PrefsMusicVolume == 0){
-				m_PrefsSfxVolume = 102;
-				m_PrefsMusicVolume = 102;
-			}
-#endif
+
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsMP3BoostVolume, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsRadioStation, 1);
 			CFileMgr::Read(fileHandle, (char*)&m_PrefsSpeakers, 1);
@@ -3336,6 +3327,10 @@ CMenuManager::LoadSettings()
 #ifdef LOAD_INI_SETTINGS
 	if (LoadINISettings()) {
 		LoadINIControllerSettings();
+#ifdef GTA_OGC
+		printf("SETTINGS: loaded memory card, cap=%d vehicle=%d blur=%d\n",
+		    (int)m_PrefsFrameLimiter, (int)CustomPipes::VehiclePipeSwitch, (int)CPostFX::MotionBlurOn);
+#endif
 	}
 #endif
 
@@ -3348,12 +3343,7 @@ CMenuManager::LoadSettings()
 #ifdef LEGACY_MENU_OPTIONS
 	m_PrefsVsync = m_PrefsVsyncDisp;
 #endif
-#ifdef GTA_OGC
-	// A settings file written by an older build may contain the PC 1.2 value.
-	// It overcommits MEM1 before the player gets a visible frame, so the
-	// console target always starts at the supported end of the same slider.
-	m_PrefsLOD = 0.925f;
-#endif
+
 	CRenderer::ms_lodDistScale = m_PrefsLOD;
 
 	if (m_nPrefsAudio3DProviderIndex == NO_AUDIO_PROVIDER)
@@ -3673,7 +3663,6 @@ void
 CMenuManager::Process(void)
 {
 #ifdef GTA_OGC
-	gPhase = "menu-process";
 #endif
 #ifdef XBOX_MESSAGE_SCREEN
 	ProcessDialogTimer();
@@ -5147,7 +5136,11 @@ CMenuManager::ProcessUserInput(uint8 goDown, uint8 goUp, uint8 optionSelected, u
 #endif
 					m_PrefsShowLegends = true;
 					m_PrefsVsyncDisp = true;
+#ifdef GTA_OGC
+					m_PrefsFrameLimiter = FRAMELIMIT_30;
+#else
 					m_PrefsFrameLimiter = true;
+#endif
 					m_PrefsRadarMode = 0;
 					m_PrefsShowHud = true;
 					m_nDisplayVideoMode = m_nPrefsVideoMode;
@@ -5807,7 +5800,6 @@ void
 CMenuManager::SwitchMenuOnAndOff()
 {
 #ifdef GTA_OGC
-	gPhase = "menu-switch";
 #endif
 #ifdef GTA_OGC
 	// A cutscene turns widescreen on, and this gate is what made Start during
@@ -5968,7 +5960,6 @@ void
 CMenuManager::UnloadTextures()
 {
 #ifdef GTA_OGC
-	gPhase = "menu-unloadtex";
 	UnloadController();
 #endif
 	if (m_nCurrScreen == MENUPAGE_SOUND_SETTINGS)
@@ -7529,6 +7520,9 @@ CMenuManager::LoadController(int8 type)
 #endif
 
 	UnloadController();
+#ifdef GTA_OGC
+	CGame::TidyUpMemory(true, true);
+#endif
 	int frontend_controller = CTxdStore::FindTxdSlot("frontend_controller");
 
 	// Find the new txd to load
@@ -7573,17 +7567,41 @@ CMenuManager::LoadController(int8 type)
 	}
 	RwTextureDestroy(controllerTexture);
 
-	RwStream *stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD,
-	    "MODELS/FRONTEND_GCC.DFF");
-	if (stream == nil) {
-		gcFatalPark("FRONTEND3D", "MODELS/FRONTEND_GCC.DFF is missing");
-		return;
+	// B185: the page exists to show this pad. b184's third visit failed its
+	// 52K index block with 1.4MB free, chunk holes <= 23K and 'shed 0
+	// models'; as an essential load the shed may take any unreferenced model
+	// and the two blocks (54K + 78K) may come from the emergency arena.
+	gcEssentialLoad = 1;
+	for(int attempt = 0; attempt < 3 && gFrontendControllerClump == nil; attempt++){
+		if(attempt){
+			// B178: RemoveUnusedModelsInLoadedList is an empty stub here, so the
+			// retries only compacted. b178's 149K index block failed with 1.9MB
+			// free and 'shed 0 models': every world model still had instance
+			// refs. The menu hides the world, so the last try drops the RW
+			// objects and up to 64 far models (near set, LOD shells and script
+			// models stay); unpausing re-streams only far detail.
+			if(attempt == 2){
+				CStreaming::DeleteAllRwObjects();
+				for(int k = 0; k < 64 && CStreaming::RemoveLeastUsedModel(STREAMFLAGS_LOD); k++);
+			}
+			CGame::TidyUpMemory(true, true);
+		}
+		RwStream *stream = RwStreamOpen(rwSTREAMFILENAME, rwSTREAMREAD,
+		    "MODELS/FRONTEND_GCC.DFF");
+		if(stream == nil){
+			printf("FRONTEND3D: cannot open FRONTEND_GCC.DFF\n");
+			gcEssentialLoad = 0;
+			return;
+		}
+		if(RwStreamFindChunk(stream, rwID_CLUMP, nil, nil))
+			gFrontendControllerClump = RpClumpStreamRead(stream);
+		RwStreamClose(stream, nil);
+		if(gFrontendControllerClump)
+			printf("FRONTEND3D: controller loaded on attempt %d\n", attempt + 1);
 	}
-	if (RwStreamFindChunk(stream, rwID_CLUMP, nil, nil))
-		gFrontendControllerClump = RpClumpStreamRead(stream);
-	RwStreamClose(stream, nil);
+	gcEssentialLoad = 0;
 	if (gFrontendControllerClump == nil) {
-		gcFatalPark("FRONTEND3D", "FRONTEND_GCC.DFF is not a valid clump");
+		printf("FRONTEND3D: controller geometry could not be loaded\n");
 		return;
 	}
 	// No texture stripping: the untextured pad renders WHITE (the paint

@@ -9,7 +9,8 @@
     -0.593988252626648,
     -0.8327699207772372
   ],
-  "indices": 76692,
+  "decimated_by": "decimate_pad.py --triangles 9000",
+  "indices": 27000,
   "scale": 0.05018957844509335,
   "source": "gamecube_controller.glb",
   "source_center": [
@@ -27,7 +28,9 @@
     0.2472839951515167,
     -21.15021324157715
   ],
+  "source_triangles": 25564,
+  "source_vertices": 14300,
   "texture_name": "gc_controller",
-  "triangles": 25564,
-  "vertices": 14300
+  "triangles": 9000,
+  "vertices": 6018
 }

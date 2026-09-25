@@ -13,10 +13,14 @@
 #include "ControllerConfig.h"
 #include "FileMgr.h"
 #include "CdStream.h"
+#include "Streaming.h"
+#include "TxdStore.h"
 #include "PlayerPed.h"
 #include "PlayerInfo.h"
 #include "Pools.h"
 #include "CarCtrl.h"
+#include "CutsceneMgr.h"
+#include "Wanted.h"
 #include "Font.h"
 #include "Sprite2d.h"
 #include "gcmovie.h"
@@ -35,6 +39,7 @@ extern "C" int GcCardMountDevice(void);
 namespace rw { namespace gx { int8_t gxReadEfbPref(void); } }
 #include <iso9660.h>
 extern "C" bool ISO9660_MountDbg(const char *name, const DISC_INTERFACE *disc_interface);
+extern "C" void ISO9660_UnmountDbg(const char *name);
 #include <fat.h>
 #ifdef HW_RVL
 #include <sdcard/wiisd_io.h>
@@ -57,7 +62,7 @@ extern bool32 gxGlossEnable;
 extern float gxGlossMult;
 extern bool32 gxLightmapEnable;
 extern float gxLightmapBlend;
-extern bool32 gxOscLogEnable;
+extern uint32 gxDlBytes;
 } }
 
 // libogc enables external interrupts before the compiler-generated __eabi
@@ -67,6 +72,765 @@ extern bool32 gxOscLogEnable;
 // before main() could install diagnostics. The linker wraps only __eabi, so
 // normal interrupt delivery resumes before the first user statement.
 extern "C" void __real___eabi(void);
+// Heap emergency reserve (B73). The heap dies of fragmentation, not size: a 17K
+// must-allocate failed with 1MB free in holes. Keep a 512K block aside; when an
+// allocation fails, hand it back, retry, and tell the streamer to shed hard
+// until the heap has real room again (Streaming.cpp re-arms it).
+extern "C" void *__real_malloc(size_t);
+extern "C" void *__real_memalign(size_t, size_t);
+extern "C" void *__real_calloc(size_t, size_t);
+extern "C" void *__real_realloc(void *, size_t);
+extern "C" void __real_free(void *);
+extern "C" { void *gHeapReserve; volatile unsigned gHeapEmergency; lwp_t gMainLwp; }
+extern "C" int gcStreamEmergencyShed(unsigned need);   // Streaming.cpp (B77)
+extern "C" void *gcBigAlloc(size_t sz);   // below (B79)
+// B78: the emergency store is a private BSS arena, never handed back to the
+// heap. B77's malloc'd reserve was released on the first failure and could not
+// be re-armed: a fragmented heap has no 256K hole even with 1.8MB free, so the
+// second 37K skin failed and mustmalloc exited. Blocks carved here carry their
+// size; the arena resets when everything carved from it has been freed.
+enum { HEAP_ARENA_BYTES = 256*1024 };
+static uint8 gHeapArena[HEAP_ARENA_BYTES] __attribute__((aligned(32)));
+static uint32 gArenaUsed, gArenaLive, gArenaCarves;
+static inline bool gcInArena(const void *p){ return (const uint8*)p >= gHeapArena && (const uint8*)p < gHeapArena + HEAP_ARENA_BYTES; }
+
+// DIAG B179: b178/b179 corrupted newlib's heap silently (malloc returned
+// 0x83f637a0 with '1115581K free', then an ISI through a garbage vtable) — a
+// failed native geometry load freeing an uninitialised attribBase (B180). With
+// dvd:/heapcheck.txt the chunk chain is walked every frame and after every
+// streamed model; the first bad header is printed once.
+extern "C" { extern char *__malloc_sbrk_base; extern void *__malloc_av_[]; }
+extern "C" void __malloc_lock(struct _reent *); extern "C" void __malloc_unlock(struct _reent *);
+extern "C" { int gHeapCheckOn; }
+static void gcStackLine(char *stack, int cap);
+extern "C" void gcHeapCheck(u32 tag, u32 arg)
+{
+	static int bad;
+	if(!gHeapCheckOn || bad) return;
+	__malloc_lock(_REENT);
+	u8 *top = (u8*)__malloc_av_[2], *p = nil;
+	u32 size = 0, chunks = 0;
+	bool ok = true;
+	if(__malloc_sbrk_base != nil && __malloc_sbrk_base != (char*)-1 && top != nil){
+		p = (u8*)(((u32)__malloc_sbrk_base + 7) & ~7u);
+		while(p < top){
+			size = *(u32*)(p + 4) & ~3u;
+			if(size < 16 || (size & 7) || size > (u32)(top - p) || ++chunks > 400000){ ok = false; break; }
+			p += size;
+		}
+		if(ok && p != top) ok = false;
+	}
+	__malloc_unlock(_REENT);
+	if(ok) return;
+	bad = 1;
+	char stack[100]; gcStackLine(stack, sizeof(stack));
+	printf("HEAPCHECK BAD after %c%c%c%c %u: chunk %p size %08x (#%u) top %p base %p at%s\n",
+	    tag>>24, tag>>16, tag>>8, tag, (unsigned)arg, p, (unsigned)size, (unsigned)chunks, top, __malloc_sbrk_base, stack);
+}
+// B120: who asks — the b118 tour failed 2587 mallocs of 37508/61044 bytes on
+// the main thread at ~1400/s with nothing in the log naming the caller.
+static void gcStackLine(char *stack, int cap)
+{
+	int n = 0;
+	u32 sp = (u32)(uintptr_t)__builtin_frame_address(0);
+	for(int i = 0; i < 8 && sp && (sp & 3) == 0 && sp >= 0x80000000u && sp < 0x81800000u; i++){
+		u32 *frame = (u32*)sp;
+		n += snprintf(stack + n, cap - n, " %08X", frame[1]);
+		if(n >= cap - 10) break;
+		sp = frame[0];
+	}
+}
+static void *gcArenaCarve(size_t sz, size_t al, const char *who)
+{
+	// B129: small blocks only. b118-b128 carved 53-101K model blocks here
+	// ('used 238K/256K live 2' for the rest of the run) and the sub-1K RW
+	// allocation that ended b128 ('OOM need 0K') found the arena full.
+	extern volatile int gcEssentialLoad;   // Streaming.cpp: set while converting a SCRIPTOWNED model (B150)
+	if(sz > 4096 && !gcEssentialLoad) return NULL;   // B150: the script's own props/specials may take the whole arena (b149: prop 295, 81K, 24 misses with 1.4MB of crumbs)
+	if(al < 32) al = 32;
+	u32 level; _CPU_ISR_Disable(level);
+	uint32 start = (gArenaUsed + 32 + al - 1) & ~(al - 1);   // 32 bytes of header room before the block
+	void *p = NULL;
+	if(start + sz <= HEAP_ARENA_BYTES){
+		*(uint32*)(gHeapArena + start - 4) = (uint32)sz;
+		p = gHeapArena + start; gArenaUsed = start + sz; gArenaLive++; gArenaCarves++;
+	}
+	_CPU_ISR_Restore(level);
+	gHeapEmergency++;
+	static u64 lastSaid; static unsigned muted;
+	if(ticks_to_millisecs(gettime() - lastSaid) > 1000){
+		char stack[100]; gcStackLine(stack, sizeof(stack));
+		printf("HEAP: %s(%u) failed, arena %s (used %uK/%uK live %u, %u muted) at%s\n", who, (unsigned)sz, p ? "carved" : "FULL",
+		    gArenaUsed/1024, HEAP_ARENA_BYTES/1024, gArenaLive, muted, stack); lastSaid = gettime(); muted = 0;
+	}else muted++;
+	return p;
+}
+static int gcBigReleaseEmpty(void);   // below, with the chunk allocator
+extern "C" int gcBootDone(void);   // below (B152)
+// B177: set around allocations whose owner can do without (the post-effect
+// frame grab): a failure returns NULL instead of shedding the world for them.
+// b177e shed 18 models, LODs among them, for one 600K grab during the intro.
+extern "C" { volatile int gcOptionalAlloc; }
+static void *gcHeapFail(size_t sz, size_t al, const char *who)
+{
+	if(sz == 0 || gcOptionalAlloc) return NULL;
+	// B133: the chunks first, any size. b132 booted in 6.7 minutes: 369
+	// 1.6-3.6K StageCollisionRecord mallocs failed in LoadLevel while
+	// chunk 1 (2MB, arena) sat empty — B110 keeps <4K blocks out of the
+	// chunks while booting, which is right as a preference, not as a rule
+	// when the general heap is already gone.
+	if(al <= 32 && gcBootDone()){ extern void *gcBigAllocAny(size_t); void *p = gcBigAllocAny(sz); if(p) return p; }   // B134 after boot only — B152: during LoadLevel this filled the chunks with small blocks and starved the general heap (b151: 3 collision zones lost at boot; b130 without it booted clean)
+	// B109: the general heap starved at boot with 5.3MB free INSIDE the
+	// permanent chunks (B106): 64-byte mallocs failed through the whole of
+	// CGame::Initialise. Before B106 the empty chunks went back to the heap
+	// on their own; now they go back exactly when the heap needs them.
+	if(gcBigReleaseEmpty()){
+		void *p = al > 8 ? __real_memalign(al, sz) : __real_malloc(sz);
+		if(p) return p;
+	}
+	if(gcStreamEmergencyShed(sz)){   // main thread: drop models, then one more try in the real heap
+		void *p = al > 8 ? __real_memalign(al, sz) : __real_malloc(sz);
+		if(p) return p;
+		p = gcBigAlloc(sz); if(p) return p;   // B114/B115: any size — the shed freed chunk room as well, and a chunk beats the arena or death
+
+	}else if(LWP_GetSelf() != gMainLwp){
+		// B94: another thread (audio decode) cannot shed; flag the emergency and wait
+		// for the main loop's cadence to free room rather than crash on a NULL
+		// (B93: Tremor's failed 8K/16K buffers ended in wild MMIO writes).
+		gHeapEmergency++;
+		for(int k = 0; k < 40; k++){
+			usleep(5000);
+			void *p = al > 8 ? __real_memalign(al, sz) : __real_malloc(sz);
+			if(p) return p;
+			if(sz >= 4096){ p = gcBigAlloc(sz); if(p) return p; }
+		}
+	}
+	return gcArenaCarve(sz, al, who);
+}
+extern "C" int gcBigContains(const void *p);
+extern "C" void gcBigFree(void *p);
+extern "C" size_t gcBigSizeOf(const void *p);
+
+// B155: heap census by call site. Every live block goes into a side hash
+// (pointer -> size, site); a site is the four return addresses above the
+// allocator's entry point and keeps its live bytes. gcHeapCensusDump prints
+// the top sites for addr2line. The 9-10MB of MEM1 that are neither streaming,
+// pools nor textures had no instrument at all until now. DIAGNOSTIC: the
+// tables cost 526K of MEM1 — set GC_HEAP_CENSUS to 0 for a release DOL.
+// B177: off again, as in b172. b176's 16384 entries cannot hold the 17-20K live
+// blocks b155 measured: a full table makes hcDel's backward shift spin forever
+// with interrupts off (b177c froze on the loading screen). Needs >= 32768.
+#define GC_HEAP_CENSUS 0
+#if GC_HEAP_CENSUS
+enum { HC_ENTRIES = 16384, HC_SITES = 512, HC_TOP = 48 };
+struct HcEnt { u32 p, szsite; };                     // szsite = size<<9 | site
+struct HcSite { u32 pc[4]; u32 live, count, used; };
+static HcEnt *gHc; static HcSite *gHcSite; static u32 gHcN, gHcLost, gHcLive, gHcInit;
+static void hcInit(void)
+{
+	gHcInit = 1;
+	gHc = (HcEnt*)__real_malloc(sizeof(HcEnt)*HC_ENTRIES);
+	gHcSite = (HcSite*)__real_malloc(sizeof(HcSite)*HC_SITES);
+	if(gHc == NULL || gHcSite == NULL){ gHc = NULL; return; }
+	memset(gHc, 0, sizeof(HcEnt)*HC_ENTRIES);
+	memset(gHcSite, 0, sizeof(HcSite)*HC_SITES);
+}
+// B177: b176 cut the table from 65536 to 16384 entries and kept '>> 16', so the
+// first probe landed up to 384K past the table: the dvdfs 'INDEX CORRUPTED'
+// scribbler of the first b177 run. Mask to the table.
+static inline u32 hcHash(u32 p){ return (((p >> 3) * 2654435761u) >> 16) & (HC_ENTRIES-1); }
+// Frame 0 is this function, 1 is hcAdd, 2 is the allocator entry
+// (__wrap_malloc, gcBigAlloc); its saved LR is the first address that matters.
+static __attribute__((noinline)) u32 hcSiteOf(void)
+{
+	u32 pcs[4] = {0, 0, 0, 0};
+	u32 sp = (u32)(uintptr_t)__builtin_frame_address(0);
+	for(int i = 0, n = 0; i < 12 && n < 4 && sp && (sp & 3) == 0 && sp >= 0x80000000u && sp < 0x81800000u; i++){
+		u32 *frame = (u32*)sp;
+		if(i >= 2) pcs[n++] = frame[1];
+		sp = frame[0];
+	}
+	u32 h = (pcs[0]*31u + pcs[1]*17u + pcs[2]*7u + pcs[3]) >> 2;
+	for(u32 k = 0; k < HC_SITES; k++){
+		u32 i = (h + k) & (HC_SITES-1);
+		HcSite *s = &gHcSite[i];
+		if(!s->used){ s->used = 1; memcpy(s->pc, pcs, sizeof(pcs)); return i; }
+		if(memcmp(s->pc, pcs, sizeof(pcs)) == 0) return i;
+	}
+	return HC_SITES-1;   // table full: everything else lands in the last slot
+}
+static __attribute__((noinline)) void hcAdd(void *p, size_t sz)
+{
+	if(!gHcInit) hcInit();
+	if(gHc == NULL || p == NULL) return;
+	if(sz > 0x7FFFFF) sz = 0x7FFFFF;
+	u32 level; _CPU_ISR_Disable(level);
+	u32 site = hcSiteOf();
+	u32 key = (u32)(uintptr_t)p, i = hcHash(key), k;
+	for(k = 0; k < HC_ENTRIES; k++, i = (i + 1) & (HC_ENTRIES-1)){
+		if(gHc[i].p == key){   // a free this census never saw: replace
+			u32 os = gHc[i].szsite & 511, osz = gHc[i].szsite >> 9;
+			gHcSite[os].live -= osz; gHcSite[os].count--; gHcLive -= osz; gHcN--;
+			gHc[i].p = 0;
+		}
+		if(gHc[i].p == 0){
+			gHc[i].p = key; gHc[i].szsite = ((u32)sz << 9) | site;
+			gHcSite[site].live += sz; gHcSite[site].count++; gHcLive += sz; gHcN++;
+			break;
+		}
+	}
+	if(k == HC_ENTRIES) gHcLost++;
+	_CPU_ISR_Restore(level);
+}
+static __attribute__((noinline)) void hcDel(void *p)
+{
+	if(gHc == NULL || p == NULL) return;
+	u32 level; _CPU_ISR_Disable(level);
+	u32 key = (u32)(uintptr_t)p, i = hcHash(key);
+	for(u32 k = 0; k < HC_ENTRIES && gHc[i].p != 0; k++, i = (i + 1) & (HC_ENTRIES-1)){
+		if(gHc[i].p != key) continue;
+		u32 site = gHc[i].szsite & 511, sz = gHc[i].szsite >> 9;
+		gHcSite[site].live -= sz; gHcSite[site].count--; gHcLive -= sz; gHcN--;
+		// Backward-shift deletion: no tombstones, probe chains stay intact.
+		u32 hole = i, j = (i + 1) & (HC_ENTRIES-1);
+		while(gHc[j].p != 0){
+			u32 h = hcHash(gHc[j].p);
+			bool between = hole <= j ? (h > hole && h <= j) : (h > hole || h <= j);
+			if(!between){ gHc[hole] = gHc[j]; hole = j; }
+			j = (j + 1) & (HC_ENTRIES-1);
+		}
+		gHc[hole].p = 0; gHc[hole].szsite = 0;
+		break;
+	}
+	_CPU_ISR_Restore(level);
+}
+extern "C" void gcHeapCensusDump(const char *why)
+{
+	if(gHc == NULL) return;
+	printf("HCENSUS %s: live %uK in %u blocks (lost %u) | top sites: liveK count pc0 pc1 pc2 pc3\n",
+	    why, gHcLive/1024, gHcN, gHcLost);
+	u8 done[HC_SITES]; memset(done, 0, sizeof(done));
+	for(int t = 0; t < HC_TOP; t++){
+		int best = -1;
+		for(int i = 0; i < HC_SITES; i++)
+			if(!done[i] && gHcSite[i].used && (best < 0 || gHcSite[i].live > gHcSite[best].live)) best = i;
+		if(best < 0 || gHcSite[best].live < 4096) break;
+		done[best] = 1;
+		printf("HC %6uK %6u %08X %08X %08X %08X\n", gHcSite[best].live/1024, gHcSite[best].count,
+		    gHcSite[best].pc[0], gHcSite[best].pc[1], gHcSite[best].pc[2], gHcSite[best].pc[3]);
+	}
+}
+#else
+static inline void hcAdd(void *, size_t) {}
+static inline void hcDel(void *) {}
+extern "C" void gcHeapCensusDump(const char *) {}
+#endif
+
+// B155: frame profile — microseconds per phase of the game loop, accumulated
+// by Idle (main.cpp) and CGame::Process (Game.cpp), printed with the census
+// as avg/max ms. The police-chase collapse (ft 17 -> 109 ms) had no breakdown.
+enum { PROF_N = 15 };
+static const char *gProfName[PROF_N] = {"stream","script","world","pop","game","audio","cnstr","prerender","render","fx","2d","present","effects","droplets","blur"};
+static u64 gProfAcc[PROF_N], gProfMax[PROF_N];
+static u32 gProfFrame[PROF_N];   // B187: this frame's phases, for the SPIKE line
+extern unsigned gxPageIns;       // librw texel store: ARAM → MEM1 window copies
+extern "C" unsigned long long gcNowUs(void){ return ticks_to_microsecs(gettime()); }
+extern "C" { extern uint32 gStrLoad, gLoadAllN; }   // Streaming.cpp: conversions, blocking LoadAllRequestedModels calls
+extern "C" { extern volatile const char *gMainWhere; }   // defined below
+extern "C" void gcProfAdd(int id, unsigned long long us)
+{
+	if(id < 0 || id >= PROF_N) return;
+	gProfAcc[id] += us;
+	gProfFrame[id] += (u32)us;
+	if(us > gProfMax[id]) gProfMax[id] = us;
+	// DIAG b176: name the phase behind every >100 ms frame, with what the
+	// streamer did inside it. The PROF maxima said "game 352" and nothing else.
+	static uint32 lastLoad, lastAll;
+	if(us >= 100000)
+		printf("SLOW %s %ums where=%s loads=%u loadall=%u\n", gProfName[id], (unsigned)(us/1000),
+		    (const char*)gMainWhere, gStrLoad - lastLoad, gLoadAllN - lastAll);
+	lastLoad = gStrLoad; lastAll = gLoadAllN;
+}
+static void gcProfLine(char *out, size_t n, u32 frames)
+{
+	size_t k = 0;
+	for(int i = 0; i < PROF_N && k < n; i++){
+		k += snprintf(out + k, n - k, "%s %u/%u ", gProfName[i],
+		    (unsigned)(frames ? gProfAcc[i]/frames/1000 : 0), (unsigned)(gProfMax[i]/1000));
+		gProfAcc[i] = gProfMax[i] = 0;
+	}
+}
+
+// B187: the user sees 20 fps in rain, crashes and police chaos, and the
+// 300-frame PROF maxima cannot say which phases blew up in the SAME frame.
+// One line per >50 ms gameplay frame (at most one a second: OSReport is slow).
+static void gcSpikeLine(u32 t)
+{
+	static u32 lastPage, lastLoad; static u64 lastSaid;
+	u32 page = gxPageIns - lastPage, load = gStrLoad - lastLoad;
+	lastPage = gxPageIns; lastLoad = gStrLoad;
+	if(t > 50000 && gGameState == GS_PLAYING_GAME && !FrontEndMenuManager.m_bMenuActive && !CCutsceneMgr::IsRunning() &&
+	   ticks_to_millisecs(gettime() - lastSaid) >= 1000){
+		lastSaid = gettime();
+		char line[200]; size_t k = snprintf(line, sizeof(line), "SPIKE %ums pagein %u loads %u |", (unsigned)(t/1000), page, load);
+		for(int i = 0; i < PROF_N && k < sizeof(line); i++)
+			if(gProfFrame[i] >= 3000)
+				k += snprintf(line + k, sizeof(line) - k, " %s %u", gProfName[i], (unsigned)(gProfFrame[i]/1000));
+		printf("%s\n", line);
+	}
+	memset(gProfFrame, 0, sizeof(gProfFrame));
+}
+
+static void gcFrameSample(u64 start)
+{
+	gcSpikeLine(ticks_to_microsecs(gettime() - start));
+	if(gGameState != GS_PLAYING_GAME) return;
+	static u32 samples[300], work[300], count, lastPhase;
+	int cap = FrontEndMenuManager.m_PrefsFrameLimiter == CMenuManager::FRAMELIMIT_30 ? 30 :
+	    FrontEndMenuManager.m_PrefsFrameLimiter ? 60 : 0;
+	u32 phase = cap | (FrontEndMenuManager.m_bMenuActive << 8) | (CCutsceneMgr::IsRunning() << 9);
+	if(phase != lastPhase){ count = 0; lastPhase = phase; }
+	samples[count++] = ticks_to_microsecs(gettime() - start);
+	if(count != ARRAY_SIZE(samples)) return;
+	u64 sum = 0;
+	u32 slow60 = 0, slow30 = 0;
+	for(u32 i = 0; i < count; i++){
+		u32 t = samples[i]; sum += t;
+		slow60 += t > 17167; slow30 += t > 33833;
+		u32 j = i;
+		while(j && work[j-1] > t){ work[j] = work[j-1]; j--; }
+		work[j] = t;
+	}
+	printf("FRAMEPERF n=%u cap=%d menu=%d cut=%d avg_us=%u p50=%u p95=%u p99=%u max=%u late60=%u late30=%u\n",
+	    count, cap, (phase>>8)&1, (phase>>9)&1, (unsigned)(sum/count),
+	    work[149], work[284], work[296], work[299], slow60, slow30);
+	count = 0;
+}
+
+extern "C" void *__wrap_malloc(size_t sz)
+{
+	void *p = __real_malloc(sz);
+	if(p == NULL) p = gcHeapFail(sz, 8, "malloc");
+	if(p && !gcBigContains(p)) hcAdd(p, sz);   // chunk blocks are counted by gcBigAlloc itself
+	return p;
+}
+extern "C" void *__wrap_memalign(size_t al, size_t sz)
+{
+	void *p = __real_memalign(al, sz);
+	if(p == NULL) p = gcHeapFail(sz, al, "memalign");
+	if(p && !gcBigContains(p)) hcAdd(p, sz);
+	return p;
+}
+extern "C" void *__wrap_calloc(size_t n, size_t sz)
+{
+	void *p = __real_calloc(n, sz);
+	if(p == NULL && n*sz){ p = gcHeapFail(n*sz, 8, "calloc"); if(p) memset(p, 0, n*sz); }
+	if(p && !gcBigContains(p)) hcAdd(p, n*sz);
+	return p;
+}
+// B179: newlib's free() trusts the header in front of the pointer. A garbage
+// or already-free pointer makes it merge a fake chunk into top: b178b/b179c
+// ended with top = p-8, malloc handing out 0x83f637a0 and the game frozen
+// (b179c: Geometry::destroy freeing the uninitialised attribBase of a failed
+// native load, fixed in librw B180).
+// Check the header first; a bad free is logged with its caller and leaked.
+static bool
+gcNewlibOwns(void *p, const char *what)
+{
+	if(__malloc_sbrk_base == nil || __malloc_sbrk_base == (char*)-1)
+		return true;
+	u8 *c = (u8*)p - 8, *top = (u8*)__malloc_av_[2];
+	u8 *base = (u8*)(((u32)__malloc_sbrk_base + 7) & ~7u);
+	const char *why = nil;
+	if(((u32)p & 7) || c < base || c >= top)
+		why = "outside the heap";
+	else{
+		u32 size = *(u32*)(c + 4) & ~3u;
+		if(size < 16 || (size & 7) || size > (u32)(top - c))
+			why = "bad size";
+		else if(!(*(u32*)(c + size + 4) & 1))
+			why = "already free";
+	}
+	if(why == nil)
+		return true;
+	static u32 said;
+	if(said++ < 20){
+		char stack[100]; gcStackLine(stack, sizeof(stack));
+		printf("BADFREE %s %p (%s) at%s\n", what, p, why, stack);
+	}
+	return false;
+}
+extern "C" void __wrap_free(void *p)
+{
+	if(p == NULL) return;
+	if(gcBigContains(p)){ gcBigFree(p); return; }   // B95: a plain free() on a chunk block corrupted newlib's heap (warped geometry)
+	hcDel(p);
+	if(gcInArena(p)){
+		u32 level; _CPU_ISR_Disable(level);
+		if(gArenaLive && --gArenaLive == 0) gArenaUsed = 0;   // everything carved is gone: start over
+		_CPU_ISR_Restore(level);
+		return;
+	}
+	if(!gcNewlibOwns(p, "free"))
+		return;
+	__real_free(p);
+}
+extern "C" void *__wrap_realloc(void *p, size_t sz)
+{
+	if(p == NULL) return __wrap_malloc(sz);
+	if(sz == 0){ __wrap_free(p); return NULL; }
+	if(gcBigContains(p)){   // B95: chunk block through the plain realloc() path
+		size_t old = gcBigSizeOf(p);
+		void *q = __wrap_malloc(sz);
+		if(q){ memcpy(q, p, old < sz ? old : sz); gcBigFree(p); }
+		return q;
+	}
+	if(!gcInArena(p)){
+		if(!gcNewlibOwns(p, "realloc"))
+			return NULL;
+		void *q = __real_realloc(p, sz);
+		if(q){ hcDel(p); hcAdd(q, sz); return q; }
+		size_t old = malloc_usable_size(p);
+		q = gcHeapFail(sz, 8, "realloc");
+		if(q){ memcpy(q, p, old < sz ? old : sz); hcDel(p); __real_free(p); if(!gcBigContains(q)) hcAdd(q, sz); }
+		return q;
+	}
+	uint32 old = *(uint32*)((uint8*)p - 4);
+	void *q = __wrap_malloc(sz);
+	if(q){ memcpy(q, p, old < sz ? old : sz); __wrap_free(p); }
+	return q;
+}
+extern "C" void gcHeapReserveArm(void) { }   // B78: the arena replaced the malloc'd reserve
+
+// B79: big-block heap. B76-B78 died in a fragmented single heap: 1.4MB free in
+// holes with no 37K one. Every RenderWare allocation of 8K or more (geometry,
+// skins, TXD dictionaries, window spills) now lives in 1MB chunks with
+// first-fit + coalescing; the general heap keeps the small long-lived objects
+// that were splitting the holes. A chunk is taken from the general heap when
+// needed and handed back when empty, so nothing has to be sized at boot; when
+// no chunk can be had the caller falls back to the general heap as before.
+enum { BIG_CHUNK = 2048*1024, BIG_CHUNKS = 7, BIG_SPANS = 1024, BIG_MIN = 1024 };   // B106: spans 512->1024 for 1K routing (MemoryMgr.cpp now routes >= BIG_MIN); 12 bytes each   // B100: 2MB chunks (a 700K mesh needs one hole), 1K+ routed (B98 died on 3.6K mallocs with 1.6MB free in chunks)
+struct BigSpan { uint32 addr, size; uint8 used; };
+struct BigChunk { uint8 *base; BigSpan sp[BIG_SPANS]; int32 n; uint32 used; uint32 size; };   // B114: size per chunk (2MB, or 1MB when no 2MB hole exists after boot)
+static BigChunk gBig[BIG_CHUNKS];
+static int32 gBigChunks;
+// B110: 0 while booting — small blocks stay in the general heap and empty
+// chunks go back to it, exactly the pre-B106 boot that fit. 1 from the
+// first GS_PLAYING_GAME frame on — the three chunks are kept and 1-4K RW
+// blocks live in the third one. B108/B109 tried permanence from the start
+// and starved CGame::Initialise of general heap twice.
+static int gBigKeep;
+extern "C" int gcBootDone(void) { return gBigKeep; }   // B144/B151: 1 once LoadLevel is done — the streaming floor, admission control and loader bound wait for it
+static int gcBigAddChunk(void);
+extern "C" void gcBigReport(void);
+// B151: called at the end of CGame::Initialise's LoadLevel (Game.cpp). The main
+// script's first LOAD_SCENE used to run before the GS_PLAYING_GAME frame set
+// this, so the initial world set filled the heap with no floor and the
+// hotel's collision zones failed at "boot" (b146/b150: car under the map).
+extern "C" void gcBootLevelLoaded(void)
+{
+	if(gBigKeep) return;
+	gBigKeep = 1;
+	while(gBigChunks < 3 && gcBigAddChunk()) ;
+	printf("HEAP: chunks kept from now: %d\n", (int)gBigChunks);
+	gcBigReport();
+}
+static uint32 gBigUsed, gBigFails;
+static void *gcBigAllocIn(BigChunk *c, uint32 size, int32 begin = 0)
+{
+	for(int32 i = begin; i < c->n; i++){
+		BigSpan *s = &c->sp[i];
+		if(s->used || s->size < size) continue;
+		if(s->size > size && c->n < BIG_SPANS){
+			memmove(s+2, s+1, sizeof(BigSpan)*(c->n-i-1));
+			s[1].addr = s->addr + size; s[1].size = s->size - size; s[1].used = 0;
+			s->size = size; c->n++;
+		}
+		s->used = 1; c->used += s->size; gBigUsed += s->size;
+		return c->base + s->addr;
+	}
+	return NULL;
+}
+static int gcBigAddChunk(void)   // interrupts ON: newlib's lock must be free to block
+{
+	uint32 size = BIG_CHUNK;
+	// B131: the three permanent chunks come straight from the arena, not
+	// from newlib. b129/b130 proved a second memalign(2MB) fails at every
+	// boot moment (only [2048K,1024K,1024K] ever came back); the arena
+	// itself has the room. They are never freed (gcBigFree keeps k < 3).
+	// B135: newlib only. B131-B134 carved chunks from the arena
+	// (SYS_SetArenaLo) and every run since had impossible heap states
+	// (boot starving with chunks empty, 100-byte texture allocs failing):
+	// libogc's sbrk evidently keeps its own heap end, so those chunks
+	// overlapped the heap. The b126-b130 layout [2MB,1MB,1MB] is the one
+	// that boots in 35 s and plays.
+	uint8 *base = (uint8*)__real_memalign(32, size);
+	if(base == NULL){   // B114: after boot there is no 2MB hole, but a 1MB one usually exists — play ran on ONE chunk ("chunks kept from now: 1")
+		size = BIG_CHUNK/2;
+		base = (uint8*)__real_memalign(32, size);
+	}
+	if(base == NULL){
+		static int said; if(said++ < 3) printf("HEAP: big chunk %d: no 1MB hole (free %uK)\n", gBigChunks, (unsigned)(mallinfo().fordblks/1024));
+		return 0;
+	}
+	u32 level; _CPU_ISR_Disable(level);
+	BigChunk *c = &gBig[gBigChunks++];
+	c->base = base; c->size = size; c->n = 1; c->used = 0; c->sp[0].addr = 0; c->sp[0].size = size; c->sp[0].used = 0;
+	_CPU_ISR_Restore(level);
+	printf("HEAP: chunk %d = %uK at %p (heap free %uK)\n", (int)gBigChunks, (unsigned)(size/1024), base, (unsigned)(mallinfo().fordblks/1024));
+	return 1;
+}
+// B127: carve the three chunks FIRST THING in main, while the heap is one
+// hole. b125/b126 census read 'big 3/2417K/654K': the lazy priming (first RW
+// block, after console, filesystem and RW init) only found 1MB holes, so 3MB
+// of chunks held a 6-8MB streaming set and the rest sliced the general heap
+// into crumbs — OOM at the docks (b125), 2622 failed loads in 18 min (b126).
+static uint32 gPrimeFreeK, gPrimeArenaK;
+extern "C" void gcBigPrime(void)
+{
+	struct mallinfo mi = mallinfo(); gPrimeFreeK = mi.fordblks/1024; gPrimeArenaK = mi.arena/1024;
+	while(gBigChunks < 3 && gcBigAddChunk()) ;
+}
+// B130: at main start newlib's arena is 618K (sbrk grows lazily) — b129's
+// prime got one 2MB chunk and two 1MB fallbacks. Called again once the
+// arena has grown (after rsINITIALIZE, and at GS_INIT_ONCE): empty
+// sub-2MB chunks go back and 2MB ones are carved in their place.
+extern "C" void gcBigReprime(void)
+{
+	for(int32 k = gBigChunks - 1; k >= 0; k--){
+		BigChunk *c = &gBig[k];
+		if(c->size < BIG_CHUNK && c->used == 0){
+			u32 level; _CPU_ISR_Disable(level);
+			__real_free(c->base);
+			*c = gBig[--gBigChunks];
+			_CPU_ISR_Restore(level);
+		}
+	}
+	while(gBigChunks < 3 && gcBigAddChunk()) ;
+}
+// The boot console eats printf until the game loop; this line reaches the log.
+extern "C" void gcBigReport(void)
+{
+	struct mallinfo mi = mallinfo();
+	printf("HEAP: prime saw free %uK arena %uK; now arena %uK free %uK; chunks:", (unsigned)gPrimeFreeK, (unsigned)gPrimeArenaK, (unsigned)(mi.arena/1024), (unsigned)(mi.fordblks/1024));
+	for(int32 k = 0; k < gBigChunks; k++) printf(" [%d %uK used %uK]", (int)k, (unsigned)(gBig[k].size/1024), (unsigned)(gBig[k].used/1024));
+	printf("\n");
+}
+// B134: the general heap is gone — any chunk, any size, no boot preference.
+void *gcBigAllocAny(size_t sz)
+{
+	uint32 size = ((uint32)sz + 31) & ~31u;
+	if(size > BIG_CHUNK - 64) return NULL;
+	u32 level; _CPU_ISR_Disable(level);
+	void *p = NULL;
+	for(int32 k = 0; k < gBigChunks && p == NULL; k++) p = gcBigAllocIn(&gBig[k], size);
+	_CPU_ISR_Restore(level);
+	if(p) hcAdd(p, sz);
+	return p;
+}
+extern "C" void *gcBigAlloc(size_t sz)
+{
+	uint32 size = ((uint32)sz + 31) & ~31u;
+	if(size > BIG_CHUNK - 64) return NULL;   // B98: anything that fits a chunk (B97 died on an ~800K mesh block with 873K free in a chunk)
+	static int primed;
+	if(!primed){   // B82: take the first chunks while the heap is still one big hole; B81 got exactly one
+		primed = 1;
+		while(gBigChunks < 3 && gcBigAddChunk()) ;   // B85: 5 starved the general heap at boot (3K mallocs failing)
+	}
+	for(int attempt = 0; attempt < 2; attempt++){
+		u32 level; _CPU_ISR_Disable(level);
+		void *p = NULL;
+		// B108: blocks under 4K live only in the third primed chunk, so the
+		// first two keep their big spans. B106 let 1-4K blocks fill every
+		// chunk from the start of LoadLevel; the first large RW block then
+		// found no span, the general heap could not serve it either, and
+		// gcHeapFail ran before streaming existed (see gcStreamEmergencyShed).
+		// Once that chunk is full, small blocks fall back to the general heap.
+		// B115: small blocks prefer the LAST chunk (whatever its index — b114 ran
+		// on two chunks and the "third chunk only" rule refused every 1-4K block:
+		// 'OOM need 1K' with 840K free inside the chunks), then any chunk.
+		if(size < 4096){
+			if(gBigKeep && gBigChunks >= 1) p = gcBigAllocIn(&gBig[gBigChunks-1], size);
+			if(gBigKeep) for(int32 k = 0; k < gBigChunks && p == NULL; k++) p = gcBigAllocIn(&gBig[k], size);
+		}
+		else for(int32 k = 0; k < gBigChunks && p == NULL; k++) p = gcBigAllocIn(&gBig[k], size);
+		_CPU_ISR_Restore(level);
+		if(p){ hcAdd(p, sz); return p; }
+		// B147: while booting, three chunks at most. LoadLevel otherwise grows
+		// them to seven (2MB + 6x1MB) out of the general heap it is still
+		// filling, and its 140-378 B collision records then fail (b145: four
+		// COL zones dropped at boot -> the car under the map later).
+		if(gBigChunks >= BIG_CHUNKS || !gcBigAddChunk()) break;   // B152: B147's boot cap dropped — b130's dynamics (extras come and go while booting) booted with zero failures
+	}
+	gBigFails++;
+	return NULL;
+}
+// B109: hand one EMPTY chunk back to the general heap; called only from a
+// failed general-heap allocation (gcHeapFail). Empty chunks are the boot
+// case; in play every chunk holds RW blocks and this finds nothing.
+static int gcBigReleaseEmpty(void)
+{
+	u32 level; _CPU_ISR_Disable(level);
+	int released = 0;
+	for(int32 k = gBigChunks - 1; k >= 1; k--){   // B136: chunk 0 stays; empty others feed a starving boot (B109/B110)
+		if(gBig[k].used == 0){
+			uint8 *base = gBig[k].base;
+			gBig[k] = gBig[--gBigChunks];
+			_CPU_ISR_Restore(level);
+			__real_free(base);
+			printf("HEAP: empty chunk released to the general heap (chunks now %d)\n", (int)gBigChunks);
+			released = 1;
+			break;
+		}
+	}
+	if(!released) _CPU_ISR_Restore(level);
+	return released;
+}
+static BigChunk *gcBigChunkOf(const void *p)
+{
+	for(int32 k = 0; k < gBigChunks; k++)
+		if((const uint8*)p >= gBig[k].base && (const uint8*)p < gBig[k].base + gBig[k].size) return &gBig[k];
+	return NULL;
+}
+extern "C" int gcBigContains(const void *p) { return gcBigChunkOf(p) != NULL; }
+extern "C" size_t gcBigSizeOf(const void *p)
+{
+	BigChunk *c = gcBigChunkOf(p); if(c == NULL) return 0;
+	uint32 addr = (uint32)((const uint8*)p - c->base);
+	for(int32 i = 0; i < c->n; i++) if(c->sp[i].addr == addr && c->sp[i].used) return c->sp[i].size;
+	return 0;
+}
+extern "C" int gcBigResize(void *p, size_t bytes)
+{
+	u32 level; _CPU_ISR_Disable(level);
+	BigChunk *c = gcBigChunkOf(p);
+	uint32 size = ((uint32)bytes + 31) & ~31u;
+	if(c && size){
+		uint32 addr = (uint32)((uint8*)p - c->base);
+		for(int32 i = 0; i < c->n; i++){
+			BigSpan *s = &c->sp[i];
+			if(s->addr != addr || !s->used || size > s->size) continue;
+			uint32 tail = s->size - size;
+			if(tail && i+1 < c->n && !s[1].used){
+				s[1].addr -= tail;
+				s[1].size += tail;
+			}else if(tail && c->n < BIG_SPANS){
+				memmove(s+2, s+1, sizeof(BigSpan)*(c->n-i-1));
+				s[1].addr = addr + size; s[1].size = tail; s[1].used = 0;
+				c->n++;
+			}else if(tail){
+				_CPU_ISR_Restore(level);
+				return 1;
+			}
+			s->size = size; c->used -= tail; gBigUsed -= tail;
+			_CPU_ISR_Restore(level);
+			return 1;
+		}
+	}
+	_CPU_ISR_Restore(level);
+	return 0;
+}
+
+extern "C" void *gcBigMove(void *p)
+{
+	u32 level; _CPU_ISR_Disable(level);
+	BigChunk *c = gcBigChunkOf(p);
+	if(c){
+		uint32 addr = (uint32)((uint8*)p - c->base);
+		for(int32 i = 0; i < c->n; i++){
+			BigSpan *s = &c->sp[i];
+			if(s->addr != addr || !s->used) continue;
+			if(i == 0 || s[-1].used){
+				if(i+1 == c->n || s[1].used) break;
+				uint32 size = s->size, limit = size + s[1].size;
+				uint32 best = size + size/8 + 32;
+				if(best > limit) best = limit;
+				BigChunk *target = NULL;
+				for(int32 k = 0; k < gBigChunks; k++)
+					for(int32 j = 0; j < gBig[k].n; j++){
+						BigSpan *hole = &gBig[k].sp[j];
+						if(!hole->used && hole->size >= size && hole->size < best){
+							target = &gBig[k]; best = hole->size;
+						}
+					}
+				if(target){
+					// Allocate the best fitting hole, leaving the large tail intact.
+					int32 bestIndex = -1;
+					for(int32 j = 0; j < target->n; j++)
+						if(!target->sp[j].used && target->sp[j].size == best){ bestIndex = j; break; }
+					void *moved = gcBigAllocIn(target, size, bestIndex);
+					memcpy(moved, p, size);
+					gcBigFree(p);
+					_CPU_ISR_Restore(level);
+					return moved;
+				}
+				break;
+			}
+			uint32 size = s->size, gap = s[-1].size, start = s[-1].addr;
+			void *moved = c->base + start;
+			memmove(moved, p, size);
+			s[-1].size = size; s[-1].used = 1;
+			s->addr = start + size; s->size = gap; s->used = 0;
+			if(i+1 < c->n && !s[1].used){
+				s->size += s[1].size;
+				memmove(s+1, s+2, sizeof(BigSpan)*(c->n-i-2)); c->n--;
+			}
+			_CPU_ISR_Restore(level);
+			return moved;
+		}
+	}
+	_CPU_ISR_Restore(level);
+	return p;
+}
+
+extern "C" void gcBigFree(void *p)
+{
+	hcDel(p);
+	u32 level; _CPU_ISR_Disable(level);
+	BigChunk *c = gcBigChunkOf(p);
+	if(c){
+		uint32 addr = (uint32)((uint8*)p - c->base);
+		for(int32 i = 0; i < c->n; i++){
+			BigSpan *s = &c->sp[i];
+			if(s->addr != addr || !s->used) continue;
+			s->used = 0; c->used -= s->size; gBigUsed -= s->size;
+			if(i+1 < c->n && !s[1].used){ s->size += s[1].size; memmove(s+1, s+2, sizeof(BigSpan)*(c->n-i-2)); c->n--; }
+			if(i > 0 && !s[-1].used){ s[-1].size += s->size; memmove(s, s+1, sizeof(BigSpan)*(c->n-i-1)); c->n--; }
+			break;
+		}
+		// B106: the three primed chunks are permanent. Released once empty after
+		// boot they could never come back (no contiguous 2MB hole exists later),
+		// so play ran on ONE chunk ('big 1' in every census) and RW blocks spilled
+		// into the fragmented general heap. Extras beyond the primed three still go.
+		// B128: the three primed chunks are NEVER released. B110 let them go
+		// while booting (gBigKeep 0): the splash TXD's block was the first
+		// thing in chunk 1, its free emptied the chunk, the 2MB hole was eaten
+		// by boot allocations and every later chunk was a 1MB one (b127 log:
+		// 'chunk 3 = 1024K' x15, census 'big 3/3045K'). Extras beyond three
+		// still go back when empty.
+		if(c->used == 0 && (c - gBig) >= 1 && !(gBigKeep && gBigChunks <= 3)){   // B136: chunk 0 (the 2MB one) stays; the others follow B110 (back to the heap while booting)
+			__real_free(c->base);
+			*c = gBig[--gBigChunks];
+		}
+	}
+	_CPU_ISR_Restore(level);
+}
+// total free the streamer may count on: general holes plus what the chunks still hold
+extern "C" size_t gcHeapFreeTotal(void)
+{
+	size_t f = mallinfo().fordblks;
+	for(int32 k = 0; k < gBigChunks; k++) f += gBig[k].size - gBig[k].used;
+	return f;
+}
+extern "C" void gcBigStats(unsigned *chunks, unsigned *usedK, unsigned *freeK, unsigned *largestK, unsigned *fails)
+{
+	uint32 largest = 0;
+	for(int32 k = 0; k < gBigChunks; k++)
+		for(int32 i = 0; i < gBig[k].n; i++)
+			if(!gBig[k].sp[i].used && gBig[k].sp[i].size > largest) largest = gBig[k].sp[i].size;
+	uint32 total = 0; for(int32 k = 0; k < gBigChunks; k++) total += gBig[k].size;
+	*chunks = gBigChunks; *usedK = gBigUsed/1024; *freeK = (total - gBigUsed)/1024; *largestK = largest/1024; *fails = gBigFails;
+}
 extern "C" void
 __wrap___eabi(void)
 {
@@ -80,253 +844,8 @@ long _dwOperatingSystemVersion = OS_WINXP;
 size_t _dwMemAvailPhys;
 RwUInt32 gGameState;
 
-// Freeze watchdog. Every hang in this port so far has presented identically —
-// frozen image, no exception, no crash.log, and near-zero CPU because the main
-// thread is blocked rather than spinning — which makes them indistinguishable
-// from each other and costs a boot per guess. A separate thread that only
-// watches a counter can still run when the main thread cannot, so it is the
-// one place that can say where the game stopped.
-void GeckoLog(const char *msg);   // defined below
-volatile uint32 gFrameTick;
-const char *gPhase = "boot";
-static lwp_t watchdogThread = LWP_THREAD_NULL;
-static volatile bool watchdogStop;
-static bool autoCarTestEnabled;
-static CVehicle *autoCarTestVehicle;
-static CVector autoCarProgressPos;
-static uint32 autoCarProgressTime;
-static uint8 autoCarRecoveryCount;
 
-// dvd:/autocar.txt is a test-only world-streaming driver.  Once normal
-// gameplay is live it puts Tommy in a real traffic car (or hands his current
-// car to the traffic AI), then lets the road graph drive at maximum cruise
-// speed.  This exercises vehicle gameplay and keeps crossing streaming cells
-// without pretending that holding the walk stick against a wall is a map
-// traversal test.
-static void
-autoCarTestTick(void)
-{
-	// The intro cutscene is still active around 125s. Entering its traffic car
-	// there made the cutscene reset the vehicle halfway through the test. Wait
-	// until normal world gameplay has settled.
-	if(!autoCarTestEnabled || CTimer::GetTimeInMillisecondsPauseMode() < 180000)
-		return;
-	uint32 now = CTimer::GetTimeInMillisecondsPauseMode();
 
-	CPlayerPed *player = FindPlayerPed();
-	if(player == nil)
-		return;
-
-	CVehicle *car = player->bInVehicle ? player->m_pMyVehicle : nil;
-	if(car == nil){
-		float best = 2500.0f;
-		for(int i = 0; i < CPools::GetVehiclePool()->GetSize(); i++){
-			CVehicle *candidate = CPools::GetVehiclePool()->GetSlot(i);
-			if(candidate == nil || !candidate->IsCar() || candidate->IsBike() ||
-			   candidate->pDriver == nil || candidate->m_fHealth <= 0.0f)
-				continue;
-			bool seat = false;
-			for(int s = 0; s < candidate->m_nNumMaxPassengers; s++)
-				seat |= candidate->pPassengers[s] == nil;
-			if(!seat)
-				continue;
-			float d = (candidate->GetPosition() - player->GetPosition()).MagnitudeSqr();
-			if(d < best){
-				best = d;
-				car = candidate;
-			}
-		}
-		if(car == nil)
-			return;
-
-		player->SetObjective(OBJECTIVE_ENTER_CAR_AS_PASSENGER, car);
-		player->WarpPedIntoCar(car);
-	}
-
-	if(car != autoCarTestVehicle){
-		autoCarTestVehicle = car;
-		CCarCtrl::JoinCarWithRoadSystem(car);
-		car->AutoPilot.m_nCarMission = MISSION_CRUISE;
-		car->AutoPilot.m_nTempAction = TEMPACT_NONE;
-		car->AutoPilot.m_nDrivingStyle = DRIVINGSTYLE_PLOUGH_THROUGH;
-		car->AutoPilot.m_nAntiReverseTimer = CTimer::GetTimeInMilliseconds();
-		car->SetStatus(STATUS_PHYSICS);
-		autoCarProgressPos = car->GetPosition();
-		autoCarProgressTime = now;
-		autoCarRecoveryCount = 0;
-	}
-	// Keep the regular traffic AI and only raise its target speed. Crucially,
-	// do not clear m_nTempAction or reset m_nAntiReverseTimer every frame: that
-	// was cancelling the AI's own reverse manoeuvre and pinning the first car
-	// against a wall.
-	car->AutoPilot.m_nCruiseSpeed = 60;
-	car->AutoPilot.m_fMaxTrafficSpeed = 60.0f;
-	car->bEngineOn = true;
-
-	// A physical traffic car can still wedge. Let its normal mission steering
-	// perform a bounded reverse, then rebuild its road-node route if two such
-	// attempts made no 25m progress. Both are existing CarAI actions; the test
-	// never teleports or writes a position.
-	if((car->GetPosition() - autoCarProgressPos).Magnitude2D() >= 25.0f){
-		autoCarProgressPos = car->GetPosition();
-		autoCarProgressTime = now;
-		autoCarRecoveryCount = 0;
-	}else if(now - autoCarProgressTime >= 10000){
-		autoCarProgressTime = now;
-		autoCarProgressPos = car->GetPosition();
-		if(autoCarRecoveryCount++ < 2){
-			car->AutoPilot.m_nTempAction = TEMPACT_REVERSE;
-			car->AutoPilot.m_nTimeTempAction = CTimer::GetTimeInMilliseconds() + 1500;
-		}else{
-			CCarCtrl::JoinCarWithRoadSystem(car);
-			car->AutoPilot.m_nTempAction = TEMPACT_GOFORWARD;
-			car->AutoPilot.m_nTimeTempAction = CTimer::GetTimeInMilliseconds() + 1500;
-			autoCarRecoveryCount = 0;
-		}
-	}
-
-	static uint32 lastLog;
-	if(now - lastLog > 5000){
-		lastLog = now;
-		char line[192];
-		snprintf(line, sizeof(line),
-		    "AUTOCAR t=%u x=%.1f y=%.1f speed=%.2f mission=%d temp=%d status=%d nodes=%d>%d",
-		    (unsigned)now, car->GetPosition().x, car->GetPosition().y,
-		    car->m_vecMoveSpeed.Magnitude(), (int)car->AutoPilot.m_nCarMission,
-		    (int)car->AutoPilot.m_nTempAction, (int)car->GetStatus(),
-		    car->AutoPilot.m_nCurrentRouteNode,
-		    car->AutoPilot.m_nNextRouteNode);
-		GeckoLog(line);
-		// The emulated Gecko is intentionally best-effort and Dolphin can drop
-		// the line. This test runs from a writable Wii SD, so preserve the
-		// traversal proof (position + speed) beside the streaming heartbeats.
-		DVD_FS_GUARD;
-		FILE *log = fopen("dvd:/autocar.log", "a");
-		if(log){ fprintf(log, "%s\n", line); fclose(log); }
-	}
-}
-
-static void*
-watchdogMain(void*)
-{
-	uint32 last = 0;
-	int stuck = 0;
-	bool reported = false;
-	while(!watchdogStop){
-		usleep(1000*1000);
-		if(gFrameTick != last){
-			last = gFrameTick;
-			stuck = 0;
-			reported = false;
-			continue;
-		}
-		// Only the states whose loop iteration IS a frame. GS_INIT_ONCE and
-		// GS_INIT_PLAYING_GAME each do a whole game load inside a single
-		// iteration, so a stalled counter there is the normal case, not a
-		// hang — the first version of this watchdog cried wolf at tick=3 in
-		// GS_INIT_PLAYING_GAME and reported nothing about the real freeze.
-		if(gGameState != GS_PLAYING_GAME && gGameState != GS_FRONTEND){
-			stuck = 0;
-			continue;
-		}
-		// Re-report every eight seconds it stays stalled, rather than once and
-		// then silence. One line cannot tell a genuinely stopped game from a
-		// single slow step that recovered, and this project has spent whole
-		// sessions on that ambiguity. A repeating line is a stopped game; a
-		// lone one was a slow load.
-		if(++stuck < 8)
-			continue;
-		stuck = 0;
-		(void)reported;
-		extern unsigned gxWaitRetrace, gxCamW, gxCamH;
-		extern const char *gxLastPath;
-		char line[256];
-		snprintf(line, sizeof(line),
-		    "HANG phase=%s tick=%u state=%u menu=%d vsync=%u "
-		    "gxpath=%s cam=%ux%u",
-		    gPhase ? gPhase : "-", (unsigned)gFrameTick,
-		    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
-		    gxWaitRetrace, gxLastPath ? gxLastPath : "-",
-		    gxCamW, gxCamH);
-		// Gecko only, deliberately. The first version wrote this to dvd:/ and
-		// got nothing: when the game is stuck the main thread is stuck holding
-		// libfat, so the watchdog's own fopen blocks behind it and the one
-		// report that matters never lands. A hang reporter cannot depend on
-		// the subsystem the hang might be in. Gecko is EXI and independent, so
-		// it still gets through — it just truncates past a couple of dozen
-		// characters, hence one field per line rather than one long line.
-		// ONE line, and a short one. Five separate GeckoLog calls lost all but
-		// the first: Dolphin's emulated Gecko truncates past a couple of dozen
-		// characters and drops what it cannot drain, so a multi-line report is
-		// a report that does not arrive. Everything is abbreviated to fit:
-		// H <phase-initial> s<state> m<menu> <gxpath> v<vsync> r<rdIdle>c<cmdIdle>
-		char part[48];
-		// Ask the GP directly, from a thread that is not blocked on it. The
-		// bounded wait in showRaster turned out to be too late to catch this:
-		// when the GP stalls, the FIFO fills, and the CPU parks in whichever
-		// GX call runs next — GX_CopyDisp, well before GX_DrawDone. So the
-		// draw-sync deadline never gets a chance to fire and no GPSTALL is
-		// written even though the GP is the thing that stopped.
-		// rd/cmd idle both 0 with the frame counter frozen IS a stalled GP.
-		{
-			u8 overhi = 0, underlow = 0, rdIdle = 0, cmdIdle = 0, brkpt = 0;
-			GX_GetGPStatus(&overhi, &underlow, &rdIdle, &cmdIdle, &brkpt);
-			// The phase name in full, on its own short line. Sending only its
-			// first letter made every hang read as "endofframe", because that
-			// was the last marker Idle set — the markers were opened and never
-			// closed, so the report named the last phase ENTERED rather than
-			// where the thread actually was. They close now, and the name is
-			// worth the extra line.
-			// GP status FIRST and short. Gecko drops what it cannot drain, so
-			// the second line has been lost every time — and it was the line
-			// carrying the one fact that decides the whole question: r1c1 is
-			// an idle GP with the CPU stuck elsewhere, r0c0 is a stalled GP.
-			// The phase FIRST, inside the first line. Splitting it onto a
-			// second line was the whole reason it never arrived: Gecko drops
-			// what it cannot drain, and the second line has been lost on
-			// every single hang in this project — the last capture ends
-			// literally at "HANG r1", mid-word. Whatever survives truncation
-			// is now the part worth having.
-			snprintf(part, sizeof(part), "HANG %s r%uc%u",
-			    gPhase ? gPhase : "-", rdIdle, cmdIdle);
-			GeckoLog(part);
-			snprintf(part, sizeof(part), "s%u", (unsigned)gGameState);
-			GeckoLog(part);
-			snprintf(part, sizeof(part), "H s%u m%d %s v%u r%uc%u",
-			    (unsigned)gGameState,
-			    (int)FrontEndMenuManager.m_bMenuActive,
-			    gxLastPath ? gxLastPath : "-", gxWaitRetrace,
-			    rdIdle, cmdIdle);
-			GeckoLog(part);
-
-			// And to the SD, via TRY-lock. A blocking guard made the first
-			// version silent (main thread wedged holding libfat = the report
-			// never landed), but writing with NO lock was worse: the watchdog
-			// false-fires on slow loads (frames stall while the worker is
-			// mid-read inside libfat), and an unguarded fopen racing that is
-			// heap corruption in a run that was NOT over. Try-lock keeps both
-			// properties: fs wedged → busy → skip (gecko already has the
-			// line, and hang.log-empty-means-fs-wedged stays a signal); GX/GP
-			// hang with fs idle → lock free → the full report lands.
-			snprintf(line, sizeof(line),
-			    "HANG phase=%s tick=%u state=%u menu=%d vsync=%u gx=%s "
-			    "cam=%ux%u gp rd=%u cmd=%u over=%u under=%u brk=%u",
-			    gPhase ? gPhase : "-", (unsigned)gFrameTick,
-			    (unsigned)gGameState, (int)FrontEndMenuManager.m_bMenuActive,
-			    gxWaitRetrace, gxLastPath ? gxLastPath : "-", gxCamW, gxCamH,
-			    rdIdle, cmdIdle, overhi, underlow, brkpt);
-			if(CdStreamFsTryLock()){
-				FILE *hf = fopen("dvd:/hang.log", "a");
-				if(hf){
-					fprintf(hf, "%s\n", line);
-					fclose(hf);
-				}
-				CdStreamFsUnlock();
-			}
-		}
-	}
-	return nil;
-}
 
 static void *framebuffer;
 static GXRModeObj *videoMode;
@@ -347,20 +866,8 @@ psTimer(void)
  * Crash handling. libogc's default panic screen scans the pad and treats a
  * held A as "Reset" and Z as "Reload" — so crashing right after a menu
  * selection instantly wipes the dump. This replacement never reads input, so
- * the red screen stays until the emulator/console is reset, and it also saves
- * the dump into a memory cookie that the next boot appends to dvd:/crash.log
- * (readable from the host by mounting the SD image).
+ * the red screen stays until the emulator/console is reset.
  */
-
-// ponytail: fixed high-MEM1 scratch, same reserved region libogc uses for its
-// panic framebuffer (0xC1700000); survives a DOL reload, not a cold boot.
-struct CrashCookie {
-	u32 magic;
-	u32 length;
-	char text[8184];
-};
-#define CRASH_COOKIE ((CrashCookie*)0xC17C0000)
-#define CRASH_MAGIC  0x43525348 // 'CRSH'
 
 extern "C" {
 void VIDEO_SetFramebuffer(void *fb);
@@ -368,36 +875,6 @@ void __VIClearFramebuffer(void *fb, u32 size, u32 color);
 void __console_init(void *fb, int xstart, int ystart, int xres, int yres, int stride);
 }
 
-// Live host-side log line over Dolphin's emulated USB Gecko (EXI slot B,
-// TCP localhost:55020). Dolphin surfaces no libogc console output any other
-// way. Cheap no-op when no gecko is attached.
-void
-GeckoLog(const char *msg)
-{
-	// "Cheap no-op when no gecko is attached" was wrong, and it cost this
-	// project real time. 1000 retries is 1000 EXI transactions on the MAIN
-	// thread, per line, whenever nobody is draining the other end — and the
-	// reader drops all the time (Dolphin's listener takes one connection, so a
-	// dead `nc` never comes back). Loading logs one line per animation block,
-	// so a dropped reader turns a 40-second load into a twenty-minute one that
-	// looks exactly like a freeze: no output, and the CPU at 5% because the
-	// thread is parked in EXI rather than spinning.
-	//
-	// So: few retries, and give up on the transport entirely once it has
-	// clearly stopped being read. Any successful line brings it back, which is
-	// what makes a mid-run reconnect still work.
-	static int deadStreak;
-	if(deadStreak >= 8)
-		return;
-	// A SHORT write is not a failure: Dolphin partial-sends constantly, which
-	// is why the log has always looked chewed. Only nothing-at-all counts.
-	if(usb_sendbuffer_safe_ex(EXI_CHANNEL_1, msg, (int)strlen(msg), 16) <= 0){
-		deadStreak++;
-		return;
-	}
-	deadStreak = 0;
-	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, "\n", 1, 16);
-}
 
 static void
 panicPrintf(const char *fmt, ...)
@@ -409,17 +886,12 @@ panicPrintf(const char *fmt, ...)
 	va_end(va);
 
 	fputs(line, stdout);
-	usb_sendbuffer_safe_ex(EXI_CHANNEL_1, line, strlen(line), 1000);
-
-	CrashCookie *ck = CRASH_COOKIE;
-	size_t n = strlen(line);
-	if(ck->length + n < sizeof(ck->text)){
-		memcpy(ck->text + ck->length, line, n);
-		ck->length += n;
-		ck->text[ck->length] = '\0';
-	}
 }
 
+// Crash record for Dolphin's MemoryWatcher: the console below is invisible
+// under Dolphin's XFB emulation and eats stdout, so a crash looked like a freeze.
+extern "C" { volatile unsigned gCrashId, gCrashPc, gCrashLr, gCrashSp, gCrashStack[8]; }
+extern "C" { extern volatile const char *gMainWhere; }
 static void
 gcPanic(unsigned exid, PPCContext *ctx)
 {
@@ -428,6 +900,18 @@ gcPanic(unsigned exid, PPCContext *ctx)
 		for(;;)
 			;
 	inPanic = true;
+	gCrashId = exid; gCrashPc = ctx->pc; gCrashLr = ctx->lr; gCrashSp = ctx->gpr[1];
+	{
+		u32 sp = ctx->gpr[1];
+		for(int i = 0; i < 8 && sp && sp != 0xFFFFFFFF && (sp & 3) == 0 && sp >= 0x80000000u && sp < 0x81800000u; i++){
+			u32 *frame = (u32*)sp;
+			gCrashStack[i] = frame[1];
+			sp = frame[0];
+		}
+	}
+	fprintf(stderr, "CRASH exid %u pc %08X lr %08X sp %08X where %s stack %08X %08X %08X %08X %08X %08X\n",
+	    exid, ctx->pc, ctx->lr, ctx->gpr[1], (const char*)gMainWhere,
+	    gCrashStack[0], gCrashStack[1], gCrashStack[2], gCrashStack[3], gCrashStack[4], gCrashStack[5]);
 
 	// Stop the world FIRST. With interrupts live the decrementer keeps
 	// scheduling other threads, and the next game frame flips the
@@ -452,11 +936,6 @@ gcPanic(unsigned exid, PPCContext *ctx)
 	__VIClearFramebuffer(xfb, 640*480*VI_DISPLAY_PIX_SZ, COLOR_MAROON);
 	__console_init(xfb, 48, 48, 640-96, 480-96, 2*640);
 
-	CrashCookie *ck = CRASH_COOKIE;
-	ck->magic = CRASH_MAGIC;
-	ck->length = 0;
-	ck->text[0] = '\0';
-
 	panicPrintf("reVC crash: %s exception\n",
 	    exid < sizeof(names)/sizeof(names[0]) ? names[exid] : "?");
 	for(unsigned i = 0; i < 8; i++)
@@ -474,9 +953,6 @@ gcPanic(unsigned exid, PPCContext *ctx)
 		panicPrintf(" %08X", frame[1]);
 		sp = frame[0];
 	}
-	// No SD write here: fat goes through IPC and sleeps the crashed context,
-	// which hands the CPU back to the game — that's how the red screen was
-	// getting painted over. The cookie flushes to crash.log on the next boot.
 
 	for(;;)
 		;
@@ -494,6 +970,114 @@ gcInstallPanicHandler(void)
 // context, so unlike gcPanic they can write crash.log before stopping the
 // world. The stack walk names the caller (symbolize with addr2line).
 // Non-static: sampman's fail-loud audio path parks through here too.
+
+// Freeze watchdog (B48). The main loop bumps gMainTick every iteration and
+// stamps gMainWhere at the stages that can block (streaming, CD sync, texture
+// load, page-in, voice arm, audio service, present). The VI retrace interrupt
+// watches: three seconds without a tick prints the last checkpoint. B42/B45/
+// B47 stopped both threads at once with the CPU idle — this says where, and
+// if this line itself stops, interrupts are off.
+extern "C" { volatile const char *gMainWhere = "boot"; }
+volatile uint32 gMainTick;
+static uint64 gFtSum;
+static uint32 gFtMax, gFtN;
+static float gMeasuredFps;
+static uint64 gFpsSum;
+static uint32 gFpsN;
+extern "C" { volatile unsigned gVblTick; }
+static void
+gcRetraceWatch(u32 rc)
+{
+	(void)rc;
+	// No printf here: stdio locks in interrupt context. Dolphin's MemoryWatcher
+	// samples these counters from outside the emulated CPU (scratch memwatch.py).
+	gVblTick++;
+}
+
+// One line of heap truth, shared by the death screen, the OOM exit and the
+// in-game tick. str = what CStreaming counts (the budget only governs this),
+// tex = tiled texels resident in MEM1 (dca3 keeps these in VRAM), dl =
+// recorded display lists. Whatever is left of "used" after those three is
+// engine + pools + paths + everything loaded outside the streamer's
+// accounting — the fixed set the budget knob cannot touch.
+// Bytes a CPool holds: its slot array plus one flag byte a slot. What the
+// dca3 pool profile in config.h actually costs, measured instead of assumed.
+template<class T, class U> static size_t
+poolBytes(CPool<T,U> *p)
+{
+	return p ? (size_t)p->GetSize()*(sizeof(U) + 1) : 0;
+}
+
+extern "C" unsigned gIsoRdN, gIsoRdJumps;   // dvdfs.c: sector reads issued, and how many were seeks
+extern "C" void fsDiscStatsPrint(void);
+extern "C" int gcVoiceCensusLine(char *out, int cap);   // sampman_gamecube.cpp (B155)
+extern unsigned gxColorBytes;   // gxraster.cpp
+extern unsigned gNearN, gNearMiss, gBlink;   // Streaming.cpp near set, LOD flips
+extern unsigned gAheadN, gAheadMiss, gAheadDistance;
+extern unsigned gcMemoryMoves, gcMemoryMovedBytes;
+extern "C" void gcStreamClassCensus(unsigned out[6]);   // B88
+extern float gStreamRadius;
+static void
+gcHeapLine(char *out, size_t n)
+{
+	unsigned bigC, bigU, bigF, bigL, bigX; gcBigStats(&bigC, &bigU, &bigF, &bigL, &bigX);
+	unsigned cls[6]; gcStreamClassCensus(cls);
+	struct mallinfo mi = mallinfo();
+	extern unsigned gxTiledBytes;
+	size_t pools = poolBytes(CPools::GetPtrNodePool()) + poolBytes(CPools::GetEntryInfoNodePool()) +
+	    poolBytes(CPools::GetPedPool()) + poolBytes(CPools::GetVehiclePool()) +
+	    poolBytes(CPools::GetBuildingPool()) + poolBytes(CPools::GetTreadablePool()) +
+	    poolBytes(CPools::GetObjectPool()) + poolBytes(CPools::GetDummyPool()) +
+	    poolBytes(CPools::GetAudioScriptObjectPool()) + poolBytes(CPools::GetColModelPool());
+	extern unsigned gxAramBytes, gxWsBytes, gxWsPeak, gxPageIns, gxWsStarved, gxWsForced, gxSpills, gxWsFrameBytes, gxWsFramePeak, gxShareBytes, gxWsShared;
+	extern uint32 gStrEvict;
+	extern unsigned gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps;
+	snprintf(out, n, "heap used %uK free %uK big %u/%uK/%uK/%uK/%u | str %uK (b%u c%u v%u p%u t%u o%u) tex %uK dl %uK col %uK pools %uK | aram %uK share %uK ws %uK/%uK wsframe %uK/%uK pagein %u/%u starve %u/%u spill %u evict %u | snd starved %u pumps %u voices starved %u pumps %u | dvd reads %u seeks %u | near %u/%u r %um blink %u | ft %u/%ums",
+	    (unsigned)(mi.arena - mi.fordblks)/1024, (unsigned)mi.fordblks/1024, bigC, bigU, bigF, bigL, bigX,
+	    (unsigned)(CStreaming::ms_memoryUsed/1024), cls[0]/1024, cls[1]/1024, cls[2]/1024, cls[3]/1024, cls[4]/1024, cls[5]/1024, gxTiledBytes/1024,
+	    (unsigned)(rw::gx::gxDlBytes/1024), (unsigned)(gxColorBytes/1024), (unsigned)(pools/1024),
+	    gxAramBytes/1024, gxShareBytes/1024, gxWsBytes/1024, gxWsPeak/1024, gxWsFrameBytes/1024, gxWsFramePeak/1024, gxPageIns, gxWsShared, gxWsStarved, gxWsForced, gxSpills, (unsigned)gStrEvict, gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps, gIsoRdN, gIsoRdJumps, gNearMiss, gNearN, (unsigned)gStreamRadius, gBlink, gFtN ? (unsigned)(gFtSum/gFtN/1000) : 0, gFtMax/1000);
+	gFtSum = gFtMax = gFtN = 0;
+}
+
+// B97: the census on screen (Graphics > Stats HUD). Refreshed every 30 frames.
+extern "C" { signed char gcStatsHud; }
+extern "C" float gcFramesPerSecond(void) { return gMeasuredFps; }
+extern "C" unsigned gcFrameMsAvg(void) { return gFtN ? (unsigned)(gFtSum/gFtN/1000) : 0; }
+extern "C" unsigned gcFrameMsMax(void) { return gFtMax/1000; }
+extern "C" const char *gcStatsText(void)
+{
+	static char line[520]; static uint32 last;
+	if(line[0] == 0 || gMainTick - last >= 30){ gcHeapLine(line, sizeof(line)); last = gMainTick; }
+	return line;
+}
+
+// librw's must-allocate calls this before it exits: this OSReport line is
+// the only record of what the heap looked like when a required allocation
+// failed.
+extern "C" unsigned gcRasterTiledBytes(void *raster);   // gxraster.cpp
+
+extern "C" void
+gcOomReport(size_t need)
+{
+	char heap[460];
+	gcHeapLine(heap, sizeof(heap));
+	printf("OOM need %uK | %s\n", (unsigned)(need/1024), heap);
+	// The bill behind "tex": every resident dictionary, its refs and the
+	// tiled bytes its textures hold. GetSlot is nil on a free slot.
+	for(int i = 0; i < TXDSTORESIZE; i++){
+		TxdDef *def = CTxdStore::GetSlot(i);
+		if(def == nil || def->texDict == nil)
+			continue;
+		unsigned bytes = 0; int count = 0;
+		FORLIST(lnk, def->texDict->textures){
+			bytes += gcRasterTiledBytes(rw::Texture::fromDict(lnk)->raster);
+			count++;
+		}
+		if(bytes)
+			printf("  txd %-20s refs %d tex %d %uK\n", def->name, def->refCount, count, bytes/1024);
+	}
+}
 void
 gcFatalPark(const char *tag, const char *msg)
 {
@@ -513,31 +1097,8 @@ gcFatalPark(const char *tag, const char *msg)
 		sp = frame[0];
 	}
 
-	struct mallinfo mi = mallinfo();
-	char heap[64];
-	snprintf(heap, sizeof(heap), "heap used %uK free %uK",
-	    (unsigned)mi.uordblks/1024, (unsigned)mi.fordblks/1024);
-
-	// Stamp the build. crash.log lives on the SD card and is appended to
-	// across every boot, so without this the entries from a dozen different
-	// binaries are indistinguishable — and resolving an old stack against the
-	// current ELF produces confident nonsense (lodepng frames inside
-	// CCullZones::Update, in one real case). Match this string against the
-	// build before trusting any address in the stack below it.
-	// The streaming worker may be inside libfat right now — fail-loud parks
-	// fire during normal play. A healthy worker releases the lock in ms, so
-	// wait briefly; if it never comes, skip the file. The maroon screen and
-	// gecko carry the report either way, and writing through contended
-	// libfat is how heap corruption starts — a poor way to report one.
-	if(CdStreamFsTryLock()){
-		FILE *f = fopen("dvd:/crash.log", "a");
-		if(f){
-			fprintf(f, "---- %s ---- build %s %s\n%s%s\nSTACK:%s\n",
-			    tag, __DATE__, __TIME__, msg, heap, stack);
-			fclose(f);
-		}
-		CdStreamFsUnlock();
-	}
+	char heap[460];
+	gcHeapLine(heap, sizeof(heap));
 
 	u32 level;
 	_CPU_ISR_Disable(level);
@@ -548,11 +1109,6 @@ gcFatalPark(const char *tag, const char *msg)
 	__VIClearFramebuffer(xfb, 640*480*VI_DISPLAY_PIX_SZ, COLOR_MAROON);
 	__console_init(xfb, 48, 48, 640-96, 480-96, 2*640);
 	printf("reVC %s\n%s%s\nSTACK:%s\n", tag, msg, heap, stack);
-	{
-		char line[512];
-		snprintf(line, sizeof(line), "reVC %s\n%s%s\nSTACK:%s", tag, msg, heap, stack);
-		GeckoLog(line);
-	}
 	// PARK, and never power off.
 	//
 	// This used to call SYS_ResetSystem(SYS_POWEROFF) so a batch-mode Dolphin
@@ -589,26 +1145,6 @@ exit(int status)
 	gcFatalPark("exit", msg);
 }
 
-// Called once the filesystem is up: persist any dump left by a crash.
-static void
-gcFlushCrashLog(void)
-{
-	CrashCookie *ck = CRASH_COOKIE;
-	if(ck->magic != CRASH_MAGIC || ck->length == 0 ||
-	   ck->length >= sizeof(ck->text))
-		return;
-
-	DVD_FS_GUARD;
-	FILE *f = fopen("dvd:/crash.log", "a");
-	if(f){
-		fputs("---- crash ----\n", f);
-		fwrite(ck->text, 1, ck->length, f);
-		fclose(f);
-		printf("crash.log: saved dump from previous run\n");
-	}
-	ck->magic = 0;
-	ck->length = 0;
-}
 
 // ponytail: returning from main() runs the static destructors, and those free
 // through RenderWare's allocator — null unless RwEngineInit ran, so it faults
@@ -630,6 +1166,7 @@ psInitConsole(void)
 		return;
 
 	VIDEO_Init();
+	VIDEO_SetPostRetraceCallback(gcRetraceWatch);
 
 	videoMode = VIDEO_GetPreferredMode(NULL);
 	framebuffer = MEM_K0_TO_K1(SYS_AllocateFramebuffer(videoMode));
@@ -685,7 +1222,7 @@ psTerminate(void)
 		if(fileSystemIsFat)
 			fatUnmount("dvd");
 		else
-			ISO9660_Unmount("dvd");
+			ISO9660_UnmountDbg("dvd");
 		fileSystemReady = FALSE;
 	}
 }
@@ -728,10 +1265,11 @@ psSelectDevice(void)
 	return TRUE;
 }
 
+extern RwMemoryFunctions memFuncs;   // src/rw/MemoryMgr.cpp
 RwMemoryFunctions *
 psGetMemoryFunctions(void)
 {
-	return nil;
+	return &memFuncs;   // B80: nil left librw on plain malloc; the B79 big-block routing lives in MemoryMgr
 }
 
 RwBool
@@ -805,7 +1343,7 @@ psInstallFileSystem(void)
 	if(fileSystemIsFat)
 		fatUnmount("dvd");
 	else
-		ISO9660_Unmount("dvd");
+		ISO9660_UnmountDbg("dvd");
 	fileSystemReady = FALSE;
 	return FALSE;
 }
@@ -1081,9 +1619,121 @@ showPortCredit(void)
 	CFont::SetDropShadowPosition(0);
 }
 
+#if defined(HW_RVL) && !defined(REVC_WII_MEM2)
+// Only when built with -DREVC_WII_MEM2=OFF: the Wii release keeps libogc's
+// MEM2 malloc. For that GameCube-faithful mode:
+// MEM2 is forbidden: this is a GameCube game and the GameCube has no MEM2.
+// libogc's Wii sbrk.o defines MALLOC_MEM2 weakly with value 1, which makes
+// _sbrk_r serve malloc out of Arena2 (0x90002000..0x933E0000, ~52MB) once MEM1
+// runs dry — so the Wii dev DOL was quietly playing on ~68MB, four times the
+// target's heap, and every "it works on Wii" verdict was measured against a
+// machine the target isn't. The GameCube libogc has no MALLOC_MEM2 at all and
+// its _sbrk_r is Arena1-only. This strong definition overrides the weak one so
+// the Wii DOL fails exactly where a GameCube fails.
+// Verify: powerpc-eabi-nm build/wii/src/reVC.elf | grep MALLOC_MEM2
+//   'B' = this definition (clamped)   'V' = libogc's weak default (MEM2 live)
+extern "C" u32 MALLOC_MEM2 = 0;
+#endif
+
+static bool autoCarTestEnabled, autoCarProbed;
+bool gcAutoSkipCutscenes;   // autocar.txt runs are hands-free: CutsceneMgr ends each scene after 1 s
+static CVehicle *autoCarTestVehicle;
+static void
+autoCarTestTick(void)
+{
+	if(!autoCarProbed){
+		autoCarProbed = true;
+		FILE *f = fopen("dvd:/autocar.txt", "r");
+		if(f){ fclose(f); autoCarTestEnabled = gcAutoSkipCutscenes = true; printf("autocar.txt: traffic-AI drive enabled, cutscenes skipped\n"); }
+	}
+	if(!autoCarTestEnabled) return;
+	uint32 now = CTimer::GetTimeInMillisecondsPauseMode();
+	// Every 2 min: pause menu → Gamepad Settings for 3 s → back to the game,
+	// the page whose native pad load was where b179b caught the heap
+	// corruption. The page logs 'FRONTEND3D: ...'.
+	static uint32 padAt; static int padStep;
+	if(padAt == 0) padAt = now;
+	if(padStep == 0 && now - padAt > 120000 && !FrontEndMenuManager.m_bMenuActive &&
+	   !CCutsceneMgr::IsRunning() && !CCutsceneMgr::IsCutsceneProcessing()){
+		FrontEndMenuManager.RequestFrontEndStartUp(); padStep = 1; padAt = now;
+	}else if(padStep == 1 && now - padAt > 1500 && FrontEndMenuManager.m_bMenuActive){
+		printf("PADTEST open Gamepad Settings\n");
+		FrontEndMenuManager.SwitchToNewScreen(MENUPAGE_CONTROLLER_SETTINGS); padStep = 2; padAt = now;
+	}else if(padStep == 2 && now - padAt > 3000){
+		FrontEndMenuManager.RequestFrontEndShutDown(); padStep = 0; padAt = now;
+	}
+	if(padStep) return;
+	if(now < 45000 || CCutsceneMgr::IsCutsceneProcessing() || CCutsceneMgr::IsRunning() ||
+	   TheCamera.m_WideScreenOn || CPad::GetPad(0)->ArePlayerControlsDisabled()){
+		autoCarTestVehicle = nil;
+		return;
+	}
+	CPlayerPed *player = FindPlayerPed();
+	if(player == nil) return;
+	if(player->m_pWanted && player->m_pWanted->GetWantedLevel() != 0)
+		player->SetWantedLevel(0);
+	if(player->m_fHealth <= 0.0f){
+		autoCarTestVehicle = nil;
+		return;
+	}
+	CVehicle *car = player->bInVehicle ? player->m_pMyVehicle : nil;
+	if(car == nil){
+		float best = 150.0f*150.0f;
+		for(int i = 0; i < CPools::GetVehiclePool()->GetSize(); i++){
+			CVehicle *candidate = CPools::GetVehiclePool()->GetSlot(i);
+			if(candidate == nil || !candidate->IsCar() || candidate->IsBike() ||
+			   candidate->VehicleCreatedBy != RANDOM_VEHICLE ||
+			   candidate->pDriver == nil || candidate->m_fHealth <= 250.0f)
+				continue;
+			bool seat = false;
+			for(int s = 0; s < candidate->m_nNumMaxPassengers; s++)
+				seat |= candidate->pPassengers[s] == nil;
+			if(!seat) continue;
+			float d = (candidate->GetPosition() - player->GetPosition()).MagnitudeSqr();
+			if(d < best){ best = d; car = candidate; }
+		}
+		if(car == nil){
+			static uint32 lastWait;
+			if(now - lastWait >= 5000){
+				lastWait = now;
+				printf("AUTOCAR waiting x=%.1f y=%.1f vehicles=%d\n",
+				    player->GetPosition().x, player->GetPosition().y,
+				    CPools::GetVehiclePool()->GetNoOfUsedSpaces());
+			}
+			return;
+		}
+		player->SetObjective(OBJECTIVE_ENTER_CAR_AS_PASSENGER, car);
+		player->WarpPedIntoCar(car);
+	}
+	if(car->m_fHealth <= 0.0f) return;
+	if(car != autoCarTestVehicle){
+		autoCarTestVehicle = car;
+		CCarCtrl::JoinCarWithRoadSystem(car);
+		car->AutoPilot.m_nCarMission = MISSION_CRUISE;
+		car->AutoPilot.m_nTempAction = TEMPACT_NONE;
+		car->AutoPilot.m_nDrivingStyle = DRIVINGSTYLE_STOP_FOR_CARS;
+		car->AutoPilot.m_nAntiReverseTimer = CTimer::GetTimeInMilliseconds();
+		if(car->AutoPilot.m_nCruiseSpeed == 0)
+			car->AutoPilot.m_nCruiseSpeed = 12;
+		car->AutoPilot.m_fMaxTrafficSpeed = car->AutoPilot.m_nCruiseSpeed;
+		car->bEngineOn = true;
+		car->SetStatus(STATUS_PHYSICS);
+	}
+	static uint32 lastLog;
+	if(now - lastLog > 5000){
+		lastLog = now;
+		printf("AUTOCAR t=%u x=%.1f y=%.1f speed=%.2f mission=%d temp=%d status=%d wanted=%d\n",
+		    (unsigned)now, car->GetPosition().x, car->GetPosition().y,
+		    car->m_vecMoveSpeed.Magnitude(), (int)car->AutoPilot.m_nCarMission,
+		    (int)car->AutoPilot.m_nTempAction, (int)car->GetStatus(),
+		    player->m_pWanted ? (int)player->m_pWanted->GetWantedLevel() : -1);
+	}
+}
+
 int
 main(int, char *[])
 {
+	gMainLwp = LWP_GetSelf();
 	// Mirror stdout to OSReport so boot output is readable in an emulator log
 	// (and over USB Gecko on hardware), not just on the framebuffer console.
 	SYS_STDIO_Report(TRUE);
@@ -1092,84 +1742,21 @@ main(int, char *[])
 
 	psInitConsole();
 	PAD_Init();
-	printf("reVC GameCube booting...\n");
+	gcBigPrime();   // B127: three 2MB streaming chunks before anything else touches the heap
 
-	// The target is a GameCube: 24MB of MEM1 and nothing else. On Wii (used
-	// only as a boot vehicle, since Dolphin emulates its SD) MEM2 exists but
-	// is deliberately left alone, so the budget stays GameCube-sized.
-	{
-		size_t arena1 = (size_t)SYS_GetArena1Size();
-		printf("mem: MEM1 arena %u KiB (%u MiB budget)\n",
-		    (unsigned)(arena1/1024), (unsigned)(arena1/(1024*1024)));
-#ifdef HW_RVL
-		printf("mem: MEM2 present but unused (GameCube budget enforced)\n");
-#endif
-	}
 
 	if(!psInstallFileSystem()){
 		gcFatalPark("FILESYSTEM", "SD/USB/DVD mount failed\n");
 	}
-	printf("reVC GameCube: filesystem mounted (%s)\n", fileSystemIsFat ? "SD" : "DVD");
-	gcFlushCrashLog();
 
-	// Boot self-check: the game opens assets with Windows-style backslash
-	// paths, so verify both the raw path and the normalized one before the
-	// engine starts and a failure turns into an unrelated crash. Results go to
-	// the card as well as the console, since emulator logs are not reliable.
-	{
-		DVD_FS_GUARD;
-		FILE *log = fileSystemIsFat ? fopen("dvd:/revc_boot.log", "w") : nil;
-		#define SELFTEST_LOG(...) do { \
-			printf(__VA_ARGS__); \
-			if(log) fprintf(log, __VA_ARGS__); \
-		} while(0)
-
-		char cwd[256];
-		SELFTEST_LOG("selftest: cwd '%s'\n",
-		    getcwd(cwd, sizeof(cwd)) ? cwd : "(getcwd failed)");
-
-		bool ok = false;
-
-		// List the card root: distinguishes "wrong path" from "empty/absent card".
-		DIR *d = opendir("dvd:/");
-		if(d == nil)
-			SELFTEST_LOG("selftest: opendir root -> FAIL\n");
-		else{
-			int n = 0;
-			struct dirent *e;
-			while((e = readdir(d)) != nil && n < 6){
-				SELFTEST_LOG("selftest: root[%d] '%s'\n", n, e->d_name);
-				n++;
-			}
-			if(n == 0)
-				SELFTEST_LOG("selftest: root is EMPTY\n");
-			closedir(d);
-		}
-
-		DVD_FS_GUARD;
-		FILE *f = fopen("dvd:/models/coll/peds.col", "rb");
-		SELFTEST_LOG("selftest: raw open -> %s\n", f ? "OK" : "FAIL");
-		if(f) fclose(f);
-
-		char *norm = casepath("models\\coll\\peds.col");
-		SELFTEST_LOG("selftest: normalized '%s'\n", norm ? norm : "(null)");
-		if(norm){
-			FILE *g = fopen(norm, "rb");
-			SELFTEST_LOG("selftest: backslash open -> %s\n", g ? "OK" : "FAIL");
-			if(g){ ok = true; fclose(g); }
-			free(norm);
-		}
-
-		#undef SELFTEST_LOG
-		if(log) fclose(log);
-
-		if(!ok)
-			gcFatalPark("ASSETS", "models/coll/peds.col is not readable\n");
-	}
 
 	if(RsEventHandler(rsINITIALIZE, nil) == rsEVENTERROR){
 		gcFatalPark("INITIALIZE", "rsINITIALIZE failed\n");
 	}
+	// B136: no re-prime. b135 starved at the first LoadLevel malloc: once the
+	// arena had grown, the GS_INIT_ONCE re-prime got real 2MB chunks and the
+	// boot (B109) had nowhere to live. The boot keeps B110's rule: empty
+	// chunks other than chunk 0 go back while gBigKeep == 0.
 
 	ControlsManager.MakeControllerActionsBlank();
 	ControlsManager.InitDefaultControlConfiguration();
@@ -1181,6 +1768,18 @@ main(int, char *[])
 	// had its write half. The file is gta_vc.set, which is the OPTIONS file
 	// and is separate from the story slots (GTAVCsf*.b).
 	FrontEndMenuManager.LoadSettings();
+	{
+		FILE *f = fopen("dvd:/benchmark.txt", "r");
+		if(f){
+			int fps = 0;
+			if(fscanf(f, "%d", &fps) == 1 && (fps == 30 || fps == 60)){
+				FrontEndMenuManager.m_PrefsFrameLimiter = fps == 30 ?
+				    CMenuManager::FRAMELIMIT_30 : CMenuManager::FRAMELIMIT_60;
+				printf("BENCHMARK cap=%d\n", fps);
+			}
+			fclose(f);
+		}
+	}
 
 	// ponytail: RsRwInitialize only reads this as displayID; the console has none.
 	if(RsEventHandler(rsRWINITIALIZE, nil) == rsEVENTERROR){
@@ -1204,22 +1803,35 @@ main(int, char *[])
 	CPad::GetPad(0)->Clear(true);
 	CPad::GetPad(1)->Clear(true);
 
-	// Lowest priority: it must never take time from the game, and it only has
-	// to run when the game has stopped running.
-	if(LWP_CreateThread(&watchdogThread, watchdogMain, nil, nil, 16*1024, 127) != 0)
-		gcFatalPark("WATCHDOG", "thread creation failed\n");
 
+	{ FILE *hc = fopen("dvd:/heapcheck.txt", "r"); if(hc){ fclose(hc); gHeapCheckOn = 1; printf("heapcheck.txt: heap walk every frame and conversion\n"); } }   // DIAG B179
 	while(SYS_MainLoop() && !RsGlobal.quit){
+		u64 frameStart = gettime();
+		gMainTick++;
+		gcHeapCheck(0x4652414D, gMainTick);   // DIAG B179 'FRAM'
+		{
+			static u64 tPrev;
+			u64 t = gettime();
+			if(tPrev){
+				u32 us = ticks_to_microsecs(t - tPrev);
+				gFtSum += us;
+				if(us > gFtMax) gFtMax = us;
+				gFtN++;
+				gFpsSum += us;
+				gFpsN++;
+				if(gFpsSum >= 500000){
+					gMeasuredFps = 1000000.0f * gFpsN / gFpsSum;
+					gFpsSum = 0;
+					gFpsN = 0;
+				}
+			}
+			tPrev = t;
+		}
 		// Named, because it sits between the frame's last marker and "loop":
 		// a stall in here used to report as "endofframe" and send the search
 		// into the present path.
-		gPhase = "handleexit";
 		HandleExit();
 
-		// gFrameTick is bumped in DoRWStuffEndOfFrame now, not here: frames
-		// presented is the honest measure, and the menu renders two of them
-		// from outside this loop.
-		gPhase = "loop";
 
 		// The GC path always waited for the retrace inside gx::showRaster;
 		// m_PrefsVsync and m_PrefsFrameLimiter were read only by the
@@ -1251,8 +1863,6 @@ main(int, char *[])
 				// 5s card writes are the documented main-thread killer and
 				// they starve the vorbis decode thread the same way. Only
 				// measurement sessions (dvd:/autolog.txt) may write.
-				extern bool gLogToSd;
-				rw::gx::gxOscLogEnable = gLogToSd;
 			}
 		}
 		extern unsigned gxWaitRetrace;
@@ -1309,29 +1919,12 @@ main(int, char *[])
 					printf("FMV: image has no movies; continuing to splash\n");
 			}
 			printf("GS_INIT_ONCE: CGame::InitialiseOnceAfterRW\n");
+			// B136: re-prime removed (see main)
 			LoadingScreen(nil, nil, "loadsc0");
 			if(!CGame::InitialiseOnceAfterRW()){
 				gcFatalPark("GAME-INIT", "InitialiseOnceAfterRW failed\n");
 			}
-			if(!CPad::ValidateGameCubeCheats())
-				gcFatalPark("CHEATS", "54-code dispatcher self-test failed\n");
-			printf("CHEATS: 54/54 dispatcher self-test passed\n");
-			// Debug: dvd:/autostart.txt skips the frontend so crashes in world
-			// load reproduce with no controller input.
-			DVD_FS_GUARD;
-			FILE *as = fopen("dvd:/autostart.txt", "r");
-			if(as){
-				fclose(as);
-				printf("autostart.txt: skipping frontend\n");
-				gGameState = GS_INIT_PLAYING_GAME;
-			}else
-				gGameState = GS_INIT_FRONTEND;
-			FILE *ac = fopen("dvd:/autocar.txt", "r");
-			if(ac){
-				fclose(ac);
-				autoCarTestEnabled = true;
-				printf("autocar.txt: traffic-AI traversal enabled\n");
-			}
+			gGameState = GS_INIT_FRONTEND;
 			break;
 		}
 
@@ -1370,16 +1963,56 @@ main(int, char *[])
 			break;
 
 		case GS_INIT_PLAYING_GAME:
+			{ extern bool gIntroHold; gIntroHold = true; }   // B99
+			// B113 (user): silent from the first pixel of the loading bar. The
+			// frontend track was still playing into the load, and
+			// CGame::Initialise ends by restoring both fades to 127.
+			DMAudio.SetEffectsFadeVol(0);
+			DMAudio.SetMusicFadeVol(0);
 			printf("GS_INIT_PLAYING_GAME\n");
 			InitialiseGame();
+			DMAudio.SetEffectsFadeVol(0);
+			DMAudio.SetMusicFadeVol(0);
 			FrontEndMenuManager.m_bGameNotLoaded = false;
 			gGameState = GS_PLAYING_GAME;
-			BootLog("entering game loop");
 			break;
 
 		case GS_PLAYING_GAME:
+			gcBootLevelLoaded();   // B151: normally already done at the end of LoadLevel; harmless twice
+			gMainWhere = "idle";
 			RsEventHandler(rsIDLE, (void *)TRUE);
 			autoCarTestTick();
+			gMainWhere = "post-idle";
+			{
+				// One heap line every ten seconds: the log's memory instrument.
+				static u32 censusTick;
+				censusTick++;
+				if(censusTick % 300 == 0){
+					u32 frames = gFtN;   // gcHeapLine resets the frame counters
+					char heap[460];
+					gcHeapLine(heap, sizeof(heap));
+					printf("CENSUS %s\n", heap);
+					fsDiscStatsPrint();
+					if(censusTick % 1800 == 0) gcHeapCensusDump("periodic");   // DIAG b176: top live sites once a minute
+					printf("STREAM ahead %u/%u reach %um compact %u moves %uK\n",
+					       gAheadMiss, gAheadN, gAheadDistance, gcMemoryMoves, gcMemoryMovedBytes/1024);
+					{ char prof[420]; gcProfLine(prof, sizeof(prof), frames); printf("PROF %u frames avg/max ms: %s\n", (unsigned)frames, prof); }   // B155
+					if(censusTick % 1800 == 0) gcHeapCensusDump("play");   // B155: every minute
+					// The tier's boot-time lines go to the screen console; say once here.
+					static bool saidTier;
+					if(!saidTier){
+						saidTier = true;
+						extern unsigned gxAramBytes;
+						printf("ARAM tier: %s\n", gxAramBytes ? "armed" : "NOT armed");
+					}
+				}
+				// B155: what the mixer plays under a cutscene (user: city noise under Marco's Bistro).
+				if(censusTick % 150 == 0 && CCutsceneMgr::IsRunning()){
+					char v[360];
+					gcVoiceCensusLine(v, sizeof(v));
+					printf("CUTSFX t=%u%s\n", (unsigned)CTimer::GetTimeInMilliseconds(), v);
+				}
+			}
 			// Service the restart request. Idle() returns before ANY rendering
 			// while one is pending (main.cpp, right after DMAudio.Service) and
 			// expects the platform's game loop to act on it - win.cpp,
@@ -1400,6 +2033,14 @@ main(int, char *[])
 					FrontEndMenuManager.m_bWantToLoad = true;
 				}
 				printf("restart requested: reinitialising game\n");
+				gcHeapCensusDump("restart");   // B155: the fixed set as the frontend leaves it
+				// B102: silent and black from here. The menu path muted in
+				// DoSettingsBeforeStartingAGame; autostart and Load Game did
+				// not, and the 12 s hotel LOAD_SCENE inside the reinit runs
+				// before Idle's hold can act.
+				{ extern bool gIntroHold; gIntroHold = true; }
+				DMAudio.SetEffectsFadeVol(0);
+				DMAudio.SetMusicFadeVol(0);
 				CPad::ResetCheats();
 				CPad::StopPadsShaking();
 				DMAudio.ChangeMusicMode(MUSICMODE_DISABLE);
@@ -1440,6 +2081,7 @@ main(int, char *[])
 				usleep(ticks_to_microsecs(tNext - now));
 			tNext = (tNext > now ? tNext : now) + period;
 		}
+		gcFrameSample(frameStart);
 	}
 
 	if(gGameState == GS_PLAYING_GAME)
