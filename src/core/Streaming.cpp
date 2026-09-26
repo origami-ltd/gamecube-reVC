@@ -149,9 +149,20 @@ static int gEvictTrace = 300;   // B58: the first evictions of the run, named
 static void
 TraceEvict(int32 id)
 {
-	if(gEvictTrace <= 0 || id < 0 || id >= MODELINFOSIZE) return;
-	gEvictTrace--;
-	printf("EVICT %d %s\n", id, CModelInfo::GetModelInfo(id)->GetModelName());
+	if(id < 0 || id >= MODELINFOSIZE) return;
+	if(gEvictTrace > 0){
+		gEvictTrace--;
+		printf("EVICT %d %s\n", id, CModelInfo::GetModelInfo(id)->GetModelName());
+		return;
+	}
+	// b208 "pisca e volta": after the first 300, name only what was drawn
+	// (or scanned) near the camera in the last 60 frames — a blink candidate.
+	static int nearTrace = 3000;
+	uint32 d = CStreaming::ModelDistNow(id);
+	if(d < 300 && nearTrace > 0){
+		nearTrace--;
+		printf("EVICT-NEAR %d %s %um f=%u\n", id, CModelInfo::GetModelInfo(id)->GetModelName(), (unsigned)d, (unsigned)CTimer::GetFrameCounter());
+	}
 }
 
 static bool
@@ -2405,12 +2416,13 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 	// fallback, and the stock pass below may still take one when nothing
 	// else is left (B114).
 	// b207: with every detail model just loaded, the stock pass below took
-	// LOD shells in LRU order, drawn or not, while the detail model they
-	// stand in for was deferred at the heap floor — the building vanished.
-	// Now a LOD goes only when nothing drew it for 60 frames.
+	// streamed LOD shells in LRU order, a near one standing in for a deferred
+	// detail model among them — the building vanished. b208 kept every LOD
+	// (ScanBigBuildingList stamps the whole level each frame) and the detail
+	// set blinked for it. LODs go after detail models, farthest first.
 	{
 		int bestId = -1, lodId = -1;
-		uint32 bestDist = 0;
+		uint32 bestDist = 0, lodDist = 0;
 		for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
 			if(si->m_flags & excludeMask)
 				continue;
@@ -2422,11 +2434,11 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 			CBaseModelInfo *model = CModelInfo::GetModelInfo(streamId);
 			if(model->GetNumRefs() != 0)
 				continue;
+			uint32 d = ModelDistNow(streamId);
 			if(model->IsSimple() && ((CSimpleModelInfo*)model)->m_isBigBuilding){
-				if(lodId < 0 && ModelDistNow(streamId) == 65535) lodId = streamId;
+				if(lodId < 0 || d > lodDist){ lodId = streamId; lodDist = d; }
 				continue;
 			}
-			uint32 d = ModelDistNow(streamId);
 			if(bestId < 0 || d > bestDist){ bestId = streamId; bestDist = d; }
 		}
 		if(bestId < 0) bestId = lodId;
@@ -2446,9 +2458,6 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 #ifdef GTA_OGC
 			if(!ignoreRecent && LoadedRecently(streamId))
 				continue;
-			if(ModelDistNow(streamId) != 65535 && CModelInfo::GetModelInfo(streamId)->IsSimple() &&
-			   ((CSimpleModelInfo*)CModelInfo::GetModelInfo(streamId))->m_isBigBuilding)
-				continue;   // a LOD on screen (see above)
 #endif
 			if (CModelInfo::GetModelInfo(streamId)->GetNumRefs() == 0) {
 				TraceEvict(streamId);
