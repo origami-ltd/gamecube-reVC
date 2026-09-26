@@ -36,6 +36,11 @@ static int gMaxDim = 512;
 // both axes. Dimensions round up to the 8-texel tile so w == tw and the tiler
 // never pads (the runtime builds its TexObj from the raster's real w/h).
 static int gShrinkH = 0, gShrinkPct = 100;
+// --adaptive S: power-of-two reduction only where it cannot be seen (below).
+static float gAdaptive = 0.0f;
+static bool gAdaptReport;   // TXDCONV_ADAPT_REPORT=1: one line per candidate texture
+static int gAdaptHalved, gAdaptKept;
+static float gLastMeanSsim;   // mean over all windows of the last luma score, for the report
 
 // ---- the same tiling the console backend uses, byte for byte ---------------
 static inline void
@@ -299,6 +304,95 @@ resampleArea(u8 *src, int w, int h, int nw, int nh)
 	return dst;
 }
 
+// Bilinear magnification of src (sw x sh) to dw x dh with texel centres
+// aligned and wrapping edges: what the GP does when the smaller texture is
+// drawn over the same UVs with GX_REPEAT and LINEAR.
+static u8*
+magnifyBilinear(const u8 *src, int sw, int sh, int dw, int dh)
+{
+	u8 *dst = (u8*)malloc((size_t)dw*dh*4);
+	for(int y = 0; y < dh; y++){
+		float fy = (y + 0.5f)*sh/dh - 0.5f;
+		int y0 = (int)floorf(fy); float ty = fy - y0;
+		int ya = ((y0 % sh) + sh) % sh, yb = (((y0 + 1) % sh) + sh) % sh;
+		for(int x = 0; x < dw; x++){
+			float fx = (x + 0.5f)*sw/dw - 0.5f;
+			int x0 = (int)floorf(fx); float tx = fx - x0;
+			int xa = ((x0 % sw) + sw) % sw, xb = (((x0 + 1) % sw) + sw) % sw;
+			const u8 *a = src + ((size_t)ya*sw + xa)*4, *b = src + ((size_t)ya*sw + xb)*4;
+			const u8 *c = src + ((size_t)yb*sw + xa)*4, *d = src + ((size_t)yb*sw + xb)*4;
+			for(int k = 0; k < 4; k++){
+				float v = (a[k]*(1-tx) + b[k]*tx)*(1-ty) + (c[k]*(1-tx) + d[k]*tx)*ty;
+				dst[((size_t)y*dw + x)*4 + k] = (u8)(v + 0.5f);
+			}
+		}
+	}
+	return dst;
+}
+
+// SSIM over 8x8 windows (stride 4) of alpha-weighted luma (chan -1) or of
+// alpha (chan 3). Returns the mean of the worst tenth of the windows, not the
+// overall mean: a sign's lettering blurred inside a plain wall must fail even
+// though most of the wall is untouched.
+static float
+ssimWorst(const u8 *a, const u8 *b, int w, int h, int chan)
+{
+	const float C1 = 6.5025f, C2 = 58.5225f;   // (0.01*255)^2, (0.03*255)^2
+	std::vector<float> win;
+	for(int by = 0; by + 8 <= h; by += 4)
+	for(int bx = 0; bx + 8 <= w; bx += 4){
+		float xa[64], xb[64], ma = 0, mb = 0;
+		for(int i = 0; i < 64; i++){
+			const u8 *pa = a + ((size_t)(by + i/8)*w + bx + i%8)*4;
+			const u8 *pb = b + ((size_t)(by + i/8)*w + bx + i%8)*4;
+			xa[i] = chan < 0 ? (0.299f*pa[0] + 0.587f*pa[1] + 0.114f*pa[2])*pa[3]/255.0f : pa[chan];
+			xb[i] = chan < 0 ? (0.299f*pb[0] + 0.587f*pb[1] + 0.114f*pb[2])*pb[3]/255.0f : pb[chan];
+			ma += xa[i]; mb += xb[i];
+		}
+		ma /= 64; mb /= 64;
+		float va = 0, vb = 0, cov = 0;
+		for(int i = 0; i < 64; i++){
+			va += (xa[i]-ma)*(xa[i]-ma); vb += (xb[i]-mb)*(xb[i]-mb); cov += (xa[i]-ma)*(xb[i]-mb);
+		}
+		va /= 63; vb /= 63; cov /= 63;
+		win.push_back(((2*ma*mb + C1)*(2*cov + C2)) / ((ma*ma + mb*mb + C1)*(va + vb + C2)));
+	}
+	if(win.empty()) return 1.0f;
+	if(chan < 0){ double m = 0; for(float v : win) m += v; gLastMeanSsim = (float)(m/win.size()); }
+	std::sort(win.begin(), win.end());
+	size_t n = win.size()/10 > 0 ? win.size()/10 : 1;
+	double sum = 0;
+	for(size_t i = 0; i < n; i++) sum += win[i];
+	return (float)(sum/n);
+}
+
+// How the texture would look at 1/2^step size: area-averaged down, through
+// CMPR when that is its format, magnified back. Scored against the original.
+static float
+reducedScore(const u8 *rgba, int w, int h, int step, bool cmpr, bool alpha)
+{
+	int nw = w >> step, nh = h >> step;
+	u8 *copy = (u8*)malloc((size_t)w*h*4);
+	memcpy(copy, rgba, (size_t)w*h*4);
+	u8 *small = resampleArea(copy, w, h, nw, nh);
+	if(cmpr){
+		u8 *tiled = (u8*)malloc((size_t)nw*nh/2);
+		tileCMPR(tiled, small, nw, nh, nw, nh);
+		free(small);
+		small = decodeNative(tiled, nw, nh, GXFMT_CMPR);
+		free(tiled);
+	}
+	u8 *big = magnifyBilinear(small, nw, nh, w, h);
+	free(small);
+	float s = ssimWorst(rgba, big, w, h, -1);
+	if(alpha){
+		float sa = ssimWorst(rgba, big, w, h, 3);
+		if(sa < s) s = sa;
+	}
+	free(big);
+	return s;
+}
+
 // Takes an Image rather than a Texture so the same tiling serves both inputs:
 // a dictionary read off disc, and a loose TGA. Destroys img.
 static bool
@@ -384,6 +478,32 @@ convertImage(Image *img, const char *name, const char *mask,
 		}
 	}
 
+	// --adaptive S (user, 09-26: "the largest reduction that is a multiple and
+	// does not look reduced"). Textures of 256 texels and up go to half — a
+	// power of two, which GX_REPEAT needs on hardware — unless the half size,
+	// through CMPR and magnified back as the GP draws it, scores a mean SSIM
+	// below S. What falls under S is thin structure that halving erases: mesh
+	// fences, lettering, grilles, rugs. At 0.70 that keeps 296 of 3947 and
+	// saves 51% of the texel bytes (55% if every one were halved). 128 and
+	// below are untouched.
+	if(gAdaptive > 0.0f && (w >= 256 || h >= 256) && w >= 64 && h >= 64 &&
+	   !(w & (w-1)) && !(h & (h-1))){
+		bool cmpr = !gradientAlpha;
+		bool hasAlpha = false;
+		for(size_t i = 0; i < (size_t)w*h && !hasAlpha; i++) hasAlpha = rgba[i*4+3] < 250;
+		float worst = reducedScore(rgba, w, h, 1, cmpr, hasAlpha);
+		float mean = gLastMeanSsim;
+		bool halve = mean >= gAdaptive;
+		if(gAdaptReport)
+			fprintf(stderr, "ADAPT %s %dx%d mean %.4f worst %.4f -> %s\n", name, w, h, mean, worst, halve ? "half" : "full");
+		if(halve){
+			rgba = resampleArea(rgba, w, h, w/2, h/2);
+			w /= 2; h /= 2;
+			gAdaptHalved++;
+		}else
+			gAdaptKept++;
+	}
+
 	// CMPR is 4bpp and fine for anything without a gradient alpha ramp;
 	// RGB5A3 is 16bpp and keeps the ramp. Full resolution either way.
 	// Small textures stay RGB5A3 outright: at 64px and below CMPR saves a
@@ -417,33 +537,7 @@ convertImage(Image *img, const char *name, const char *mask,
 	else if(gxFmt == GXFMT_IA4)  tileIA4(out->tiled, rgba, w, h, tw, th);
 	else                         tileRGB5A3(out->tiled, rgba, w, h, tw, th);
 
-	// Mip chain for power-of-two CMPR, down to the 8x8 tile. The PC builds
-	// these at load (filter 6, LINEARMIPLINEAR, on 99% of its textures) and
-	// draws with them; the console pages into MEM1 only the levels a draw
-	// needs (gxraster.cpp gxPageIn), so a wall 100 m away costs its 16x16
-	// level in the window rather than its 256x256 one. Level 0 stays as
-	// converted above; the smaller levels are area-averaged like the PC's.
-	out->levels = 1;
-	if(gxFmt == GXFMT_CMPR && tw == w && th == h && w >= 16 && h >= 16 &&
-	   !(w & (w-1)) && !(h & (h-1))){
-		std::vector<u8> chain(out->tiled, out->tiled + out->size);
-		u8 *lv = (u8*)malloc((size_t)w*h*4);
-		memcpy(lv, rgba, (size_t)w*h*4);
-		int lw = w, lh = h;
-		while(lw >= 16 && lh >= 16){
-			lv = resampleArea(lv, lw, lh, lw/2, lh/2);
-			lw /= 2; lh /= 2;
-			size_t at = chain.size();
-			chain.resize(at + (size_t)lw*lh/2);
-			tileCMPR(chain.data() + at, lv, lw, lh, lw, lh);
-			out->levels++;
-		}
-		free(lv);
-		free(out->tiled);
-		out->size = (uint32)chain.size();
-		out->tiled = (u8*)malloc(out->size);
-		memcpy(out->tiled, chain.data(), out->size);
-	}
+	out->levels = 1;   // mip chains blurred everything at glancing angles without anisotropy (b192-b194)
 
 	out->tw = tw; out->th = th;
 	out->gxFmt = gxFmt;
@@ -796,6 +890,10 @@ main(int argc, char **argv)
 		if(strcmp(argv[argi], "--max-dim") == 0 && argi+1 < argc){
 			gMaxDim = atoi(argv[argi+1]);
 			if(gMaxDim < 8) gMaxDim = 8;
+			argi += 2;
+		}else if(strcmp(argv[argi], "--adaptive") == 0 && argi+1 < argc){
+			gAdaptive = (float)atof(argv[argi+1]);
+			gAdaptReport = getenv("TXDCONV_ADAPT_REPORT") != nil;
 			argi += 2;
 		}else if(strcmp(argv[argi], "--shrink") == 0 && argi+2 < argc){
 			gShrinkH = atoi(argv[argi+1]);

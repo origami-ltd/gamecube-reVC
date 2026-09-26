@@ -58,10 +58,13 @@ without them the PC movies are encoded during the build.
 The build converts every texture to GX-native formats, repacks `gta3.img`
 with native map, vehicle and pad geometry, converts the audio (IMA ADPCM
 streams and sample bank, Vorbis radio) and the movies (Theora), laid out on
-a 1.46 GB mini-DVD image. Textures keep their full size; only lossless
-steps shrink them: the PC's DXT1 blocks are moved to CMPR bit for bit,
-16-bit textures with few colours become CI8 palettes, and textures shared
-between dictionaries are stored once.
+a 1.46 GB mini-DVD image. Textures of 256 texels and up are halved (a power
+of two, as the GX hardware needs for repeating textures) unless the half
+size, magnified back the way the GPU draws it, scores a mean SSIM under
+0.70 — thin structure such as mesh fences, lettering and grilles stays at
+full size. Everything else is lossless: the PC's DXT1 blocks move to CMPR
+bit for bit, 16-bit textures with few colours become CI8 palettes, and
+textures shared between dictionaries are stored once.
 
 ### Docker (recommended)
 

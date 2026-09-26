@@ -74,6 +74,8 @@ def main():
                     help='cap the largest texture axis, passed to txdconv')
     ap.add_argument('--shrink', nargs=2, metavar=('H', 'PCT'),
                     help='resample textures taller than H to PCT%%, passed to txdconv')
+    ap.add_argument('--adaptive', type=float,
+                    help='halve 256+ textures unless the mean SSIM falls under this, passed to txdconv')
     ap.add_argument('in_img'); ap.add_argument('in_dir')
     ap.add_argument('out_img'); ap.add_argument('out_dir')
     ap.add_argument('txdconv')
@@ -117,6 +119,8 @@ def main():
                 cmd += ['--max-dim', str(args.max_dim)]
             if args.shrink:
                 cmd += ['--shrink', *args.shrink]
+            if args.adaptive:
+                cmd += ['--adaptive', str(args.adaptive)]
             cmd += [a, b]
             r = subprocess.run(cmd,
                                stdout=subprocess.DEVNULL,

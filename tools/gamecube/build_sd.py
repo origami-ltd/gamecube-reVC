@@ -111,12 +111,14 @@ STAGED_GXT_LABELS = {
 }
 
 
-def convert_txd(txdconv, src, dst, max_dim=None, shrink=None):
+def convert_txd(txdconv, src, dst, max_dim=None, shrink=None, adaptive=None):
     cmd = [txdconv]
     if max_dim:
         cmd += ["--max-dim", str(max_dim)]
     if shrink:
         cmd += ["--shrink", *shrink]
+    if adaptive:
+        cmd += ["--adaptive", str(adaptive)]
     cmd += [src, dst]
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0
@@ -138,6 +140,11 @@ def main():
                     help="GameCube disc: textures taller than H go to PCT%% in "
                          "gta3.img and generic.txd (user-approved 128 75, "
                          "09-03); the loose UI dictionaries stay full size")
+    ap.add_argument("--adaptive", type=float, metavar="SSIM",
+                    help="GameCube disc: 256+ textures in gta3.img and "
+                         "generic.txd go to half unless that scores a mean "
+                         "SSIM under this (user, 09-26: the largest power-of-"
+                         "two cut that does not look reduced)")
     ap.add_argument("--size-mb", type=float,
                     default=MINI_DVD_BYTES / 1048576.0,
                     help="target disc size, for the fit report")
@@ -265,8 +272,10 @@ def main():
             if name.lower() == "frontend_gcc.txd":
                 continue
             tmp = path + ".gx"
-            shrink = args.shrink if name.lower() == "generic.txd" else None
-            if convert_txd(args.txdconv, path, tmp, args.max_dim, shrink):
+            generic = name.lower() == "generic.txd"
+            if convert_txd(args.txdconv, path, tmp, args.max_dim,
+                           args.shrink if generic else None,
+                           args.adaptive if generic else None):
                 os.replace(tmp, path)
                 converted += 1
             else:
@@ -294,6 +303,8 @@ def main():
         cmd += ["--max-dim", str(args.max_dim)]
     if args.shrink:
         cmd += ["--shrink", *args.shrink]
+    if args.adaptive:
+        cmd += ["--adaptive", str(args.adaptive)]
     # --static-ide-root belongs to the iso-hardening branch's repack (static
     # DFF pre-instancing); this branch's repack_img.py does not take it.
     cmd += [source_img, source_dir, next_img, next_dir, args.txdconv]
