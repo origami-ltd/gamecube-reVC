@@ -2035,6 +2035,10 @@ gcSilenceNow(void)
 }
 
 static void gcStreamPump(GcStream *st, bool prime = false);
+// 09-26 diag: RMS of each decoded chunk of the mission streams (1, 2), to tell
+// a line decoded as silence from one decoded fine and silenced later.
+static uint16 gMaRms[3][64];
+static uint8 gMaRmsN[3];
 
 static void *
 gcStreamDecMain(void *)
@@ -2749,6 +2753,16 @@ gcStreamPump(GcStream *st, bool prime)
 			return;   // let the ring fill; the DSP still holds two chunks
 	}
 	uint32 got = gcStreamDecode(st, dst);
+	{
+		uint32 n = (uint32)(st - gStreams);
+		if(got && (n == 1 || n == 2) && gMaRmsN[n] < 64){
+			const int16 *pcm = (const int16*)dst;
+			uint32 k = got/2;
+			double acc = 0;
+			for(uint32 i = 0; i < k; i++) acc += (double)pcm[i]*pcm[i];
+			gMaRms[n][gMaRmsN[n]++] = (uint16)sqrt(acc/(k ? k : 1));
+		}
+	}
 	if(got == 0){
 		// The DECODER is dry, which is not the same as the SOUND being over:
 		// priming decodes two chunks before a line starts, and a short line of
@@ -3157,6 +3171,7 @@ cSampleManager::StartStreamedFile(tTrack nFile, uint32 nPos, uint8 nStream)
 	GcStreamGuard sg(gStreamLock[nStream]);
 	GcStream *st = &gStreams[nStream];
 	StopStreamedFile(nStream);
+	if(nStream == 1 || nStream == 2) gMaRmsN[nStream] = 0;   // diag: a fresh line
 	st->srcFrames = 0;
 	st->srcPos = 0;
 	st->srcEof = FALSE;
@@ -3262,10 +3277,19 @@ gcMissionAudioTrace(const char *what, int slot, int sample)
 	if(n >= MAX_STREAMS) return;
 	GcStream *st = &gStreams[n];
 	const GcStreamRequest *r = &gStreamRequests[n];
-	printf("MAUDIO %s slot %d sample %d | s%d %s pos %u/%u eof %d playing %d armed %d hold %d paused %d starved %u cb %u f=%u\n",
+	printf("MAUDIO %s slot %d sample %d | s%d %s pos %u/%u eof %d playing %d armed %d hold %d paused %d starved %u cb %u vol %u fx %u f=%u\n",
 	    what, slot, sample, (int)n, st->path, (unsigned)st->posSamples, (unsigned)st->lenSamples,
 	    (int)st->eof, (int)st->playing, (int)st->armed, (int)r->hold, (int)r->paused,
-	    (unsigned)st->starved, (unsigned)st->cbCount, (unsigned)CTimer::GetFrameCounter());
+	    (unsigned)st->starved, (unsigned)st->cbCount, (unsigned)st->volume, (unsigned)gEffectsVolume,
+	    (unsigned)CTimer::GetFrameCounter());
+	if(strncmp(what, "finished", 8) == 0 && n <= 2){
+		char line[400];
+		int k = snprintf(line, sizeof(line), "MAUDIO rms s%d:", (int)n);
+		for(int i = 0; i < gMaRmsN[n] && k < (int)sizeof(line) - 8; i++)
+			k += snprintf(line + k, sizeof(line) - k, " %u", (unsigned)gMaRms[n][i]);
+		printf("%s\n", line);
+		gMaRmsN[n] = 0;
+	}
 }
 
 int32
