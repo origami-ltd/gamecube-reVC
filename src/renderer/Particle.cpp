@@ -1820,9 +1820,41 @@ void CParticle::Update()
 	}
 }
 
+#ifdef GTA_OGC
+extern "C" unsigned long long gcNowUs(void);   // gamecube.cpp
+// Crash frames spent up to 25 ms here (b199 SPLIT). Time and count per
+// particle type; when the whole render passes 8 ms, name the three worst.
+static unsigned gPartUs[MAX_PARTICLES];
+static uint16 gPartN[MAX_PARTICLES];
+static void
+ParticleTimingReport(unsigned totalUs)
+{
+	static uint32 lastFrame;
+	if(totalUs < 8000 || CTimer::GetFrameCounter() - lastFrame < 5)
+		return;
+	lastFrame = CTimer::GetFrameCounter();
+	int32 top[3] = { -1, -1, -1 };
+	for(int32 i = 0; i < MAX_PARTICLES; i++)
+		for(int32 k = 0; k < 3; k++)
+			if(top[k] < 0 || gPartUs[i] > gPartUs[top[k]]){
+				for(int32 j = 2; j > k; j--) top[j] = top[j-1];
+				top[k] = i;
+				break;
+			}
+	unsigned n = 0;
+	for(int32 i = 0; i < MAX_PARTICLES; i++) n += gPartN[i];
+	printf("PARTS %ums %u live | type %d: %u x %uus, type %d: %u x %uus, type %d: %u x %uus\n",
+	    totalUs/1000, n, top[0], gPartN[top[0]], gPartUs[top[0]], top[1], gPartN[top[1]], gPartUs[top[1]],
+	    top[2], gPartN[top[2]], gPartUs[top[2]]);
+}
+#endif
+
 void CParticle::Render()
 {
 	PUSH_RENDERGROUP("CParticle::Render");
+#ifdef GTA_OGC
+	unsigned long long partStart = gcNowUs(), partPrev = partStart;
+#endif
 
 	RwRenderStateSet(rwRENDERSTATETEXTUREADDRESS, (void *)rwTEXTUREADDRESSWRAP);
 	RwRenderStateSet(rwRENDERSTATETEXTUREPERSPECTIVE, (void *)TRUE);
@@ -1843,6 +1875,11 @@ void CParticle::Render()
 		tParticleSystemData *psystem = &mod_ParticleSystemManager.m_aParticles[i];
 		bool particleBanned = false;
 		CParticle *particle = psystem->m_pParticles;
+#ifdef GTA_OGC
+		if(i > 0){ unsigned long long now = gcNowUs(); gPartUs[i-1] = (unsigned)(now - partPrev); partPrev = now; }
+		gPartN[i] = 0;
+		for(CParticle *p = particle; p; p = p->m_pNext) gPartN[i]++;
+#endif
 		
 		RwRaster **frames = psystem->m_ppRaster;
 		tParticleType type = psystem->m_Type;
@@ -2330,6 +2367,13 @@ void CParticle::Render()
 		CSprite::FlushSpriteBuffer();
 
 	}
+#ifdef GTA_OGC
+	{
+		unsigned long long now = gcNowUs();
+		gPartUs[MAX_PARTICLES-1] = (unsigned)(now - partPrev);
+		ParticleTimingReport((unsigned)(now - partStart));
+	}
+#endif
 	
 	RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, (void *)FALSE);
 	RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, (void *)TRUE);

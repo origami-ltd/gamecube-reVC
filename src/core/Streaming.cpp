@@ -115,7 +115,12 @@ public:
 // and B17 died on a 1K must-allocate at 400K free. Sampled once a frame in
 // Update; below it the per-frame loader issues no reads and sheds one
 // unreferenced model a frame. The blocking loader is not gated.
-enum { STREAM_HEAP_FLOOR = 512*1024 };   // B87: general heap holds fewer big blocks now   // B76: back to 640K. 1MB (B73) + the 512K reserve left ~50K of headroom: near set stuck at 2/16, black docks
+enum { STREAM_HEAP_FLOOR = 512*1024 };
+// A model that failed three loads rests this long before it may try again.
+// 60 s (B133) was a minute of LOD in front of the player for a building whose
+// load failed on a transient 23K fragment (b199: 2801, 2814, 2922, ...); the
+// streamer frees room constantly, so 15 s is enough to stop a retry storm.
+enum { STREAM_FAIL_REST_S = 15 };   // B87: general heap holds fewer big blocks now   // B76: back to 640K. 1MB (B73) + the 512K reserve left ~50K of headroom: near set stuck at 2/16, black docks
 enum { STREAM_BUDGET_CAP = 0 };   // B27 tried 2MB: the budget is soft, str stayed at 8-10MB and the churn sharpened
 // Just-loaded protection (B59): the blocking loader evicted what it had just
 // loaded (farthest from the old camera) while loading the rest — the first
@@ -179,6 +184,7 @@ static size_t gStreamHeapFree = STREAM_HEAP_FLOOR;
 #endif
 
 extern "C" int gcBootDone(void);   // gamecube.cpp: 1 from the first GS_PLAYING_GAME frame (B144)
+extern "C" int gcStreamEmergencyShed(unsigned need);   // below: size-aware shed
 volatile int gcEssentialLoad;   // B150: read by gcArenaCarve (gamecube.cpp)
 static uint8 gLoadFails[NUMSTREAMINFO];   // bounded retry counters, see FailedLoad
 static uint8 gFailSec[NUMSTREAMINFO];     // B133: second of the last failure; the cap is a 60 s cooldown, not a life sentence
@@ -1108,7 +1114,7 @@ FailedLoad(int32 streamId)
 	CStreaming::RemoveModel(streamId);
 	{
 		uint8 sec = (uint8)(CTimer::GetTimeInMillisecondsPauseMode()/1000); if(sec == 0) sec = 1;
-		if(gFailSec[streamId] && (uint8)(sec - gFailSec[streamId]) > 60) gLoadFails[streamId] = 0;   // B133: a model dropped a minute ago may try again (anim blocks 7910-7915 died at boot in b132)
+		if(gFailSec[streamId] && (uint8)(sec - gFailSec[streamId]) > STREAM_FAIL_REST_S) gLoadFails[streamId] = 0;   // B133: a model dropped a minute ago may try again (anim blocks 7910-7915 died at boot in b132)
 		gFailSec[streamId] = sec;
 	}
 	if(gLoadFails[streamId] < 255)
@@ -1310,6 +1316,16 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 
 		if(!success){
 			debug("Failed to load %s\n", CModelInfo::GetModelInfo(streamId)->GetModelName());
+#ifdef GTA_OGC
+			// A building that failed on a heap fragment (b199: six Washington
+			// Beach buildings, 23K geometry blocks with 700K free, then banned)
+			// gets room before its retry: compact the heap and shed what nothing
+			// draws until a 64K block fits.
+			if(mi->IsSimple()){
+				CGame::TidyUpMemory(false, false);
+				gcStreamEmergencyShed(64*1024);
+			}
+#endif
 			gFailWhy = "model load";
 			FailedLoad(streamId);
 			RwStreamClose(stream, &mem);
@@ -1554,7 +1570,7 @@ CStreaming::RequestModel(int32 id, int32 flags)
 	// queued; the script's own requests always are.
 	if(gcBootDone() && id < STREAM_OFFSET_TXD && ms_aInfoForModel[id].m_loadState == STREAMSTATE_NOTLOADED && !(flags & STREAMFLAGS_SCRIPTOWNED) && !(ms_aInfoForModel[id].m_flags & STREAMFLAGS_SCRIPTOWNED)){   // B146: MODELS only — b145 deferred the zone's collision block and the car fell through the world
 		uint8 sec = (uint8)(CTimer::GetTimeInMillisecondsPauseMode()/1000); if(sec == 0) sec = 1;
-		if(gLoadFails[id] >= 3 && gFailSec[id] && (uint8)(sec - gFailSec[id]) <= 60)
+		if(gLoadFails[id] >= 3 && gFailSec[id] && (uint8)(sec - gFailSec[id]) <= STREAM_FAIL_REST_S)
 			return;
 		if(mallinfo().fordblks < STREAM_HEAP_FLOOR && !(flags & STREAMFLAGS_LOD))
 			return;
