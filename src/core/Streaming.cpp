@@ -200,7 +200,7 @@ HonestBudget(void)
 	size_t general = mallinfo().fordblks;
 	size_t total = gcHeapFreeTotal();
 	size_t chunkFree = total > general ? total - general : 0;
-	size_t slack = STREAM_HEAP_FLOOR + 256*1024;
+	size_t slack = STREAM_HEAP_FLOOR + 768*1024;   // conversions cost more heap than the disc bytes the budget counts: 256K of margin left b196 at the floor
 	size_t head = (general > slack ? general - slack : 0) + chunkFree;
 	CStreaming::ms_memoryAvailable = CStreaming::ms_memoryUsed + head;
 	if(CStreaming::ms_memoryAvailable < 4*1024*1024) CStreaming::ms_memoryAvailable = 4*1024*1024;
@@ -769,11 +769,24 @@ CStreaming::Update(void)
 			lastSaid = CTimer::GetTimeInMilliseconds();
 			printf("STREAM floor: free %uK, shedding\n", (unsigned)(gStreamHeapFree/1024));
 		}
-		// Re-sample after a shed so one eviction is not repeated eight times;
-		// when nothing is evictable, wait for the next sample instead of walking
-		// the loaded list every frame for nothing.
-		if(RemoveLeastUsedModel(0)){ gStrEvict++; gStreamHeapFree = mallinfo().fordblks; /* B85: the floor guards the GENERAL heap; chunk room does not serve a 3K malloc */ }
-		else gStreamHeapFree = STREAM_HEAP_FLOOR;
+		// Below the floor every ordinary request is refused and no read is
+		// issued, so the model in front of the player waits for whatever this
+		// frees. One model a sample (b196) kept the heap parked at the floor
+		// and HD buildings at LOD for good. Shed until there is room again,
+		// as the original's MakeSpaceFor does before a load: models nothing
+		// draws, least used first; with none left, drop the RW objects behind
+		// the camera so the next frame has some. Re-sampled per removal: the
+		// floor guards the GENERAL heap (B85), chunk room does not serve a 3K
+		// malloc.
+		int shed = 0;
+		while(shed < 16 && gStreamHeapFree < STREAM_HEAP_FLOOR + 256*1024 && RemoveLeastUsedModel(0)){
+			gStrEvict++; shed++;
+			gStreamHeapFree = mallinfo().fordblks;
+		}
+		if(shed == 0){
+			DeleteRwObjectsBehindCamera(ms_memoryUsed > 512*1024 ? ms_memoryUsed - 512*1024 : 0);
+			gStreamHeapFree = mallinfo().fordblks;
+		}
 	}
 #endif
 
