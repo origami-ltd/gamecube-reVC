@@ -408,6 +408,10 @@ keepFullByName(const char *name)
 		"pawn", "pharm", "liquor", "cinema", "theat", "casino", "bowl", "jewel",
 		"sale", "marquee", "letter", "mall", "spray", "boutiq", "hardware",
 		"deli", "bakery", "donut", "taco", "salon", "tattoo",
+		// 09-26: a shop front behind an awning read low-res — the awning and
+		// the facade are separate textures, so both families keep 256.
+		"awn", "canop", "front", "entrance", "entrace", "blind", "restr",
+		"grill", "steak", "autos",
 	};
 	char low[33];
 	int i = 0;
