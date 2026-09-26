@@ -4,10 +4,6 @@
 #include "Game.h"
 
 enum {
-#ifdef GTA_OGC
-	STREAM_HD_M = 80,
-	STREAM_HD_NEAR_M = 60,
-#endif
 	STREAM_OFFSET_TXD = MODELINFOSIZE,
 	STREAM_OFFSET_COL = STREAM_OFFSET_TXD+TXDSTORESIZE,
 	STREAM_OFFSET_ANIM = STREAM_OFFSET_COL+COLSTORESIZE,
@@ -22,7 +18,6 @@ enum StreamFlags
 	STREAMFLAGS_PRIORITY    = 0x08,
 	STREAMFLAGS_NOFADE      = 0x10,
 	STREAMFLAGS_20          = 0x20,	// TODO(MIAMI): what's this
-	STREAMFLAGS_PREFETCH    = 0x40,
 	STREAMFLAGS_LOD         = 0x80,
 
 	STREAMFLAGS_CANT_REMOVE = STREAMFLAGS_DONT_REMOVE|STREAMFLAGS_SCRIPTOWNED,
@@ -167,11 +162,7 @@ public:
 	static void RemoveIslandsNotUsed(eLevelName level);
 	static void RemoveBigBuildings(eLevelName level);
 	static bool RemoveLoadedVehicle(void);
-	static bool RemoveLeastUsedModel(uint32 excludeMask, uint32 minBytes = 0, bool ignoreRecent = false);   // B124: prefer a far victim at least this big; B140: emergency second pass ignores LoadedRecently
-	// GameCube eviction policy: the renderer stamps how close each model
-	// stood this frame; eviction goes farthest-first and spares the near set.
-	static void NoteModelDistance(int32 id, float dist);
-	static uint32 ModelDistNow(int32 id);
+	static bool RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent = false);   // B140: the emergency second pass ignores LoadedRecently
 	static void RemoveAllUnusedModels(void);
 	static void RemoveUnusedModelsInLoadedList(void);
 	static bool RemoveLoadedZoneModel(void);

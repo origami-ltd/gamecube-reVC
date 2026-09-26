@@ -117,33 +117,6 @@ public:
 // unreferenced model a frame. The blocking loader is not gated.
 enum { STREAM_HEAP_FLOOR = 512*1024 };   // B87: general heap holds fewer big blocks now   // B76: back to 640K. 1MB (B73) + the 512K reserve left ~50K of headroom: near set stuck at 2/16, black docks
 enum { STREAM_BUDGET_CAP = 0 };   // B27 tried 2MB: the budget is soft, str stayed at 8-10MB and the churn sharpened
-// Prioritise what is close (user, 09-01): models seen within this many
-// metres in the last two frames are never evicted, and the farthest
-// evictable model goes first. Near requests are priority requests.
-enum { STREAM_NEAR_M = 60 };   // = STREAM_DIST: below it, 60-80m models were evicted and re-requested every frame
-enum { STREAM_KEEP_M = STREAM_HD_M };   // B105: = the renderer's HD request ring (80 m, user). 70 against an 80 m ring left a requested-but-evictable band; B94: 90 (B93) starved the boot until the decode thread's mallocs failed and corrupted memory
-static uint16 gModelDist[MODELINFOSIZE];
-static uint32 gModelDistFrame[MODELINFOSIZE];
-// Every model with an instance within STREAM_NEAR_M of the camera, in ANY
-// direction. The renderer's stamp only sees what is in the frustum, and the
-// B28 instrument showed the near set being evicted while just behind the
-// camera and reloaded on the next turn — the lamppost 2m away flipping
-// twelve times in five seconds. Rebuilt once a frame from the 5x5 sectors
-// around the camera (a 250m box holds the 60m circle wherever the camera
-// sits in its sector). Drawn lists only; dummies never render.
-static uint8 gNearModels[(MODELINFOSIZE+7)/8];
-static uint8 gAheadModels[(MODELINFOSIZE+7)/8];
-uint32 gAheadN, gAheadMiss, gAheadDistance;
-uint32 gNearN, gNearMiss;   // census: near-set size and how much of it is not loaded
-// Dynamic request radius (B54). The renderer re-requested every frame whatever
-// the LRU evicted beyond 80m, so under pressure the 80-300m ring churned and
-// the near set never filled (the empty world). Shrinks while evictions run
-// hot, grows while the heap has room; the renderer requests nothing beyond it.
-float gStreamRadius = 300.0f;
-// Eviction cooldown (B58): a model the LRU just evicted beyond the near set is
-// not re-requested for a few seconds, so the boundary stops blinking and the
-// disc stops reloading what it just dropped. Seconds, wraps at 256.
-static uint8 gEvictSec[MODELINFOSIZE];
 // Just-loaded protection (B59): the blocking loader evicted what it had just
 // loaded (farthest from the old camera) while loading the rest — the first
 // cutscene started empty. A model loaded under 5s ago is not evictable.
@@ -164,80 +137,13 @@ static inline bool LoadedRecently(int32 id)
 	if(id < 0 || id >= NUMSTREAMINFO || gLoadFrame[id] == 0) return false;
 	return (uint16)((uint16)CTimer::GetFrameCounter() - gLoadFrame[id]) < 300;   // ~5 s at 60 fps
 }
-uint32 gBlink;   // census: near (<100m) models evicted — each one is a visible LOD flip
-// LoadScene centres the near set on the scene, not on the camera that has not
-// moved there yet; BuildNearSet honours it for a few seconds.
-static CVector gNearFocus;
-static int gNearFocusCalls;
-bool gStreamEvictedRecently(int32 id)
-{
-	if(id < 0 || id >= MODELINFOSIZE) return false;
-	uint8 now = (uint8)(CTimer::GetTimeInMilliseconds()/1000);
-	return gEvictSec[id] && (uint8)(now - gEvictSec[id]) < 8;
-}
 static int gEvictTrace = 300;   // B58: the first evictions of the run, named
-static bool ModelShown(int32 id, uint32 d);
 static void
 TraceEvict(int32 id)
 {
-	// B181: a flip is an eviction inside the model's own draw reach. '<100 m'
-	// also counted the 80-100 m evictions of bushes and props already past
-	// their draw distance (b180: 904 'blinks' in 16 min, mostly invisible).
-	if(id >= 0 && id < MODELINFOSIZE && ModelShown(id, CStreaming::ModelDistNow(id))) gBlink++;
 	if(gEvictTrace <= 0 || id < 0 || id >= MODELINFOSIZE) return;
 	gEvictTrace--;
-	printf("EVICT %d %s d=%u\n", id, CModelInfo::GetModelInfo(id)->GetModelName(), CStreaming::ModelDistNow(id));
-}
-static void
-BuildNearSet(void)
-{
-	memset(gNearModels, 0, sizeof(gNearModels));
-	CVector cam = TheCamera.GetPosition();
-	if(gNearFocusCalls > 0){ gNearFocusCalls--; cam = gNearFocus; }
-	int cx = CWorld::GetSectorIndexX(cam.x), cy = CWorld::GetSectorIndexY(cam.y);
-	float r2 = (float)STREAM_NEAR_M * (float)STREAM_NEAR_M;
-	static const int lists[] = { ENTITYLIST_BUILDINGS, ENTITYLIST_BUILDINGS_OVERLAP,
-	                             ENTITYLIST_OBJECTS, ENTITYLIST_OBJECTS_OVERLAP };
-	for(int y = cy-2; y <= cy+2; y++){
-		if(y < 0 || y >= NUMSECTORS_Y) continue;
-		for(int x = cx-2; x <= cx+2; x++){
-			if(x < 0 || x >= NUMSECTORS_X) continue;
-			CSector *sec = CWorld::GetSector(x, y);
-			for(int l = 0; l < 4; l++)
-				for(CPtrNode *n = sec->m_lists[lists[l]].first; n; n = n->next){
-					CEntity *e = (CEntity*)n->item;
-					float d2 = (e->GetPosition() - cam).MagnitudeSqr();
-					if(d2 > r2){
-						// B106: give models beside and behind the camera a real
-						// distance. Only the frustum scan stamped one, so anything
-						// off-screen read 65535 = "farthest" and was the first pick of
-						// every farthest-first eviction — the flank stuck at LOD.
-						if(d2 <= (float)((STREAM_KEEP_M+40)*(STREAM_KEEP_M+40)))
-							CStreaming::NoteModelDistance(e->GetModelIndex(), Sqrt(d2));
-						continue;
-					}
-					int32 id = e->GetModelIndex();
-					if(id >= 0 && id < MODELINFOSIZE) gNearModels[id>>3] |= 1 << (id&7);
-				}
-		}
-	}
-	gNearN = gNearMiss = 0;
-	for(int id = 0; id < MODELINFOSIZE; id++)
-		if((gNearModels[id>>3] >> (id&7)) & 1){
-			gNearN++;
-			if(!CStreaming::HasModelLoaded(id)) gNearMiss++;
-		}
-}
-static inline bool
-IsNearModel(int32 id)
-{
-	return id >= 0 && id < MODELINFOSIZE && ((gNearModels[id>>3] >> (id&7)) & 1);
-}
-
-static bool
-IsAheadModel(int32 id)
-{
-	return id >= 0 && id < MODELINFOSIZE && ((gAheadModels[id>>3] >> (id&7)) & 1);
+	printf("EVICT %d %s\n", id, CModelInfo::GetModelInfo(id)->GetModelName());
 }
 
 static bool
@@ -268,103 +174,6 @@ LodPassAllows(int32 id)
 	    (id >= STREAM_OFFSET_COL && id < STREAM_OFFSET_ANIM);
 }
 
-static bool
-InStreamingCorridor(float dx, float dy, float vx, float vy, float reach, float width, float radius = 0.0f)
-{
-	float along = dx*vx + dy*vy;
-	if(along < -radius || along > reach + radius) return false;
-	float across = dx*vy - dy*vx;
-	return across*across <= (width + radius)*(width + radius);
-}
-
-enum { STREAM_AHEAD_MODELS = 24 };
-struct AheadRequest { int32 id; float distance; };
-
-static void
-InsertAheadRequest(AheadRequest *requests, int32 &count, int32 id, float distance)
-{
-	for(int32 i = 0; i < count; i++){
-		if(requests[i].id != id) continue;
-		if(requests[i].distance <= distance) return;
-		for(int32 j = i; j + 1 < count; j++) requests[j] = requests[j+1];
-		count--;
-		break;
-	}
-	if(count == STREAM_AHEAD_MODELS && requests[count-1].distance <= distance) return;
-	int32 i = Min(count, STREAM_AHEAD_MODELS-1);
-	while(i > 0 && requests[i-1].distance > distance){ requests[i] = requests[i-1]; i--; }
-	requests[i].id = id;
-	requests[i].distance = distance;
-	if(count < STREAM_AHEAD_MODELS) count++;
-}
-
-static float
-StreamingLookAhead(float speed)
-{
-	return Min(240.0f, STREAM_HD_M + speed*50.0f*3.0f);
-}
-
-static void
-BuildAheadSet(void)
-{
-	memset(gAheadModels, 0, sizeof(gAheadModels));
-	gAheadN = gAheadMiss = gAheadDistance = 0;
-	if(CStreaming::ms_disableStreaming || TheCamera.m_WideScreenOn ||
-	   CCutsceneMgr::IsCutsceneProcessing() || FindPlayerVehicle() == nil || HasPendingLods()) return;
-	CVector velocity = FindPlayerSpeed();
-	float speed = Sqrt(velocity.x*velocity.x + velocity.y*velocity.y);
-	if(!isfinite(speed) || speed < 0.05f) return;
-	velocity /= speed;
-	float reach = StreamingLookAhead(speed);
-	const float width = 45.0f;
-	AheadRequest requests[STREAM_AHEAD_MODELS];
-	int32 count = 0;
-	CVector pos = FindPlayerCoors(), end = pos + velocity*reach;
-	gAheadDistance = (uint32)reach;
-	const float margin = width + STREAM_NEAR_M;
-	int xmin = Max(0, CWorld::GetSectorIndexX(Min(pos.x, end.x)-margin));
-	int xmax = Min(NUMSECTORS_X-1, CWorld::GetSectorIndexX(Max(pos.x, end.x)+margin));
-	int ymin = Max(0, CWorld::GetSectorIndexY(Min(pos.y, end.y)-margin));
-	int ymax = Min(NUMSECTORS_Y-1, CWorld::GetSectorIndexY(Max(pos.y, end.y)+margin));
-	static const int lists[] = { ENTITYLIST_BUILDINGS, ENTITYLIST_BUILDINGS_OVERLAP,
-	                             ENTITYLIST_OBJECTS, ENTITYLIST_OBJECTS_OVERLAP, ENTITYLIST_DUMMIES };
-	CWorld::AdvanceCurrentScanCode();
-	for(int y = ymin; y <= ymax; y++)
-		for(int x = xmin; x <= xmax; x++){
-			CSector *sector = CWorld::GetSector(x, y);
-			for(int l = 0; l < ARRAY_SIZE(lists); l++)
-				for(CPtrNode *n = sector->m_lists[lists[l]].first; n; n = n->next){
-					CEntity *e = (CEntity*)n->item;
-					if(e->m_scanCode == CWorld::GetCurrentScanCode()) continue;
-					e->m_scanCode = CWorld::GetCurrentScanCode();
-					if(e->bDontStream || e->bStreamingDontDelete || !e->bIsVisible ||
-					   e->bIsBIGBuilding || !IsAreaVisible(e->m_area)) continue;
-					int32 id = e->GetModelIndex();
-					if(id < 0 || id >= MODELINFOSIZE) continue;
-					if(IsNearModel(id) && CStreaming::HasModelLoaded(id)) continue;
-					CBaseModelInfo *base = CModelInfo::GetModelInfo(id);
-					if(base == nil || !base->IsSimple()) continue;
-					CTimeModelInfo *mi = (CTimeModelInfo*)base;
-					if(mi->GetModelType() == MITYPE_TIME &&
-					   !CClock::GetIsTimeInRange(mi->GetTimeOn(), mi->GetTimeOff())) continue;
-					float radius = base->GetColModel() ? Min((float)STREAM_NEAR_M, e->GetBoundRadius()) : 0.0f;
-					CVector delta = (base->GetColModel() ? e->GetBoundCentre() : e->GetPosition()) - pos;
-					if(!InStreamingCorridor(delta.x, delta.y, velocity.x, velocity.y, reach, width, radius)) continue;
-					float distance = Max(0.0f, delta.x*velocity.x + delta.y*velocity.y - radius);
-					InsertAheadRequest(requests, count, id, distance);
-				}
-		}
-	for(int32 i = 0; i < count; i++){
-		int32 id = requests[i].id;
-		gAheadModels[id>>3] |= 1 << (id&7);
-		gAheadN++;
-		if(!CStreaming::HasModelLoaded(id)) gAheadMiss++;
-		int32 flags = STREAMFLAGS_PREFETCH;
-		if(requests[i].distance <= STREAM_HD_M + speed*50.0f) flags |= STREAMFLAGS_PRIORITY;
-		if(CStreaming::ms_numModelsRequested < 32 || CStreaming::ms_aInfoForModel[id].m_loadState != STREAMSTATE_NOTLOADED)
-			CStreaming::RequestModel(id, flags);
-	}
-}
 #define STREAM_FLOOR_ENABLED 1
 static size_t gStreamHeapFree = STREAM_HEAP_FLOOR;
 #endif
@@ -898,24 +707,14 @@ CStreaming::Update(void)
 	// 14 times in 40 s (each read also shedding up to 24 models).
 	gMainWhere = "stream-update";
 	{
-		// Neither changes faster than the camera moves 60m: the near set every 4
-		// frames, the heap walk (mallinfo is O(chunks)) every 8.
+		// The heap walk (mallinfo is O(chunks)) every 8 frames.
 		static uint32 cadence;
 		cadence++;
-		if((cadence & 3) == 0){ BuildNearSet(); BuildAheadSet(); }
-		if(cadence % 60 == 0){
-			static uint32 lastEvict;
-			uint32 rate = gStrEvict - lastEvict;
-			lastEvict = gStrEvict;
-			if(rate > 8 && gStreamRadius > (float)STREAM_NEAR_M) gStreamRadius *= 0.85f;
-			else if(rate == 0 && gcHeapFreeTotal() > STREAM_HEAP_FLOOR + 768*1024 && gStreamRadius < 300.0f) gStreamRadius *= 1.05f;   // B87: chunk room counts for the radius   // B59 rule (B60's regrowth flooded the heap)
-			if(gStreamRadius < (float)STREAM_NEAR_M) gStreamRadius = (float)STREAM_NEAR_M;
-		}
 		if((cadence & 7) == 0){
 			gStreamHeapFree = mallinfo().fordblks; /* B85: the floor guards the GENERAL heap; chunk room does not serve a 3K malloc */
 			// Honest budget (B51): what the streamer holds plus what the heap can
-			// still give above the floor. MakeSpaceFor then evicts the farthest
-			// models before an allocation fails, instead of the floor shedding
+			// still give above the floor. MakeSpaceFor then evicts before an
+			// allocation fails, instead of the floor shedding
 			// after one did. A fixed 10MB overcommitted the heap by 1-3MB.
 			HonestBudget();   // B107: general heap above slack + chunk room, see the helper
 		}
@@ -934,8 +733,8 @@ CStreaming::Update(void)
 		// (the BSS arena replaced the reserve) and nothing ever zeroed the
 		// flag, so after the first failed malloc this loop ran every frame for
 		// the rest of the run: free idles at 0.9-1.3MB, always under the 1.5MB
-		// target, and every model beyond STREAM_KEEP_M was evicted the moment
-		// its 5 s LoadedRecently grace ended — the HD/LOD flicker.
+		// target, and models were evicted the moment their 5 s LoadedRecently
+		// grace ended — the HD/LOD flicker.
 		if(gStreamHeapFree >= STREAM_HEAP_FLOOR + 512*1024){
 			gcHeapReserveArm();
 			printf("HEAP: emergency over, free %uK after %u events\n", (unsigned)(gStreamHeapFree/1024), (unsigned)gHeapEmergency);
@@ -1019,14 +818,6 @@ CStreaming::Update(void)
 
 	for(si = ms_endRequestedList.m_prev; si != &ms_startRequestedList; si = prev){
 		prev = si->m_prev;
-#ifdef GTA_OGC
-		int32 id = si - ms_aInfoForModel;
-		if(si->m_flags & STREAMFLAGS_PREFETCH){
-			if(id < STREAM_OFFSET_TXD ? IsAheadModel(id) :
-			   id < STREAM_OFFSET_COL && IsTxdUsedByRequestedModels(id - STREAM_OFFSET_TXD)) continue;
-			si->m_flags &= ~STREAMFLAGS_PREFETCH;
-		}
-#endif
 		if((si->m_flags & (STREAMFLAGS_KEEP_IN_MEMORY|STREAMFLAGS_PRIORITY)) == 0)
 			RemoveModel(si - ms_aInfoForModel);
 	}
@@ -1297,31 +1088,6 @@ static uint32 gResidentCost[NUMSTREAMINFO];
 // own failure. Reset on a successful load.
 static void
 FailedLoad(int32 streamId);
-
-void
-CStreaming::NoteModelDistance(int32 id, float dist)
-{
-	if(id < 0 || id >= MODELINFOSIZE) return;
-	uint32 frame = CTimer::GetFrameCounter();
-	uint16 d = dist >= 65000.0f ? 65000 : (uint16)dist;
-	if(gModelDistFrame[id] != frame){
-		gModelDistFrame[id] = frame;
-		gModelDist[id] = d;
-	}else if(d < gModelDist[id])
-		gModelDist[id] = d;
-}
-
-// Metres to the closest instance the renderer evaluated in the last two
-// frames; 65535 when nothing did (peds, weapons, off-scan models).
-uint32
-CStreaming::ModelDistNow(int32 id)
-{
-	if(id < 0 || id >= MODELINFOSIZE) return 65535;
-	if(IsNearModel(id)) return 0;
-	if(IsAheadModel(id)) return STREAM_KEEP_M - 1;
-	if((uint32)(CTimer::GetFrameCounter() - gModelDistFrame[id]) > 4) return 65535;
-	return gModelDist[id];
-}
 
 static void
 FailedLoad(int32 streamId)
@@ -2134,7 +1900,6 @@ CStreaming::RemoveModel(int32 id)
 	if(ms_aInfoForModel[id].m_loadState == STREAMSTATE_NOTLOADED)
 		return;
 #ifdef GTA_OGC
-	if(id < MODELINFOSIZE){ uint8 s = (uint8)(CTimer::GetTimeInMilliseconds()/1000); gEvictSec[id] = s ? s : 1; }
 	// B53 tracer: who evicts a loaded TXD (the 710K pull-every-500ms loop).
 	if(id >= STREAM_OFFSET_TXD && id < STREAM_OFFSET_COL && ms_aInfoForModel[id].m_loadState == STREAMSTATE_LOADED){
 		static uint32 lastMs;
@@ -2468,13 +2233,13 @@ gcStreamEmergencyShed(unsigned need)
 			break;
 		}
 		if(k == cap) break;
-		if(!CStreaming::RemoveLeastUsedModel(keep, need) && !CStreaming::RemoveLeastUsedModel(keep, need, true)){   // B140: second pass ignores LoadedRecently
+		if(!CStreaming::RemoveLeastUsedModel(keep) && !CStreaming::RemoveLeastUsedModel(keep, true)){   // B140: second pass ignores LoadedRecently
 			// B149: nothing unreferenced — every building near the scene still
 			// holds its RW object (refs > 0). Drop the RW objects behind the
 			// camera the way the budget sweep would, then look again. b147:
 			// prop 295 (81K) failed 24x with 'shed 0 models' and 2.2MB free.
 			CStreaming::DeleteRwObjectsBehindCamera(CStreaming::ms_memoryUsed > 2*need ? CStreaming::ms_memoryUsed - 2*need : 0);
-			if(!CStreaming::RemoveLeastUsedModel(keep, need, true)) break;
+			if(!CStreaming::RemoveLeastUsedModel(keep, true)) break;
 		}
 		dropped++;
 	}
@@ -2514,31 +2279,11 @@ extern "C" void gcStreamClassCensus(unsigned out[6])
 // B142: the intro's special-character WAIT runs before LOAD_CUTSCENE, so the
 // cutscene test alone (B141) never fired; b140/b141 parked at the office with
 // 214K free. While the script polls HasSpecialCharLoaded (stamped below) or a
-// cutscene is up, the world outside 30 m may go and just-loaded models too.
+// cutscene is up, just-loaded models may go too.
 static inline bool StreamSceneHold(void)
 {
 	return CCutsceneMgr::IsCutsceneProcessing() || CCutsceneMgr::IsRunning() ||
 	       (gSpecialWaitFrame != 0 && (uint32)(CTimer::GetFrameCounter() - gSpecialWaitFrame) < 120);
-}
-static inline uint32 StreamKeepM(void) { return StreamSceneHold() ? 30 : STREAM_KEEP_M; }
-
-// B178: a model stamped this frame closer than its own draw distance (plus
-// the renderer's fade and request margins) is on screen, or will be asked for
-// again the moment it goes. Evicting it bought one model's room for another
-// visible model: b177f evicted nbw_bush01 at 210-226 m and wshnrthroad02 at
-// 94 m, each three or four times in five minutes — every copy vanished and
-// faded back in (m_alpha is per model), the blinking bushes and asphalt.
-// Only the script's own loads, a scene being set up and the heap floor may
-// spend them; anything else fails its load and stays at LOD a little longer.
-static bool gEvictShownOK;
-static bool
-ModelShown(int32 id, uint32 d)
-{
-	if(d == 65535 || id < 0 || id >= MODELINFOSIZE)
-		return false;
-	CBaseModelInfo *mi = CModelInfo::GetModelInfo(id);
-	float reach = mi->IsSimple() ? ((CSimpleModelInfo*)mi)->GetLargestLodDistance() : 150.0f;
-	return (float)d < reach + FADE_DISTANCE + STREAM_DISTANCE;
 }
 
 // B148: the docks script also waits on HAS_MODEL_LOADED 295-298 (cutscene
@@ -2557,7 +2302,7 @@ extern "C" void gcScriptWaitDiag(int32 m)
 }
 
 bool
-CStreaming::RemoveLeastUsedModel(uint32 excludeMask, uint32 minBytes, bool ignoreRecent)
+CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 {
 #ifdef GTA_OGC
 	// B125: never a script-owned or DONT_REMOVE model. Every caller here
@@ -2571,62 +2316,8 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, uint32 minBytes, bool ignor
 	int streamId;
 
 #ifdef GTA_OGC
-	// Farthest first, never the near set. The LRU walk below evicted whatever
-	// had lost its RW objects behind the camera — near buildings included —
-	// and reloaded them on the next turn: the load/evict loop that blinked.
-	{
-		// B124: the emergency shed asks for a hole of `minBytes`. Evicting 14
-		// far peds and plants (b123, docks scene) freed 1.4MB in crumbs and no
-		// 45K hole; a single far model at least that big frees one. Prefer the
-		// farthest such model, fall back to plain farthest-first.
-		// B141: a cutscene is a fixed camera; while one is being set up or
-		// running, the outdoor near set that LoadScene pulled in may go —
-		// keep 30 m, not 80, and do not spare just-loaded models. b140 parked
-		// at the office scene with 214K free, chunks full and 'shed 0 models'.
-		bool cut = StreamSceneHold();
-		uint32 keepM = StreamKeepM();
-		bool shownOK = cut || gEvictShownOK || gcEssentialLoad;   // B178
-		if(cut || gAheadDistance != 0) ignoreRecent = true;
-		int bestId = -1; uint32 bestDist = 0;
-		int bigId = -1; uint32 bigDist = 0;
-		for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
-			if(si->m_flags & excludeMask)
-				continue;
-			streamId = si - ms_aInfoForModel;
-			if(streamId >= STREAM_OFFSET_TXD)
-				continue;
-			if(CModelInfo::GetModelInfo(streamId)->GetNumRefs() != 0)
-				continue;
-			if(!ignoreRecent && LoadedRecently(streamId))   // B140: the emergency shed's second pass may take a just-loaded far model (b139: OOM at the hotel with 'shed 0 models', everything recent)
-				continue;
-			// B114: never a LOD shell in the farthest-first pass. Shells live only
-			// in ms_bigBuildingsList and were never distance-stamped, so they read
-			// 65535 = "farthest" and went first (282 of 300 traced evictions,
-			// 121 named LOD*): no HD past 80 m and no shell = an invisible
-			// building, shell reloads = LOD, car reaches 80 m = HD. The shells
-			// are the far fallback; the stock LRU pass below may still take one
-			// when nothing else is left.
-			CBaseModelInfo *model = CModelInfo::GetModelInfo(streamId);
-			if(model->IsSimple() && ((CSimpleModelInfo*)model)->m_isBigBuilding)
-				continue;
-			uint32 d = ModelDistNow(streamId);
-			if(d < keepM)   // B93: the renderer keeps requesting loaded models to 90m (B88); evicting inside that ring was the standing-still ping-pong (evict +450/min, blink +8/min)
-				continue;
-			if(!shownOK && ModelShown(streamId, d))   // B178
-				continue;
-			if(d > bestDist){ bestDist = d; bestId = streamId; }
-			if(minBytes){
-				uint32 posn, size;
-				if(ms_aInfoForModel[streamId].GetCdPosnAndSize(posn, size) && size*CDSTREAM_SECTOR_SIZE >= minBytes && d > bigDist){ bigDist = d; bigId = streamId; }
-			}
-		}
-		if(bigId >= 0) bestId = bigId;
-		if(bestId >= 0){
-			TraceEvict(bestId);
-			RemoveModel(bestId);
-			return true;
-		}
-	}
+	if(StreamSceneHold())
+		ignoreRecent = true;
 #endif
 
 	for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
@@ -2635,9 +2326,7 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, uint32 minBytes, bool ignor
 		streamId = si - ms_aInfoForModel;
 		if(streamId < STREAM_OFFSET_TXD){
 #ifdef GTA_OGC
-			if(ModelDistNow(streamId) < STREAM_KEEP_M || LoadedRecently(streamId))
-				continue;
-			if(!StreamSceneHold() && !gEvictShownOK && !gcEssentialLoad && ModelShown(streamId, ModelDistNow(streamId)))   // B178
+			if(!ignoreRecent && LoadedRecently(streamId))
 				continue;
 #endif
 			if (CModelInfo::GetModelInfo(streamId)->GetNumRefs() == 0) {
@@ -3955,7 +3644,7 @@ CStreaming::UpdateMemoryUsed(void)
 #endif
 }
 
-#define STREAM_DIST 60.0f   // user, 09-02: the all-directions HD scan at 60 m (was 80); = STREAM_NEAR_M, so the near ring and the request ring coincide
+#define STREAM_DIST 80.0f
 
 void
 CStreaming::AddModelsToRequestList(const CVector &pos, int32 flags)
@@ -4430,12 +4119,8 @@ CStreaming::DeleteRwObjectsBehindCameraInSectorList(CPtrList &list, size_t mem)
 		   e->m_rwObject && ms_aInfoForModel[e->GetModelIndex()].m_next &&
 		   FindPlayerPed()->m_pCurSurface != e){
 			e->DeleteRwObject();
-			// The RW object goes (cheap to rebuild); the MODEL stays if any
-			// instance stands within STREAM_NEAR_M — B33 traced the near-set
-			// blink to this line, not to RemoveLeastUsedModel.
 			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0
 #ifdef GTA_OGC
-			    && ModelDistNow(e->GetModelIndex()) >= StreamKeepM()   // B106: the whole request ring, not just the near disc; B142: 30 m while a scene holds
 			    && CanRemoveModel(e->GetModelIndex())   // B137: RemoveModel on a QUEUED script-owned model cancels its request (b136: specialchar 110 'state 0 req 0' forever)
 #endif
 			    ) {
@@ -4465,12 +4150,8 @@ CStreaming::DeleteRwObjectsNotInFrustumInSectorList(CPtrList &list, size_t mem)
 #endif
 		   e->m_rwObject && (!e->IsVisible() || e->bOffscreen) && ms_aInfoForModel[e->GetModelIndex()].m_next){
 			e->DeleteRwObject();
-			// The RW object goes (cheap to rebuild); the MODEL stays if any
-			// instance stands within STREAM_NEAR_M — B33 traced the near-set
-			// blink to this line, not to RemoveLeastUsedModel.
 			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0
 #ifdef GTA_OGC
-			    && ModelDistNow(e->GetModelIndex()) >= StreamKeepM()   // B106: the whole request ring, not just the near disc; B142: 30 m while a scene holds
 			    && CanRemoveModel(e->GetModelIndex())   // B137: RemoveModel on a QUEUED script-owned model cancels its request (b136: specialchar 110 'state 0 req 0' forever)
 #endif
 			    ) {
@@ -4553,8 +4234,6 @@ void
 CStreaming::LoadScene(const CVector &pos)
 {
 #ifdef GTA_OGC
-	gNearFocus = pos; gNearFocusCalls = 90;   // ~6s of BuildNearSet calls (every 4 frames)
-	BuildNearSet();
 	HonestBudget();   // B107: not Init2's boot number
 	printf("STREAM loadscene budget %uK used %uK\n", (unsigned)(ms_memoryAvailable/1024), (unsigned)(ms_memoryUsed/1024));
 #endif

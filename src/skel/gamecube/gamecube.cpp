@@ -1005,11 +1005,8 @@ extern "C" unsigned gIsoRdN, gIsoRdJumps;   // dvdfs.c: sector reads issued, and
 extern "C" void fsDiscStatsPrint(void);
 extern "C" int gcVoiceCensusLine(char *out, int cap);   // sampman_gamecube.cpp (B155)
 extern unsigned gxColorBytes;   // gxraster.cpp
-extern unsigned gNearN, gNearMiss, gBlink;   // Streaming.cpp near set, LOD flips
-extern unsigned gAheadN, gAheadMiss, gAheadDistance;
 extern unsigned gcMemoryMoves, gcMemoryMovedBytes;
 extern "C" void gcStreamClassCensus(unsigned out[6]);   // B88
-extern float gStreamRadius;
 static void
 gcHeapLine(char *out, size_t n)
 {
@@ -1025,11 +1022,11 @@ gcHeapLine(char *out, size_t n)
 	extern unsigned gxAramBytes, gxWsBytes, gxWsPeak, gxPageIns, gxWsStarved, gxWsForced, gxSpills, gxWsFrameBytes, gxWsFramePeak, gxShareBytes, gxWsShared;
 	extern uint32 gStrEvict;
 	extern unsigned gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps;
-	snprintf(out, n, "heap used %uK free %uK big %u/%uK/%uK/%uK/%u | str %uK (b%u c%u v%u p%u t%u o%u) tex %uK dl %uK col %uK pools %uK | aram %uK share %uK ws %uK/%uK wsframe %uK/%uK pagein %u/%u starve %u/%u spill %u evict %u | snd starved %u pumps %u voices starved %u pumps %u | dvd reads %u seeks %u | near %u/%u r %um blink %u | ft %u/%ums",
+	snprintf(out, n, "heap used %uK free %uK big %u/%uK/%uK/%uK/%u | str %uK (b%u c%u v%u p%u t%u o%u) tex %uK dl %uK col %uK pools %uK | aram %uK share %uK ws %uK/%uK wsframe %uK/%uK pagein %u/%u starve %u/%u spill %u evict %u | snd starved %u pumps %u voices starved %u pumps %u | dvd reads %u seeks %u | ft %u/%ums",
 	    (unsigned)(mi.arena - mi.fordblks)/1024, (unsigned)mi.fordblks/1024, bigC, bigU, bigF, bigL, bigX,
 	    (unsigned)(CStreaming::ms_memoryUsed/1024), cls[0]/1024, cls[1]/1024, cls[2]/1024, cls[3]/1024, cls[4]/1024, cls[5]/1024, gxTiledBytes/1024,
 	    (unsigned)(rw::gx::gxDlBytes/1024), (unsigned)(gxColorBytes/1024), (unsigned)(pools/1024),
-	    gxAramBytes/1024, gxShareBytes/1024, gxWsBytes/1024, gxWsPeak/1024, gxWsFrameBytes/1024, gxWsFramePeak/1024, gxPageIns, gxWsShared, gxWsStarved, gxWsForced, gxSpills, (unsigned)gStrEvict, gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps, gIsoRdN, gIsoRdJumps, gNearMiss, gNearN, (unsigned)gStreamRadius, gBlink, gFtN ? (unsigned)(gFtSum/gFtN/1000) : 0, gFtMax/1000);
+	    gxAramBytes/1024, gxShareBytes/1024, gxWsBytes/1024, gxWsPeak/1024, gxWsFrameBytes/1024, gxWsFramePeak/1024, gxPageIns, gxWsShared, gxWsStarved, gxWsForced, gxSpills, (unsigned)gStrEvict, gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps, gIsoRdN, gIsoRdJumps, gFtN ? (unsigned)(gFtSum/gFtN/1000) : 0, gFtMax/1000);
 	gFtSum = gFtMax = gFtN = 0;
 }
 
@@ -1951,8 +1948,7 @@ main(int, char *[])
 					printf("CENSUS %s\n", heap);
 					fsDiscStatsPrint();
 					if(censusTick % 1800 == 0) gcHeapCensusDump("periodic");   // DIAG b176: top live sites once a minute
-					printf("STREAM ahead %u/%u reach %um compact %u moves %uK\n",
-					       gAheadMiss, gAheadN, gAheadDistance, gcMemoryMoves, gcMemoryMovedBytes/1024);
+					printf("STREAM compact %u moves %uK\n", gcMemoryMoves, gcMemoryMovedBytes/1024);
 					{ char prof[420]; gcProfLine(prof, sizeof(prof), frames); printf("PROF %u frames avg/max ms: %s\n", (unsigned)frames, prof); }   // B155
 					if(censusTick % 1800 == 0) gcHeapCensusDump("play");   // B155: every minute
 					// The tier's boot-time lines go to the screen console; say once here.

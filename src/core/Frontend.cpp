@@ -504,22 +504,7 @@ CMenuManager::CMenuManager()
 	m_PrefsRadioStation = 0;
 	m_PrefsStereoMono = 1;
 	m_PrefsBrightness = 256;
-#ifdef GTA_OGC
-	// Effects on, but the draw distance back at the engine default rather than
-	// the top of the slider. 1.8 was tried and it brought the LOD flicker
-	// straight back: it asks for more world than the streaming budget holds,
-	// so MakeSpaceFor evicts on every request and models blink in and out.
-	// That is the same cliff the budget comment in Streaming.cpp describes, hit
-	// from the demand side instead of the supply side.
-	//
-	// It cannot be turned down in game while the pause menu freezes, so
-	// shipping a value that flickers would leave no way out. Raise this once
-	// the streamer can hold what it asks for.
-	m_PrefsLOD = 0.925f;
-	CRenderer::ms_lodDistScale = m_PrefsLOD;
-#else
 	m_PrefsLOD = CRenderer::ms_lodDistScale;
-#endif
 	m_KeyPressedCode = -1;
 	m_bFrontEnd_ReloadObrTxtGxt = false;
 	m_PrefsMP3BoostVolume = 0;
@@ -5119,11 +5104,7 @@ CMenuManager::ProcessUserInput(uint8 goDown, uint8 goUp, uint8 optionSelected, u
 					SaveSettings();
 				} else if (m_nCurrScreen == MENUPAGE_DISPLAY_SETTINGS) {
 					m_PrefsBrightness = 256;
-#ifdef GTA_OGC
-					m_PrefsLOD = 0.925f;
-#else
 					m_PrefsLOD = 1.2f;
-#endif
 #ifdef LEGACY_MENU_OPTIONS
 					m_PrefsVsync = true;
 #endif

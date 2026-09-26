@@ -80,18 +80,7 @@ CEntity *CRenderer::ms_aVisibleBuildingPtrs[NUMVISIBLEENTITIES];
 CVUVECTOR CRenderer::ms_vecCameraPosition;
 CVehicle *CRenderer::m_pFirstPersonVehicle;
 bool CRenderer::m_loadingPriority;
-#ifdef GTA_OGC
-// 0.925, not the PC default of 1.2 — and this is a *memory* decision, not a
-// frame-rate one. It feeds TheCamera.LODDistMultiplier (Camera.cpp:
-// LODDistMultiplier *= ms_lodDistScale), so it sets how much world is asked
-// for at once. Streaming here gets 7428K against reVC's 65MB floor on PC, so
-// the working set has to be small enough that the streamer never overcommits;
-// at 1.2 it requests more world than the budget can hold and the surplus fails
-// to load. Raising this only helps once the budget does.
 float CRenderer::ms_lodDistScale = 1.2f;
-#else
-float CRenderer::ms_lodDistScale = 1.2f;
-#endif
 
 // unused
 BlockedRange CRenderer::aBlockedRanges[16];
@@ -769,10 +758,6 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 
 	dist = (ent->GetPosition() - ms_vecCameraPosition).Magnitude();
 
-#ifdef GTA_OGC
-	CStreaming::NoteModelDistance(ent->GetModelIndex(), dist);
-#endif
-
 #ifndef FIX_BUGS
 	// Whatever this is supposed to do, it breaks fading for objects
 	// whose draw dist is > LOD_DISTANCE-FADE_DISTANCE, i.e. 280
@@ -1012,9 +997,6 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 			// Shared-alpha pop fix, same as SetupEntityVisibility.
 			return VIS_INVISIBLE;
 		}
-#ifdef GTA_OGC
-		CStreaming::NoteModelDistance(ent->GetModelIndex(), 0.0f);
-#endif
 		mi->IncreaseAlpha();
 
 		if(mi->m_alpha != 255){
@@ -1060,9 +1042,6 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 		// Shared-alpha pop fix, same as SetupEntityVisibility.
 		return VIS_INVISIBLE;
 	}
-#ifdef GTA_OGC
-	CStreaming::NoteModelDistance(ent->GetModelIndex(), 0.0f);
-#endif
 	mi->IncreaseAlpha();
 	CVisibilityPlugins::InsertEntityIntoSortedList(ent, dist);
 	ent->bDistanceFade = true;
@@ -1640,16 +1619,9 @@ CRenderer::ScanSectorList(CPtrList *lists)
 					ms_aInVisibleEntityPtrs[ms_nNoOfInVisibleEntities++] = ent;
 				break;
 			case VIS_STREAMME:
-				if(!CStreaming::ms_disableStreaming){
-#ifdef GTA_OGC
-					int flags = CStreaming::ModelDistNow(ent->GetModelIndex()) < STREAM_HD_NEAR_M ? STREAMFLAGS_PRIORITY : 0;
-					if(flags || !m_loadingPriority || CStreaming::ms_numModelsRequested < 10)
-						CStreaming::RequestModel(ent->GetModelIndex(), flags);
-#else
+				if(!CStreaming::ms_disableStreaming)
 					if(!m_loadingPriority || CStreaming::ms_numModelsRequested < 10)
 						CStreaming::RequestModel(ent->GetModelIndex(), 0);
-#endif
-				}
 				break;
 			}
 		}
@@ -1693,13 +1665,11 @@ CRenderer::ScanSectorList_Priority(CPtrList *lists)
 				break;
 			case VIS_STREAMME:
 				if(!CStreaming::ms_disableStreaming){
+					CStreaming::RequestModel(ent->GetModelIndex(), 0);
 #ifdef GTA_OGC
-					int flags = CStreaming::ModelDistNow(ent->GetModelIndex()) < STREAM_HD_NEAR_M ? STREAMFLAGS_PRIORITY : 0;
-					CStreaming::RequestModel(ent->GetModelIndex(), flags);
 					int state = CStreaming::ms_aInfoForModel[ent->GetModelIndex()].m_loadState;
 					if(state == STREAMSTATE_INQUEUE || state == STREAMSTATE_READING || state == STREAMSTATE_STARTED)
 #else
-					CStreaming::RequestModel(ent->GetModelIndex(), 0);
 					if(CStreaming::ms_aInfoForModel[ent->GetModelIndex()].m_loadState != STREAMSTATE_LOADED)
 #endif
 						m_loadingPriority = true;
@@ -1806,9 +1776,6 @@ CRenderer::ShouldModelBeStreamed(CEntity *ent, const CVector &campos)
 		if(!CClock::GetIsTimeInRange(mi->GetTimeOn(), mi->GetTimeOff()))
 			return false;
 	float dist = (ent->GetPosition() - campos).Magnitude();
-#ifdef GTA_OGC
-	CStreaming::NoteModelDistance(ent->GetModelIndex(), dist);
-#endif
 	if(mi->m_noFade)
 		return dist - STREAM_DISTANCE < mi->GetLargestLodDistance();
 	else
