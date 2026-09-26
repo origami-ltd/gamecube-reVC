@@ -967,6 +967,9 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 		return ent->IsVisible() ? VIS_VISIBLE : VIS_INVISIBLE;
 
 	float dist = (ms_vecCameraPosition-ent->GetPosition()).Magnitude();
+#ifdef GTA_OGC
+	CStreaming::NoteModelDistance(ent->GetModelIndex(), dist);   // a LOD in view is not a free eviction
+#endif
 	CSimpleModelInfo *nonLOD = mi->GetRelatedModel();
 
 	// Find out whether to draw below near distance.

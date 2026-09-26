@@ -2404,8 +2404,12 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 	// need their detail). LOD shells are skipped here: they are the far
 	// fallback, and the stock pass below may still take one when nothing
 	// else is left (B114).
+	// b207: with every detail model just loaded, the stock pass below took
+	// LOD shells in LRU order, drawn or not, while the detail model they
+	// stand in for was deferred at the heap floor — the building vanished.
+	// Now a LOD goes only when nothing drew it for 60 frames.
 	{
-		int bestId = -1;
+		int bestId = -1, lodId = -1;
 		uint32 bestDist = 0;
 		for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
 			if(si->m_flags & excludeMask)
@@ -2418,11 +2422,14 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 			CBaseModelInfo *model = CModelInfo::GetModelInfo(streamId);
 			if(model->GetNumRefs() != 0)
 				continue;
-			if(model->IsSimple() && ((CSimpleModelInfo*)model)->m_isBigBuilding)
+			if(model->IsSimple() && ((CSimpleModelInfo*)model)->m_isBigBuilding){
+				if(lodId < 0 && ModelDistNow(streamId) == 65535) lodId = streamId;
 				continue;
+			}
 			uint32 d = ModelDistNow(streamId);
 			if(bestId < 0 || d > bestDist){ bestId = streamId; bestDist = d; }
 		}
+		if(bestId < 0) bestId = lodId;
 		if(bestId >= 0){
 			TraceEvict(bestId);
 			RemoveModel(bestId);
@@ -2439,6 +2446,9 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 #ifdef GTA_OGC
 			if(!ignoreRecent && LoadedRecently(streamId))
 				continue;
+			if(ModelDistNow(streamId) != 65535 && CModelInfo::GetModelInfo(streamId)->IsSimple() &&
+			   ((CSimpleModelInfo*)CModelInfo::GetModelInfo(streamId))->m_isBigBuilding)
+				continue;   // a LOD on screen (see above)
 #endif
 			if (CModelInfo::GetModelInfo(streamId)->GetNumRefs() == 0) {
 				TraceEvict(streamId);
