@@ -552,11 +552,17 @@ static_assert(false, "SUPPORT_XBOX_SCRIPT and SUPPORT_MOBILE_SCRIPT are mutually
 #endif
 #define BIG_IMG // Not complete - allows to read larger img files
 
+#ifdef GTA_OGC
+#define SQUEEZE_PERFORMANCE   // as dca3 (Dreamcast): fewer per-frame updates, 32 rubbish sheets, stock despawn range
+#else
 //#define SQUEEZE_PERFORMANCE
+#endif
 #ifdef SQUEEZE_PERFORMANCE
 	#undef PS2_ALPHA_TEST
 	#undef NO_ISLAND_LOADING
+#ifndef GTA_OGC   // dca3 keeps the PS2's 43 audio channels
 	#undef PS2_AUDIO_CHANNELS
+#endif
 	#undef EXTENDED_OFFSCREEN_DESPAWN_RANGE
 #endif
 
