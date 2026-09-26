@@ -17,7 +17,8 @@ Playable from the **GameCube ISO**, still a work in progress.
   20 fps under load: rain, crashes, police chases. Loads triggered by
   mission scripts can stall for 1–3 s.
 - Trade-offs for memory: motion blur is off, and with the heap near its
-  limit a car occasionally fails to spawn.
+  limit a car occasionally fails to spawn or a building briefly drops to
+  its LOD.
 - Not tested yet: missions beyond the opening, memory card saves and
   sessions of several hours.
 
@@ -26,8 +27,8 @@ Playable from the **GameCube ISO**, still a work in progress.
 - **Renderer** — a native GX backend for librw (`vendor/librw/src/gx`).
   Textures are converted ahead of time to GameCube formats (CMPR, RGB5A3,
   lossless CI8 palettes); textures shared between TXDs are stored once in a
-  shared texel pool, and texels that do not fit in MEM1 live in an ARAM
-  tier. Map, vehicle and pad geometry is pre-instanced as native GX meshes
+  shared texel pool; texels live in an ARAM store and are paged into a
+  2.25 MB MEM1 window as they are drawn. Map, vehicle and pad geometry is pre-instanced as native GX meshes
   inside `gta3.img` (packed int16 vertex streams), static meshes are
   replayed as display lists, and lighting runs on TEV stages (prelight plus
   timecycle ambient, with optional env-map, rim-light and lightmap stages).
@@ -40,8 +41,11 @@ Playable from the **GameCube ISO**, still a work in progress.
   (`src/skel/gamecube/dvdfs.c`) with sector-aligned DMA reads, `gta3.img`
   laid out in seek order (models next to their textures, the map in spatial
   order), an ARAM cache in front of the streaming reads and a streaming
-  budget sized to what is left of MEM1. Audio reads go through their own
-  channel so music never waits behind the world.
+  budget sized to what is left of MEM1, with 1 MB of headroom. Eviction
+  goes by distance from the camera: the farthest detail model first, then
+  the farthest LODs, so the buildings around the player keep their detail.
+  Audio reads go through their own channel so music never waits behind the
+  world.
 - **Frontend** — a GameCube controls page with a 3D controller model, and
   help boxes that display the port's actual button bindings as coloured
   GameCube button badges.
@@ -62,9 +66,12 @@ a 1.46 GB mini-DVD image. Textures of 256 texels and up are halved (a power
 of two, as the GX hardware needs for repeating textures) unless the half
 size, magnified back the way the GPU draws it, scores a mean SSIM under
 0.70 — thin structure such as mesh fences, lettering and grilles stays at
-full size. Everything else is lossless: the PC's DXT1 blocks move to CMPR
-bit for bit, 16-bit textures with few colours become CI8 palettes, and
-textures shared between dictionaries are stored once.
+full size — or its name marks a shop front, sign, poster or awning, which
+always keep full size. Everything else is lossless: the PC's DXT1 blocks
+move to CMPR bit for bit, 16-bit textures with few colours become CI8
+palettes, and textures shared between dictionaries are stored once. This is
+the default for both Docker and the native build; `--full-textures` keeps
+every texture at full size for comparisons (slower in game).
 
 ### Docker (recommended)
 
@@ -148,10 +155,23 @@ and Windows steps follow the same requirements but have not been run.
 
 ## Running
 
-Open `build/release/reVC-GameCube.iso` in Dolphin. Use DSP LLE with
-`DSPThread = False` under `[Core]` in `Dolphin.ini`: DSP HLE on its own
-thread can deliver the DSP interrupt before its mail and freeze the game.
-On a console, load the ISO with Swiss or an optical drive emulator.
+Open `build/release/reVC-GameCube.iso` (or `out/reVC-GameCube.iso` from
+Docker) in Dolphin. The settings it is tested with, under `[Core]` in
+`Dolphin.ini`:
+
+```ini
+DSPHLE = False
+DSPThread = False
+FastDiscSpeed = False
+```
+
+DSP LLE on the CPU thread: DSP HLE on its own thread can raise the DSP
+interrupt before its mail and freeze the game. `FastDiscSpeed = False`
+keeps the real drive's speed, which is what the streaming is tuned for.
+Leave Background Input off in the controller settings, or typing in
+another window reaches the pad. Progressive scan on, 4:3, native internal
+resolution. On a console, load the ISO with Swiss or an optical drive
+emulator.
 
 ## Credits
 
