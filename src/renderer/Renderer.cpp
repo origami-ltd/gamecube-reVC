@@ -671,6 +671,20 @@ enum Visbility
 #define OTHERUNAVAILABLE (other != -1 && CModelInfo::GetModelInfo(other)->GetRwObject() == nil)
 #define CANTIMECULL (!OTHERUNAVAILABLE)
 
+// Off screen the LOD->HD fade completes at once, as in the original: a
+// model that streamed in out of view must not crossfade when it comes into
+// view. m_alpha is shared by every instance, so the snap waits while an
+// instance of the model was on screen this frame or the last — otherwise the
+// one in view pops. IncreaseAlpha stamps m_alphaFrame and runs on screen only.
+static void
+FinishFadeOffscreen(CSimpleModelInfo *mi)
+{
+#ifdef GTA_OGC
+	if((uint16)((uint16)CTimer::GetFrameCounter() - mi->m_alphaFrame) > 1)
+#endif
+		mi->m_alpha = 255;
+}
+
 int32
 CRenderer::SetupEntityVisibility(CEntity *ent)
 {
@@ -856,12 +870,7 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 			return VIS_INVISIBLE;
 
 		if(!ent->GetIsOnScreen() || ent->IsEntityOccluded()){
-			// GTA_OGC: do NOT complete the fade here. m_alpha is shared by
-			// every instance of the model, and one offscreen lamppost was
-			// snapping all its onscreen siblings to full opacity — the
-			// "pop-in with no fade". Freeze mid-fade; it resumes on screen.
-			// IncreaseAlpha moved BELOW this check for the same reason: an
-			// offscreen instance must not advance the shared fade either.
+			FinishFadeOffscreen(mi);
 			return VIS_OFFSCREEN;
 		}
 		mi->IncreaseAlpha();
@@ -913,7 +922,7 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 		return VIS_INVISIBLE;
 
 	if(!ent->GetIsOnScreen() || ent->IsEntityOccluded()){
-		// See above: never let an offscreen instance advance the shared fade.
+		FinishFadeOffscreen(mi);
 		return VIS_OFFSCREEN;
 	}else{
 		mi->IncreaseAlpha();
@@ -994,7 +1003,7 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 		if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 			RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
 		if(!ent->IsVisible() || !ent->GetIsOnScreenComplex() || ent->IsEntityOccluded()){
-			// Shared-alpha pop fix, same as SetupEntityVisibility.
+			FinishFadeOffscreen(mi);
 			return VIS_INVISIBLE;
 		}
 		mi->IncreaseAlpha();
@@ -1039,7 +1048,7 @@ CRenderer::SetupBigBuildingVisibility(CEntity *ent)
 	if(RpAtomicGetGeometry(a) != RpAtomicGetGeometry(rwobj))
 		RpAtomicSetGeometry(rwobj, RpAtomicGetGeometry(a), rpATOMICSAMEBOUNDINGSPHERE); // originally 5 (mistake?)
 	if(!ent->IsVisible() || !ent->GetIsOnScreenComplex() || ent->IsEntityOccluded()){
-		// Shared-alpha pop fix, same as SetupEntityVisibility.
+		FinishFadeOffscreen(mi);
 		return VIS_INVISIBLE;
 	}
 	mi->IncreaseAlpha();
