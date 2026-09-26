@@ -1180,6 +1180,43 @@ psInitConsole(void)
 	VIDEO_WaitVSync();
 }
 
+// The Gekko has no fsqrt, and newlib's sqrtf is a bit-by-bit integer loop
+// behind an errno wrapper — every Magnitude() in the game, librw's length()
+// and all 159 call sites paid for it. The frsqrte estimate (1/32 accurate)
+// and three Newton steps in double precision give the float result; dca3
+// does the same with the SH4's fsrra. This definition replaces libm's for
+// the whole link. Zero, negatives, NaN, infinity and denormals take the
+// exact path.
+extern "C" float __ieee754_sqrtf(float);
+extern "C" float
+sqrtf(float x)
+{
+	if(!(x >= 1.17549435e-38f && x <= 3.40282347e38f))
+		return __ieee754_sqrtf(x);
+	double y, h = 0.5*(double)x;
+	__asm__("frsqrte %0,%1" : "=f"(y) : "f"((double)x));
+	y = y*(1.5 - h*y*y);
+	y = y*(1.5 - h*y*y);
+	y = y*(1.5 - h*y*y);
+	return (float)((double)x*y);
+}
+
+// Boot check for the sqrtf above: the worst error against libm's exact root
+// over a sweep of magnitudes, in float ulps. Expect 0 or 1.
+static void
+gcSqrtCheck(void)
+{
+	uint32 worst = 0; float at = 0.0f;
+	for(float x = 1.0e-30f; x < 1.0e30f; x *= 1.0137f){
+		float a = sqrtf(x), b = __ieee754_sqrtf(x);
+		int32 ia, ib;
+		memcpy(&ia, &a, 4); memcpy(&ib, &b, 4);
+		uint32 d = (uint32)(ia > ib ? ia - ib : ib - ia);
+		if(d > worst){ worst = d; at = x; }
+	}
+	printf("SQRT check: worst %u ulp at %g\n", (unsigned)worst, (double)at);
+}
+
 RwBool
 psInitialize(void)
 {
@@ -1946,6 +1983,7 @@ main(int, char *[])
 					char heap[460];
 					gcHeapLine(heap, sizeof(heap));
 					printf("CENSUS %s\n", heap);
+					{ static bool sqrtChecked; if(!sqrtChecked){ sqrtChecked = true; gcSqrtCheck(); } }
 					fsDiscStatsPrint();
 					if(censusTick % 1800 == 0) gcHeapCensusDump("periodic");   // DIAG b176: top live sites once a minute
 					printf("STREAM compact %u moves %uK\n", gcMemoryMoves, gcMemoryMovedBytes/1024);
