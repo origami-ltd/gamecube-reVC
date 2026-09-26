@@ -32,7 +32,6 @@
 #include "MusicManager.h"
 #include "Frontend.h"
 #include "CdStream.h"
-#include "CdStream.h"
 
 #include <gccore.h>
 #include <aesndlib.h>

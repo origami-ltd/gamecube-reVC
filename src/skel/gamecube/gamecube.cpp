@@ -527,6 +527,9 @@ extern "C" void gcBootLevelLoaded(void)
 	while(gBigChunks < 3 && gcBigAddChunk()) ;
 	printf("HEAP: chunks kept from now: %d\n", (int)gBigChunks);
 	gcBigReport();
+	extern unsigned gxViTVMode, gxHaveComponent, gxXfbHeight;
+	printf("VIDEO mode %u (%s) component cable %u xfb %u\n", gxViTVMode,
+	    (gxViTVMode & 3) == 2 ? "progressive" : "interlaced", gxHaveComponent, gxXfbHeight);
 }
 static uint32 gBigUsed, gBigFails;
 static void *gcBigAllocIn(BigChunk *c, uint32 size, int32 begin = 0)
