@@ -3,38 +3,49 @@
 A Nintendo GameCube port of Grand Theft Auto: Vice City, based on the
 reverse-engineered engine from [mrxenginner/reVC](https://github.com/mrxenginner/reVC).
 
-The port targets real GameCube hardware constraints: the heap is limited to
-the console's 24 MB of MEM1, audio sample storage uses the 16 MB ARAM, and
-MEM2 (Wii-only memory) is never used — including in the Wii development
-build, which enforces the same limits.
+The port runs from a GameCube mini-DVD ISO within the console's limits:
+24 MB of MEM1 for the game and 16 MB of ARAM for texels, the sound bank,
+audio read-ahead and a disc read cache. A Wii build (SD card, MEM2) exists
+but is still a work in progress.
 
 ## Status
 
-Work in progress.
+Playable from the **GameCube ISO**, still a work in progress.
 
-- The game boots and plays from an **SD card** (Wii homebrew loader, or
-  Dolphin).
-- Generating a mini-DVD **ISO that boots on a real GameCube does not work
-  yet**. The ISO9660 path runs under Dolphin, but real-hardware disc boot is
-  an open problem.
+- The ISO boots through the movies, the menus and the intro into free roam.
+  Sessions of more than 30 minutes run without a crash.
+- 30 fps most of the time (94% of frames within 33 ms), dropping to about
+  20 fps under load: rain, crashes, police chases. Loads triggered by
+  mission scripts can stall for 1–3 s.
+- Trade-offs for memory: textures taller than 128 px are scaled to 75%,
+  motion blur is off, and with the heap near its limit a car occasionally
+  fails to spawn.
+- Not tested yet: missions beyond the opening, memory card saves and
+  sessions of several hours.
+- **Wii** (SD card, MEM2): boots, plays the movies and reaches the menu,
+  then hangs loading the game.
 
 ## Architecture
 
-- **Renderer** — a native GX backend for librw
-  (`vendor/librw/src/gx`). Textures are converted ahead of time to
-  GameCube-native formats (CMPR / RGB5A3) at full original quality; memory
-  pressure is handled by streaming and eviction, not by reducing asset
-  quality. World geometry is quantised to packed int16 vertex streams,
-  static meshes can be replayed as GP display lists, and lighting is
-  implemented with TEV stages (prelight plus timecycle ambient, with
-  optional env-map, rim-light and lightmap stages).
-- **Audio** — streamed music, radio and speech are Ogg Vorbis, decoded with
-  Tremor (fixed-point) on a dedicated thread so decoding never interrupts
-  the game frame. Mixing uses AESND's 32 hardware voices. Mission speech
-  (IMA ADPCM) is cached in ARAM. FMVs are decoded with Theora.
-- **Filesystem and streaming** — an ISO9660 driver written for this port
-  (`src/skel/gamecube/dvdfs.c`) plus libfat SD support, with sector-aligned
-  DMA reads and a streaming layer tuned for the 24 MB memory budget.
+- **Renderer** — a native GX backend for librw (`vendor/librw/src/gx`).
+  Textures are converted ahead of time to GameCube formats (CMPR, RGB5A3,
+  lossless CI8 palettes); textures shared between TXDs are stored once in a
+  shared texel pool, and texels that do not fit in MEM1 live in an ARAM
+  tier. Map, vehicle and pad geometry is pre-instanced as native GX meshes
+  inside `gta3.img` (packed int16 vertex streams), static meshes are
+  replayed as display lists, and lighting runs on TEV stages (prelight plus
+  timecycle ambient, with optional env-map, rim-light and lightmap stages).
+- **Audio** — the sound effect bank is IMA ADPCM held in ARAM. Cutscene and
+  mission speech and pedestrian comments are IMA ADPCM streamed from the
+  disc through an ARAM read-ahead ring; the radio is Ogg Vorbis decoded with
+  Tremor (fixed-point) on its own thread, so decoding never stalls the game
+  frame. AESND does the mixing. The movies are Theora.
+- **Disc and streaming** — an ISO9660 driver written for this port
+  (`src/skel/gamecube/dvdfs.c`) with sector-aligned DMA reads, `gta3.img`
+  laid out in seek order (models next to their textures, the map in spatial
+  order), an ARAM cache in front of the streaming reads and a streaming
+  budget sized to what is left of MEM1. Audio reads go through their own
+  channel so music never waits behind the world.
 - **Frontend** — a GameCube controls page with a 3D controller model, and
   help boxes that display the port's actual button bindings as coloured
   GameCube button badges.
@@ -144,12 +155,12 @@ and Windows steps follow the same requirements but have not been run.
 
 ## Running
 
-### GameCube (Dolphin)
+### GameCube
 
 Open `build/release/reVC-GameCube.iso` in Dolphin. Use DSP LLE with
 `DSPThread = False` under `[Core]` in `Dolphin.ini`: DSP HLE on its own
 thread can deliver the DSP interrupt before its mail and freeze the game.
-Real-hardware disc boot is untested — see [Status](#status).
+On a console, load the ISO with Swiss or an optical drive emulator.
 
 ### Wii (Homebrew Channel or Dolphin) — work in progress
 
