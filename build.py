@@ -233,9 +233,9 @@ def opening_movies(args, game):
 def disc_root(args, txdconv):
     """GTAVC -> the disc root, under build/assets/gamecube/root.
 
-    Textures taller than 128 at 75% (user-approved 09-03), CI8 palettes and
-    the shared texel pool (both need the ARAM tier), native map/vehicle/pad
-    geometry, console audio, the movies.
+    Textures at full size (user, 09-26), DXT1 moved to CMPR bit for bit, CI8
+    palettes and the shared texel pool (both need the ARAM tier), native
+    map/vehicle/pad geometry, console audio, the movies.
     """
     game = os.path.abspath(args.game or os.path.join(ROOT, "assets", "GTAVC"))
     if not os.path.isdir(os.path.join(game, "models")):
@@ -247,8 +247,7 @@ def disc_root(args, txdconv):
     os.makedirs(work)
 
     cmd = ["--game", game, "--out", root, "--txdconv", txdconv, "--gamefiles",
-           os.path.abspath(args.gamefiles or os.path.join(ROOT, "assets", "gamefiles")),
-           "--shrink", "128", "75"]
+           os.path.abspath(args.gamefiles or os.path.join(ROOT, "assets", "gamefiles"))]
     tool("build_sd.py", *cmd, "--preencoded-movies", opening_movies(args, game))
 
     # Converted once and kept across builds: minutes of ffmpeg/sox.

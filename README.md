@@ -16,9 +16,8 @@ Playable from the **GameCube ISO**, still a work in progress.
 - 30 fps most of the time (94% of frames within 33 ms), dropping to about
   20 fps under load: rain, crashes, police chases. Loads triggered by
   mission scripts can stall for 1–3 s.
-- Trade-offs for memory: textures taller than 128 px are scaled to 75%,
-  motion blur is off, and with the heap near its limit a car occasionally
-  fails to spawn.
+- Trade-offs for memory: motion blur is off, and with the heap near its
+  limit a car occasionally fails to spawn.
 - Not tested yet: missions beyond the opening, memory card saves and
   sessions of several hours.
 
@@ -58,9 +57,11 @@ without them the PC movies are encoded during the build.
 
 The build converts every texture to GX-native formats, repacks `gta3.img`
 with native map, vehicle and pad geometry, converts the audio (IMA ADPCM
-streams and sample bank, Vorbis radio) and the movies (Theora), with
-textures taller than 128 px at 75%, CI8 palettes and a shared texel pool,
-laid out on a 1.46 GB mini-DVD image.
+streams and sample bank, Vorbis radio) and the movies (Theora), laid out on
+a 1.46 GB mini-DVD image. Textures keep their full size; only lossless
+steps shrink them: the PC's DXT1 blocks are moved to CMPR bit for bit,
+16-bit textures with few colours become CI8 palettes, and textures shared
+between dictionaries are stored once.
 
 ### Docker (recommended)
 

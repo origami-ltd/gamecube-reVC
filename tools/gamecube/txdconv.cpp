@@ -166,6 +166,49 @@ tileCMPR(u8 *dst, const u8 *src, int w, int h, int tw, int th)
 	}
 }
 
+static u8 *decodeNative(const u8 *src, int w, int h, int fmt);
+static int gLosslessCMPR, gEncodedCMPR;   // for the summary line
+
+// DXT1 and CMPR are the same S3TC block: two RGB565 endpoints and sixteen
+// 2-bit indices, with the same 3-colour + transparent mode when c0 <= c1.
+// Only the byte order (big-endian), the index order in a row (first texel in
+// the high bits) and the tiling (2x2 blocks per 8x8 tile) differ, so the PC
+// blocks move over bit for bit instead of being decoded and re-encoded by
+// tileCMPR's min/max fit. The result is decoded and compared with the source
+// decode; any mismatch returns false and the caller re-encodes.
+static bool
+transcodeDXT1(u8 *dst, const u8 *src, const u8 *rgba, int w, int h, bool opaque)
+{
+	int bpr = w/4;
+	u8 *out = dst;
+	for(int ty = 0; ty < h; ty += 8)
+	for(int tx = 0; tx < w; tx += 8)
+	for(int sub = 0; sub < 4; sub++, out += 8){
+		const u8 *b = src + ((size_t)((ty + (sub>>1)*4)/4)*bpr + (tx + (sub&1)*4)/4)*8;
+		uint16 c0 = b[0] | b[1]<<8, c1 = b[2] | b[3]<<8;
+		out[0] = b[1]; out[1] = b[0]; out[2] = b[3]; out[3] = b[2];
+		for(int row = 0; row < 4; row++){
+			u8 s = b[4+row], o = 0;
+			for(int x = 0; x < 4; x++){
+				int v = (s >> 2*x) & 3;
+				// An opaque (C565) raster draws index 3 of the 3-colour mode
+				// as black; CMPR would make it transparent.
+				if(opaque && c0 <= c1 && v == 3) return false;
+				o |= v << (6 - 2*x);
+			}
+			out[4+row] = o;
+		}
+	}
+	u8 *back = decodeNative(dst, w, h, GXFMT_CMPR);
+	bool same = true;
+	for(size_t i = 0; i < (size_t)w*h*4 && same; i++){
+		int d = back[i] - rgba[i];
+		same = (i & 3) == 3 ? d == 0 : d >= -4 && d <= 4;   // the decoders round the 1/3 mixes differently
+	}
+	free(back);
+	return same;
+}
+
 // ---- native GX texture chunk, matching gxraster.cpp's reader ---------------
 enum { GXNATIVE_HEADER = 88 };
 
@@ -220,11 +263,12 @@ resampleArea(u8 *src, int w, int h, int nw, int nh)
 // a dictionary read off disc, and a loose TGA. Destroys img.
 static bool
 convertImage(Image *img, const char *name, const char *mask,
-	uint32 filterAddressing, uint32 format, Conv *out)
+	uint32 filterAddressing, uint32 format, Conv *out, const u8 *dxt1 = nil)
 {
 	if(img == nil) return false;
 	img->unpalettize(true);
 	int w = img->width, h = img->height;
+	const int srcW = w, srcH = h;   // dxt1 describes the texture at this size
 	if(w <= 0 || h <= 0){ img->destroy(); return false; }
 
 	// Halve until both axes are inside gMaxDim, keeping powers of two: GX
@@ -321,7 +365,15 @@ convertImage(Image *img, const char *name, const char *mask,
 	out->size = gxFmt == GXFMT_CMPR ? (uint32)tw*th/2 :
 	            gxFmt == GXFMT_IA4  ? (uint32)tw*th   : (uint32)tw*th*2;
 	out->tiled = (u8*)malloc(out->size);
-	if(gxFmt == GXFMT_CMPR)      tileCMPR(out->tiled, rgba, w, h, tw, th);
+	if(gxFmt == GXFMT_CMPR){
+		if(dxt1 && w == srcW && h == srcH && tw == w && th == h &&
+		   transcodeDXT1(out->tiled, dxt1, rgba, w, h, format == Raster::C565))
+			gLosslessCMPR++;
+		else{
+			tileCMPR(out->tiled, rgba, w, h, tw, th);
+			gEncodedCMPR++;
+		}
+	}
 	else if(gxFmt == GXFMT_IA4)  tileIA4(out->tiled, rgba, w, h, tw, th);
 	else                         tileRGB5A3(out->tiled, rgba, w, h, tw, th);
 
@@ -413,7 +465,8 @@ readD3D8TxdManually(const char *path, Conv *convs, int maxn)
 			}
 		}
 		if(img){
-			if(convertImage(img, name, mask, filterAddr, rasterFmt & 0xF00, &convs[n]))
+			if(convertImage(img, name, mask, filterAddr, rasterFmt & 0xF00, &convs[n],
+			    compression == 1 ? d+q : nil))
 				n++;
 		}
 		off = chunkEnd;
@@ -427,8 +480,15 @@ convertTexture(Texture *tex, Conv *out)
 {
 	Raster *ras = tex->raster;
 	if(ras == nil) return false;
+	// Level 0 of a DXT1 raster as stored, for the lossless CMPR transcode.
+	const u8 *dxt1 = nil;
+	if(ras->platform == PLATFORM_D3D8 || ras->platform == PLATFORM_D3D9){
+		d3d::D3dRaster *dr = GETD3DRASTEREXT(ras);
+		if(dr->customFormat && dr->format == d3d::D3DFMT_DXT1 && dr->texture)
+			dxt1 = ((RasterLevels*)dr->texture)->levels[0].data;
+	}
 	return convertImage(ras->toImage(), tex->name, tex->mask,
-	    tex->filterAddressing, ras->format & 0xF00, out);
+	    tex->filterAddressing, ras->format & 0xF00, out, dxt1);
 }
 
 static void
@@ -777,7 +837,7 @@ main(int argc, char **argv)
 
 	uint32 bytes = 0;
 	for(int i = 0; i < n; i++) bytes += convs[i].size;
-	printf("%s -> %s : %d textures, %u KB tiled\n",
-	    nimg ? "images" : argv[argi], outPath, n, bytes>>10);
+	printf("%s -> %s : %d textures, %u KB tiled, CMPR %d lossless %d re-encoded\n",
+	    nimg ? "images" : argv[argi], outPath, n, bytes>>10, gLosslessCMPR, gEncodedCMPR);
 	return 0;
 }
