@@ -98,6 +98,97 @@ tileIA4(u8 *dst, const u8 *src, int w, int h, int tw, int th)
 	}
 }
 
+// The CMPR palette exactly as the GP (and decodeNative) expands it.
+static void
+cmprPalette(uint16 c0, uint16 c1, int pal[4][4])
+{
+	for(int k = 0; k < 2; k++){
+		uint16 v = k ? c1 : c0;
+		int r = v >> 11, g = (v >> 5) & 63, b = v & 31;
+		pal[k][0] = (r << 3) | (r >> 2);
+		pal[k][1] = (g << 2) | (g >> 4);
+		pal[k][2] = (b << 3) | (b >> 2);
+		pal[k][3] = 255;
+	}
+	for(int c = 0; c < 3; c++){
+		pal[2][c] = c0 > c1 ? (2*pal[0][c] + pal[1][c])/3 : (pal[0][c] + pal[1][c])/2;
+		pal[3][c] = c0 > c1 ? (pal[0][c] + 2*pal[1][c])/3 : pal[2][c];
+	}
+	pal[2][3] = 255;
+	pal[3][3] = c0 > c1 ? 255 : 0;
+}
+
+// One S3TC block. The endpoints are the two texels furthest apart along the
+// block's principal colour axis — a min/max box per channel invented colours
+// the block never had (red and green texels became black and yellow) — and
+// every texel takes the nearest of the palette entries the GP will decode.
+// Transparent texels (alpha < 128) force the 3-colour mode (c0 <= c1).
+static void
+encodeCMPRBlock(u8 *dst, u8 px[16][4])
+{
+	bool trans = false;
+	int n = 0;
+	float mean[3] = {0,0,0};
+	for(int i = 0; i < 16; i++){
+		if(px[i][3] < 128){ trans = true; continue; }
+		for(int c = 0; c < 3; c++) mean[c] += px[i][c];
+		n++;
+	}
+	uint16 c0 = 0, c1 = 0;
+	if(n > 0){
+		for(int c = 0; c < 3; c++) mean[c] /= n;
+		float cov[3][3] = {{0}};
+		for(int i = 0; i < 16; i++){
+			if(px[i][3] < 128) continue;
+			float d[3] = { px[i][0]-mean[0], px[i][1]-mean[1], px[i][2]-mean[2] };
+			for(int a = 0; a < 3; a++)
+				for(int b = 0; b < 3; b++) cov[a][b] += d[a]*d[b];
+		}
+		float axis[3] = {1.0f, 1.0f, 1.0f};
+		for(int it = 0; it < 8; it++){
+			float nx[3];
+			for(int a = 0; a < 3; a++) nx[a] = cov[a][0]*axis[0] + cov[a][1]*axis[1] + cov[a][2]*axis[2];
+			float len = sqrtf(nx[0]*nx[0] + nx[1]*nx[1] + nx[2]*nx[2]);
+			if(len < 1e-6f) break;   // flat block: any axis will do
+			for(int a = 0; a < 3; a++) axis[a] = nx[a]/len;
+		}
+		int lo = -1, hi = -1;
+		float tlo = 1e30f, thi = -1e30f;
+		for(int i = 0; i < 16; i++){
+			if(px[i][3] < 128) continue;
+			float t = (px[i][0]-mean[0])*axis[0] + (px[i][1]-mean[1])*axis[1] + (px[i][2]-mean[2])*axis[2];
+			if(t < tlo){ tlo = t; lo = i; }
+			if(t > thi){ thi = t; hi = i; }
+		}
+		uint16 a = to565(px[hi][0], px[hi][1], px[hi][2]);
+		uint16 b = to565(px[lo][0], px[lo][1], px[lo][2]);
+		if(trans || a == b){ c0 = a < b ? a : b; c1 = a < b ? b : a; }   // 3-colour mode
+		else{ c0 = a > b ? a : b; c1 = a > b ? b : a; }                 // 4-colour mode
+	}
+	int pal[4][4];
+	cmprPalette(c0, c1, pal);
+	int last = c0 > c1 ? 3 : 2;   // index 3 is transparent in the 3-colour mode
+	put16be(dst, c0);
+	put16be(dst+2, c1);
+	for(int row = 0; row < 4; row++){
+		u8 byte = 0;
+		for(int x = 0; x < 4; x++){
+			u8 *p = px[row*4 + x];
+			int v = 3;
+			if(p[3] >= 128){
+				int best = 1 << 30;
+				for(int k = 0; k <= last; k++){
+					int dr = p[0]-pal[k][0], dg = p[1]-pal[k][1], db = p[2]-pal[k][2];
+					int e = dr*dr + dg*dg + db*db;
+					if(e < best){ best = e; v = k; }
+				}
+			}
+			byte |= v << (6 - 2*x);
+		}
+		dst[4+row] = byte;
+	}
+}
+
 static void
 tileCMPR(u8 *dst, const u8 *src, int w, int h, int tw, int th)
 {
@@ -106,62 +197,10 @@ tileCMPR(u8 *dst, const u8 *src, int w, int h, int tw, int th)
 	for(int sub = 0; sub < 4; sub++){
 		int bx = tx + (sub & 1)*4, by = ty + (sub >> 1)*4;
 		u8 px[16][4];
-		bool trans = false;
-		u8 mn[3] = {255,255,255}, mx[3] = {0,0,0};
-		for(int i = 0; i < 16; i++){
+		for(int i = 0; i < 16; i++)
 			sampleSrc(src, w, h, bx + (i&3), by + (i>>2), tw, th,
 			    &px[i][0], &px[i][1], &px[i][2], &px[i][3]);
-			if(px[i][3] < 128){ trans = true; continue; }
-			for(int c = 0; c < 3; c++){
-				if(px[i][c] < mn[c]) mn[c] = px[i][c];
-				if(px[i][c] > mx[c]) mx[c] = px[i][c];
-			}
-		}
-		uint16 lo = to565(mn[0],mn[1],mn[2]);
-		uint16 hi = to565(mx[0],mx[1],mx[2]);
-		int dir[3] = { mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2] };
-		int len2 = dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2];
-		u8 *idx = dst + 4;
-		if(trans){
-			put16be(dst, lo);
-			put16be(dst+2, hi >= lo ? hi : lo);
-			for(int row = 0; row < 4; row++){
-				u8 byte = 0;
-				for(int x = 0; x < 4; x++){
-					u8 *p = px[row*4 + x];
-					u8 v;
-					if(p[3] < 128) v = 3;
-					else if(len2 == 0) v = 0;
-					else{
-						int t = ((p[0]-mn[0])*dir[0] + (p[1]-mn[1])*dir[1] +
-						    (p[2]-mn[2])*dir[2]) * 4 / len2;
-						v = t <= 0 ? 0 : t >= 3 ? 1 : 2;
-					}
-					byte |= v << (6 - 2*x);
-				}
-				idx[row] = byte;
-			}
-		}else if(hi == lo){
-			put16be(dst, (uint16)(hi | 1));
-			put16be(dst+2, (uint16)(lo & ~1));
-			idx[0]=idx[1]=idx[2]=idx[3] = 0x55;
-		}else{
-			put16be(dst, hi > lo ? hi : lo);
-			put16be(dst+2, hi > lo ? lo : hi);
-			bool flip = hi < lo;
-			for(int row = 0; row < 4; row++){
-				u8 byte = 0;
-				for(int x = 0; x < 4; x++){
-					u8 *p = px[row*4 + x];
-					int t = len2 ? ((p[0]-mn[0])*dir[0] + (p[1]-mn[1])*dir[1] +
-					    (p[2]-mn[2])*dir[2]) * 6 / len2 : 0;
-					u8 v = t >= 5 ? 0 : t <= 1 ? 1 : t >= 3 ? 2 : 3;
-					if(flip) v = v == 0 ? 1 : v == 1 ? 0 : v == 2 ? 3 : 2;
-					byte |= v << (6 - 2*x);
-				}
-				idx[row] = byte;
-			}
-		}
+		encodeCMPRBlock(dst, px);
 		dst += 8;
 	}
 }
@@ -219,6 +258,7 @@ struct Conv {
 	u8 gxFmt;
 	u8 *tiled;
 	uint32 size;
+	int levels;   // mip levels in tiled, level 0 first
 };
 
 // Area-average resample to any smaller size: each destination texel is the
@@ -377,6 +417,34 @@ convertImage(Image *img, const char *name, const char *mask,
 	else if(gxFmt == GXFMT_IA4)  tileIA4(out->tiled, rgba, w, h, tw, th);
 	else                         tileRGB5A3(out->tiled, rgba, w, h, tw, th);
 
+	// Mip chain for power-of-two CMPR, down to the 8x8 tile. The PC builds
+	// these at load (filter 6, LINEARMIPLINEAR, on 99% of its textures) and
+	// draws with them; the console pages into MEM1 only the levels a draw
+	// needs (gxraster.cpp gxPageIn), so a wall 100 m away costs its 16x16
+	// level in the window rather than its 256x256 one. Level 0 stays as
+	// converted above; the smaller levels are area-averaged like the PC's.
+	out->levels = 1;
+	if(gxFmt == GXFMT_CMPR && tw == w && th == h && w >= 16 && h >= 16 &&
+	   !(w & (w-1)) && !(h & (h-1))){
+		std::vector<u8> chain(out->tiled, out->tiled + out->size);
+		u8 *lv = (u8*)malloc((size_t)w*h*4);
+		memcpy(lv, rgba, (size_t)w*h*4);
+		int lw = w, lh = h;
+		while(lw >= 16 && lh >= 16){
+			lv = resampleArea(lv, lw, lh, lw/2, lh/2);
+			lw /= 2; lh /= 2;
+			size_t at = chain.size();
+			chain.resize(at + (size_t)lw*lh/2);
+			tileCMPR(chain.data() + at, lv, lw, lh, lw, lh);
+			out->levels++;
+		}
+		free(lv);
+		free(out->tiled);
+		out->size = (uint32)chain.size();
+		out->tiled = (u8*)malloc(out->size);
+		memcpy(out->tiled, chain.data(), out->size);
+	}
+
 	out->tw = tw; out->th = th;
 	out->gxFmt = gxFmt;
 	out->format = format;
@@ -514,7 +582,7 @@ writeNative(StreamFile *s, Conv *c)
 	writeLE16(&header[80], (uint16)c->tw);
 	writeLE16(&header[82], (uint16)c->th);
 	header[84] = 16;
-	header[85] = 1;
+	header[85] = (u8)c->levels;
 	header[86] = Raster::TEXTURE;
 	header[87] = c->gxFmt;
 	s->write8(header, sizeof(header));

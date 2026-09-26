@@ -1020,13 +1020,14 @@ gcHeapLine(char *out, size_t n)
 	    poolBytes(CPools::GetObjectPool()) + poolBytes(CPools::GetDummyPool()) +
 	    poolBytes(CPools::GetAudioScriptObjectPool()) + poolBytes(CPools::GetColModelPool());
 	extern unsigned gxAramBytes, gxWsBytes, gxWsPeak, gxPageIns, gxWsStarved, gxWsForced, gxSpills, gxWsFrameBytes, gxWsFramePeak, gxShareBytes, gxWsShared;
+	extern unsigned gxPageLevels[4], gxWsRetired;
 	extern uint32 gStrEvict;
 	extern unsigned gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps;
-	snprintf(out, n, "heap used %uK free %uK big %u/%uK/%uK/%uK/%u | str %uK (b%u c%u v%u p%u t%u o%u) tex %uK dl %uK col %uK pools %uK | aram %uK share %uK ws %uK/%uK wsframe %uK/%uK pagein %u/%u starve %u/%u spill %u evict %u | snd starved %u pumps %u voices starved %u pumps %u | dvd reads %u seeks %u | ft %u/%ums",
+	snprintf(out, n, "heap used %uK free %uK big %u/%uK/%uK/%uK/%u | str %uK (b%u c%u v%u p%u t%u o%u) tex %uK dl %uK col %uK pools %uK | aram %uK share %uK ws %uK/%uK wsframe %uK/%uK pagein %u/%u lvl %u/%u/%u/%u ret %u starve %u/%u spill %u evict %u | snd starved %u pumps %u voices starved %u pumps %u | dvd reads %u seeks %u | ft %u/%ums",
 	    (unsigned)(mi.arena - mi.fordblks)/1024, (unsigned)mi.fordblks/1024, bigC, bigU, bigF, bigL, bigX,
 	    (unsigned)(CStreaming::ms_memoryUsed/1024), cls[0]/1024, cls[1]/1024, cls[2]/1024, cls[3]/1024, cls[4]/1024, cls[5]/1024, gxTiledBytes/1024,
 	    (unsigned)(rw::gx::gxDlBytes/1024), (unsigned)(gxColorBytes/1024), (unsigned)(pools/1024),
-	    gxAramBytes/1024, gxShareBytes/1024, gxWsBytes/1024, gxWsPeak/1024, gxWsFrameBytes/1024, gxWsFramePeak/1024, gxPageIns, gxWsShared, gxWsStarved, gxWsForced, gxSpills, (unsigned)gStrEvict, gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps, gIsoRdN, gIsoRdJumps, gFtN ? (unsigned)(gFtSum/gFtN/1000) : 0, gFtMax/1000);
+	    gxAramBytes/1024, gxShareBytes/1024, gxWsBytes/1024, gxWsPeak/1024, gxWsFrameBytes/1024, gxWsFramePeak/1024, gxPageIns, gxWsShared, gxPageLevels[0], gxPageLevels[1], gxPageLevels[2], gxPageLevels[3], gxWsRetired, gxWsStarved, gxWsForced, gxSpills, (unsigned)gStrEvict, gStreamStarvedTotal, gStreamDecPumps, gVoiceStarvedTotal, gVoicePumps, gIsoRdN, gIsoRdJumps, gFtN ? (unsigned)(gFtSum/gFtN/1000) : 0, gFtMax/1000);
 	gFtSum = gFtMax = gFtN = 0;
 }
 
@@ -1050,7 +1051,7 @@ extern "C" unsigned gcRasterTiledBytes(void *raster);   // gxraster.cpp
 extern "C" void
 gcOomReport(size_t need)
 {
-	char heap[460];
+	char heap[560];
 	gcHeapLine(heap, sizeof(heap));
 	printf("OOM need %uK | %s\n", (unsigned)(need/1024), heap);
 	// The bill behind "tex": every resident dictionary, its refs and the
@@ -1087,7 +1088,7 @@ gcFatalPark(const char *tag, const char *msg)
 		sp = frame[0];
 	}
 
-	char heap[460];
+	char heap[560];
 	gcHeapLine(heap, sizeof(heap));
 
 	u32 level;
@@ -1980,7 +1981,7 @@ main(int, char *[])
 				censusTick++;
 				if(censusTick % 300 == 0){
 					u32 frames = gFtN;   // gcHeapLine resets the frame counters
-					char heap[460];
+					char heap[560];
 					gcHeapLine(heap, sizeof(heap));
 					printf("CENSUS %s\n", heap);
 					{ static bool sqrtChecked; if(!sqrtChecked){ sqrtChecked = true; gcSqrtCheck(); } }
