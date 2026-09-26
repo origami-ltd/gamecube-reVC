@@ -248,8 +248,9 @@ def disc_root(args, txdconv):
     os.makedirs(work)
 
     cmd = ["--game", game, "--out", root, "--txdconv", txdconv, "--gamefiles",
-           os.path.abspath(args.gamefiles or os.path.join(ROOT, "assets", "gamefiles")),
-           "--adaptive", "0.70"]
+           os.path.abspath(args.gamefiles or os.path.join(ROOT, "assets", "gamefiles"))]
+    if not args.full_textures:
+        cmd += ["--adaptive", "0.70"]
     tool("build_sd.py", *cmd, "--preencoded-movies", opening_movies(args, game))
 
     # Converted once and kept across builds: minutes of ffmpeg/sox.
@@ -310,6 +311,9 @@ def main():
                         "(default: assets/movies if present; otherwise the "
                         "PC movies are encoded, which needs libtheora's "
                         "encoder_example)")
+    parser.add_argument("--full-textures", action="store_true",
+                        help="keep every texture at its original size (only the "
+                             "lossless steps), for A/B tests against --adaptive")
     parser.add_argument("--setup", action="store_true",
                         help="install the build dependencies for this OS "
                              "(brew / apt / pacman / winget + devkitPro)")

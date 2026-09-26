@@ -1404,6 +1404,43 @@ if(gbRenderFadingInEntities)
 }
 #endif
 
+#ifdef GTA_OGC
+// Sub-phase split of RenderScene and RenderEffects: when the phase runs long,
+// one line naming what took the time (crash frames: particles, glass,
+// shadows, skidmarks, the damaged cars, water...). At most one line every
+// five frames per phase.
+struct GcSplit { const char *name; unsigned us; };
+static GcSplit gcSplit[24];
+static int gcSplitN;
+static unsigned long long gcSplitT;
+static void gcSplitStart(void) { gcSplitN = 0; gcSplitT = gcNowUs(); }
+static void
+gcSplitMark(const char *name)
+{
+	unsigned long long t = gcNowUs();
+	if(gcSplitN < 24){ gcSplit[gcSplitN].name = name; gcSplit[gcSplitN].us = (unsigned)(t - gcSplitT); gcSplitN++; }
+	gcSplitT = t;
+}
+static void
+gcSplitReport(const char *phase, uint32 *lastFrame)
+{
+	unsigned total = 0;
+	for(int i = 0; i < gcSplitN; i++) total += gcSplit[i].us;
+	if(total < 12000 || CTimer::GetFrameCounter() - *lastFrame < 5)
+		return;
+	*lastFrame = CTimer::GetFrameCounter();
+	char line[400];
+	int n = snprintf(line, sizeof(line), "SPLIT %s %ums |", phase, total/1000);
+	for(int i = 0; i < gcSplitN && n < (int)sizeof(line) - 24; i++)
+		if(gcSplit[i].us >= 1000)
+			n += snprintf(line + n, sizeof(line) - n, " %s %u", gcSplit[i].name, gcSplit[i].us/1000);
+	printf("%s\n", line);
+}
+#define GC_SPLIT(name, call) do { call; gcSplitMark(name); } while(0)
+#else
+#define GC_SPLIT(name, call) call
+#endif
+
 void
 RenderScene(void)
 {
@@ -1414,21 +1451,28 @@ RenderScene(void)
 	}
 #endif
 	PUSH_RENDERGROUP("RenderScene");
-	CClouds::Render();
-	DoRWRenderHorizon();
-	CRenderer::RenderRoads();
-	CCoronas::RenderReflections();
-	CRenderer::RenderEverythingBarRoads();
+#ifdef GTA_OGC
+	gcSplitStart();
+#endif
+	GC_SPLIT("clouds", CClouds::Render());
+	GC_SPLIT("horizon", DoRWRenderHorizon());
+	GC_SPLIT("roads", CRenderer::RenderRoads());
+	GC_SPLIT("coronarefl", CCoronas::RenderReflections());
+	GC_SPLIT("everything", CRenderer::RenderEverythingBarRoads());
 	RwRenderStateSet(rwRENDERSTATECULLMODE, (void*)rwCULLMODECULLNONE);
-	CWaterLevel::RenderWater();
-	CRenderer::RenderBoats();
-	CRenderer::RenderFadingInUnderwaterEntities();
+	GC_SPLIT("water", CWaterLevel::RenderWater());
+	GC_SPLIT("boats", CRenderer::RenderBoats());
+	GC_SPLIT("fadeunder", CRenderer::RenderFadingInUnderwaterEntities());
 	RwRenderStateSet(rwRENDERSTATECULLMODE, (void*)rwCULLMODECULLNONE);
-	CWaterLevel::RenderTransparentWater();
-	CRenderer::RenderFadingInEntities();
+	GC_SPLIT("transwater", CWaterLevel::RenderTransparentWater());
+	GC_SPLIT("fadein", CRenderer::RenderFadingInEntities());
 	RwRenderStateSet(rwRENDERSTATECULLMODE, (void*)rwCULLMODECULLNONE);
-	CWeather::RenderRainStreaks();
-	CCoronas::RenderSunReflection();
+	GC_SPLIT("rain", CWeather::RenderRainStreaks());
+	GC_SPLIT("sunrefl", CCoronas::RenderSunReflection());
+#ifdef GTA_OGC
+	static uint32 said;
+	gcSplitReport("scene", &said);
+#endif
 	POP_RENDERGROUP();
 }
 
@@ -1457,22 +1501,29 @@ RenderEffects(void)
 	}
 #endif
 	PUSH_RENDERGROUP("RenderEffects");
-	CGlass::Render();
-	CWaterCannons::Render();
-	CSpecialFX::Render();
-	CRopes::Render();
-	CShadows::RenderStaticShadows();
-	CShadows::RenderStoredShadows();
-	CSkidmarks::Render();
-	CAntennas::Render();
-	CRubbish::Render();
-	CCoronas::Render();
-	CParticle::Render();
-	CPacManPickups::Render();
-	CWeaponEffects::Render();
-	CPointLights::RenderFogEffect();
-	CMovingThings::Render();
-	CRenderer::RenderFirstPersonVehicle();
+#ifdef GTA_OGC
+	gcSplitStart();
+#endif
+	GC_SPLIT("glass", CGlass::Render());
+	GC_SPLIT("cannons", CWaterCannons::Render());
+	GC_SPLIT("specialfx", CSpecialFX::Render());
+	GC_SPLIT("ropes", CRopes::Render());
+	GC_SPLIT("staticshad", CShadows::RenderStaticShadows());
+	GC_SPLIT("storedshad", CShadows::RenderStoredShadows());
+	GC_SPLIT("skidmarks", CSkidmarks::Render());
+	GC_SPLIT("antennas", CAntennas::Render());
+	GC_SPLIT("rubbish", CRubbish::Render());
+	GC_SPLIT("coronas", CCoronas::Render());
+	GC_SPLIT("particles", CParticle::Render());
+	GC_SPLIT("pickups", CPacManPickups::Render());
+	GC_SPLIT("weaponfx", CWeaponEffects::Render());
+	GC_SPLIT("fog", CPointLights::RenderFogEffect());
+	GC_SPLIT("moving", CMovingThings::Render());
+	GC_SPLIT("fpvehicle", CRenderer::RenderFirstPersonVehicle());
+#ifdef GTA_OGC
+	static uint32 said;
+	gcSplitReport("effects", &said);
+#endif
 	POP_RENDERGROUP();
 }
 
