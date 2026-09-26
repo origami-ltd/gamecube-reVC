@@ -1,4 +1,5 @@
 #include "common.h"
+#include <unistd.h>
 #include "CdStream.h"
 #include "crossplatform.h"
 
@@ -49,6 +50,7 @@ static bool      aramReady;
 uint32 gAramHits, gAramMisses;   // reported by the HUD
 extern "C" { extern volatile const char *gMainWhere; }   // gamecube.cpp watchdog checkpoint
 extern "C" int fsReadSectorsAbs(u32 lba, u32 count, void *dst);   // dvdfs.c raw sectors (audio channel, B69)
+extern "C" lwp_t gMainLwp;   // gamecube.cpp: the main loop's thread
 extern "C" { volatile unsigned gCdTick, gCdState; }   // MemoryWatcher heartbeats: worker loops, 1 while a read is in flight
 extern "C" { extern volatile unsigned gIsoRdBusy; }   // dvdfs.c: sector+1 while a DVD command is in flight
 
@@ -401,8 +403,15 @@ CdStreamQueue(int32 channel, void *buffer, uint32 offset, uint32 size, int absol
 		LWP_MutexUnlock(ioLock);
 		CdStreamFatal("queue full", channel, offset, size);
 	}
-	ioQueue[ioTail] = channel;
-	ioTail = nextTail;
+	if(channel == MAX_CDCHANNELS){
+		// The audio channel (B68) goes to the front: a radio or dialogue
+		// ring refill must not wait behind the world's reads.
+		ioHead = (ioHead + MAX_CDCHANNELS+1) % (MAX_CDCHANNELS+2);
+		ioQueue[ioHead] = channel;
+	}else{
+		ioQueue[ioTail] = channel;
+		ioTail = nextTail;
+	}
 	LWP_MutexUnlock(ioLock);
 	LWP_SemPost(ioPending);
 	return STREAM_SUCCESS;
@@ -454,7 +463,11 @@ CdStreamSync(int32 channel)
 	// count pending and the next Sync blocked forever — the loading screen
 	// hang. Status is written once by the worker and read here; there is no
 	// count to get out of step.
-	gMainWhere = "cd-sync";
+	// Only the main thread may move the watchdog's checkpoint: the audio
+	// decoder waits here too, and its "cd-sync" was stamped over the main
+	// loop's phases in every SLOW line.
+	bool onMain = LWP_GetSelf() == gMainLwp;
+	if(onMain) gMainWhere = "cd-sync";
 	u64 started = gettime();
 	// B104: b101 boot took 107s to the second frame, and the watchdog caught
 	// main parked here at log 17:08 with the worker idle (gCdState 0) and the
@@ -467,7 +480,11 @@ CdStreamSync(int32 channel)
 	unsigned cdTick0 = gCdTick;
 	bool warned = false;
 	while(requests[channel].status == STREAM_READING){
-		LWP_YieldThread();
+		// Yield hands the CPU only to threads of the same priority. The
+		// audio decoder (priority 72) spinning here through a 300-450 ms
+		// read under a busy drive starved the main loop for the whole read:
+		// b192 fell to 1 fps when the radio opened. Off the main thread, sleep.
+		if(onMain) LWP_YieldThread(); else usleep(1000);
 		uint32 ms = ticks_to_millisecs(gettime() - started);
 		if(!warned && ms > 250){
 			warned = true;

@@ -2288,7 +2288,12 @@ gcSringRead(GcStream *st, void *dst, uint32 n)
 		if(avail == 0){
 			if(r->fetch >= r->fileSize && r->rd >= r->wr && r->wr >= r->fileSize) break;   // true end of file
 			if(!r->sync) break;                 // decode thread: short read, the pump guard keeps this rare
-			LWP_MutexLock(gSringLock); gcSringService(TRUE); LWP_MutexUnlock(gSringLock);
+			// Poll with the lock released between checks. Waiting inside
+			// gcSringService(TRUE) held gSringLock through a whole disc read
+			// (300-450 ms under a busy drive) and parked the main loop the
+			// moment it needed the ring — a ped comment, a stream request.
+			LWP_MutexLock(gSringLock); gcSringService(FALSE); LWP_MutexUnlock(gSringLock);
+			if(gcSringAvail(r) == 0) usleep(2000);
 			continue;
 		}
 		uint32 idxb = r->rd % GC_SRING_BYTES;

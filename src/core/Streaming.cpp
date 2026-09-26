@@ -745,7 +745,7 @@ CStreaming::Update(void)
 	// ARAM pressure (B66): TXDs stay resident at refcount 0 (TxdStore.cpp), so
 	// the texel store fills and new TXDs — the pause menu's included — fail
 	// their ARAM allocation. Drop unreferenced TXDs while under 1.5MB is left.
-	for(int k = 0; k < 4 && gxAramStoreBytes && gxAramBytes + 768*1024 > gxAramStoreBytes; k++){   // B114: margin 1536K -> 768K; the loop armed at 9.2MB while play sits at 8.7-9.4MB and churned TXDs
+	for(int k = 0; k < 4 && gxAramStoreBytes && gxAramBytes + 1536*1024 > gxAramStoreBytes; k++){   // mip chains: a streamed dictionary is up to ~1.5MB, and a full store now fails it instead of spilling into MEM1 (B114 had cut the margin to 768K)
 		CStreamingInfo *si; bool dropped = false;
 		for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
 			int32 id = si - ms_aInfoForModel;
