@@ -317,7 +317,7 @@ extern "C" { extern volatile unsigned gxLastDraw, gxLastGeoFlags, gxLastGeoVerts
 // B47: the seven slots live in ARAM ("SFX straight from the disc, cached in
 // ARAM" — user); the voices stream them as 16-bit PCM blocks. sfx.raw only;
 // the DEFLATE pack (sfx.pak) still lands in MEM1 slots.
-static uint32 gPedAram;
+static uint32 gPedAram, gPedSlotStride;
 static int32  gPedSlotSfx[MAX_PEDSFX];
 static uint8  gCurrentPedSlot;
 static uint8 *gPlayerTalkData;
@@ -1446,7 +1446,7 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 			gcDiscardChannelPcm(c);
 			GcVoiceStream *vs = c->vs;
 			gcVoiceStop(vs);
-			vs->aram = gPedAram + align32(PED_BLOCKSIZE)*slot;
+			vs->aram = gPedAram + gPedSlotStride*slot;
 			vs->totalSamples = inS;
 			vs->srcRate = targetFreq;
 			if(gPedSlotAdpcm[slot]){ vs->pcm16 = FALSE; vs->blockBytes = GC_VBLOCK; vs->blockSamples = GC_VBLOCK_SAMPLES; vs->adpcmBytes = gPedSlotBytes[slot]; }
@@ -3016,9 +3016,14 @@ cSampleManager::LoadPedComment(uint32 nComment)
 		return FALSE;
 	if(!gPackedSfx){
 		if(gPedAram == 0){
-			gPedAram = gcBankAlloc(align32(PED_BLOCKSIZE)*MAX_PEDSFX);
+			// Slots sized to the largest comment, as dca3 does: one of at most
+			// PED_BLOCKSIZE PCM bytes is 39 IMA blocks of 512 — 137K of ARAM
+			// for the seven, not 553K. The rest goes to the texel store.
+			uint32 stride = gAdpAll ? ((PED_BLOCKSIZE/2 + 1016)/1017)*512 : align32(PED_BLOCKSIZE);
+			gPedAram = gcBankAlloc(stride*MAX_PEDSFX);
 			if(gPedAram == 0)
 				return FALSE;
+			gPedSlotStride = stride;
 			for(int32 i = 0; i < MAX_PEDSFX; i++)
 				gPedSlotSfx[i] = -1;
 		}
@@ -3031,12 +3036,14 @@ cSampleManager::LoadPedComment(uint32 nComment)
 		bool8 adp = gAdpAll;
 		if(adp && gSfxAdpLba == 0 && !fsLookupLba("dvd:/audio/sfx.adp", &gSfxAdpLba, &gSfxAdpSize))
 			adp = FALSE;
+		if(!adp && gPedSlotStride < gSampleIndex[nComment].nSize)
+			return FALSE;   // raw PCM does not fit an ADPCM-sized slot
 		if(!adp && gSfxRawLba == 0 && !fsLookupLba("dvd:/audio/sfx.raw", &gSfxRawLba, &gSfxRawSize))
 			return FALSE;
 		if(gSringLock == LWP_MUTEX_NULL) LWP_MutexInit(&gSringLock, false);
 		LWP_MutexLock(gSringLock);
 		gPedIo.active = TRUE; gPedIo.adpcm = adp; gPedIo.sfx = nComment; gPedIo.slot = gCurrentPedSlot;
-		gPedIo.aram = gPedAram + align32(PED_BLOCKSIZE)*gCurrentPedSlot;
+		gPedIo.aram = gPedAram + gPedSlotStride*gCurrentPedSlot;
 		if(adp){ gPedIo.base = gcAdpOffset(nComment); gPedIo.remain = gcAdpBlocks(nComment)*512; }
 		else   { gPedIo.base = gSampleIndex[nComment].nOffset; gPedIo.remain = gSampleIndex[nComment].nSize; }
 		gPedIo.off = 0; gPedIo.skip = 0;
