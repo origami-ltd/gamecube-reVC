@@ -162,7 +162,12 @@ public:
 	static void RemoveIslandsNotUsed(eLevelName level);
 	static void RemoveBigBuildings(eLevelName level);
 	static bool RemoveLoadedVehicle(void);
-	static bool RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent = false, uint32 minBytes = 0);   // B140: the emergency second pass ignores LoadedRecently; B124: minBytes asks for a victim that big
+	static bool RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent = false);   // B140: the emergency second pass ignores LoadedRecently
+	// Eviction by distance (user, 09-26): the renderer and the 80 m request
+	// scan stamp each model's nearest instance; the farthest unused model goes
+	// first. 65535 when nothing stamped it in the last second.
+	static void NoteModelDistance(int32 id, float dist);
+	static uint32 ModelDistNow(int32 id);
 	static void RemoveAllUnusedModels(void);
 	static void RemoveUnusedModelsInLoadedList(void);
 	static bool RemoveLoadedZoneModel(void);

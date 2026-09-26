@@ -142,6 +142,9 @@ static inline bool LoadedRecently(int32 id)
 	if(id < 0 || id >= NUMSTREAMINFO || gLoadFrame[id] == 0) return false;
 	return (uint16)((uint16)CTimer::GetFrameCounter() - gLoadFrame[id]) < 300;   // ~5 s at 60 fps
 }
+// Nearest instance of each model this second (CStreaming::NoteModelDistance).
+static uint16 gModelDist[MODELINFOSIZE];
+static uint32 gModelDistFrame[MODELINFOSIZE];
 static int gEvictTrace = 300;   // B58: the first evictions of the run, named
 static void
 TraceEvict(int32 id)
@@ -205,7 +208,7 @@ HonestBudget(void)
 	size_t general = mallinfo().fordblks;
 	size_t total = gcHeapFreeTotal();
 	size_t chunkFree = total > general ? total - general : 0;
-	size_t slack = STREAM_HEAP_FLOOR + 768*1024;   // conversions cost more heap than the disc bytes the budget counts: 256K of margin left b196 at the floor
+	size_t slack = STREAM_HEAP_FLOOR + 1024*1024;   // conversions cost more heap than the disc bytes the budget counts: 256K of margin left b196 at the floor; 768K in b197; 1MB (user, 09-26)
 	size_t head = (general > slack ? general - slack : 0) + chunkFree;
 	CStreaming::ms_memoryAvailable = CStreaming::ms_memoryUsed + head;
 	if(CStreaming::ms_memoryAvailable < 4*1024*1024) CStreaming::ms_memoryAvailable = 4*1024*1024;
@@ -1106,6 +1109,26 @@ static uint32 gResidentCost[NUMSTREAMINFO];
 // own failure. Reset on a successful load.
 static void
 FailedLoad(int32 streamId);
+
+void
+CStreaming::NoteModelDistance(int32 id, float dist)
+{
+	if(id < 0 || id >= MODELINFOSIZE) return;
+	uint32 frame = CTimer::GetFrameCounter();
+	uint16 d = dist >= 65000.0f ? 65000 : (uint16)dist;
+	if(gModelDistFrame[id] != frame || d < gModelDist[id]){
+		gModelDist[id] = gModelDistFrame[id] == frame && gModelDist[id] < d ? gModelDist[id] : d;
+		gModelDistFrame[id] = frame;
+	}
+}
+
+uint32
+CStreaming::ModelDistNow(int32 id)
+{
+	if(id < 0 || id >= MODELINFOSIZE || gModelDistFrame[id] == 0) return 65535;
+	if((uint32)(CTimer::GetFrameCounter() - gModelDistFrame[id]) > 60) return 65535;
+	return gModelDist[id];
+}
 
 static void
 FailedLoad(int32 streamId)
@@ -2292,13 +2315,13 @@ gcStreamEmergencyShed(unsigned need)
 			break;
 		}
 		if(k == cap) break;
-		if(!CStreaming::RemoveLeastUsedModel(keep, false, need) && !CStreaming::RemoveLeastUsedModel(keep, true, need)){   // B140: second pass ignores LoadedRecently
+		if(!CStreaming::RemoveLeastUsedModel(keep) && !CStreaming::RemoveLeastUsedModel(keep, true)){   // B140: second pass ignores LoadedRecently
 			// B149: nothing unreferenced — every building near the scene still
 			// holds its RW object (refs > 0). Drop the RW objects behind the
 			// camera the way the budget sweep would, then look again. b147:
 			// prop 295 (81K) failed 24x with 'shed 0 models' and 2.2MB free.
 			CStreaming::DeleteRwObjectsBehindCamera(CStreaming::ms_memoryUsed > 2*need ? CStreaming::ms_memoryUsed - 2*need : 0);
-			if(!CStreaming::RemoveLeastUsedModel(keep, true, need)) break;
+			if(!CStreaming::RemoveLeastUsedModel(keep, true)) break;
 		}
 		dropped++;
 	}
@@ -2361,7 +2384,7 @@ extern "C" void gcScriptWaitDiag(int32 m)
 }
 
 bool
-CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent, uint32 minBytes)
+CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 {
 #ifdef GTA_OGC
 	// B125: never a script-owned or DONT_REMOVE model. Every caller here
@@ -2377,6 +2400,35 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent, uint32 m
 #ifdef GTA_OGC
 	if(StreamSceneHold())
 		ignoreRecent = true;
+	// Farthest unused model first (user, 09-26: buildings near the camera
+	// need their detail). LOD shells are skipped here: they are the far
+	// fallback, and the stock pass below may still take one when nothing
+	// else is left (B114).
+	{
+		int bestId = -1;
+		uint32 bestDist = 0;
+		for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
+			if(si->m_flags & excludeMask)
+				continue;
+			streamId = si - ms_aInfoForModel;
+			if(streamId >= STREAM_OFFSET_TXD)
+				continue;
+			if(!ignoreRecent && LoadedRecently(streamId))
+				continue;
+			CBaseModelInfo *model = CModelInfo::GetModelInfo(streamId);
+			if(model->GetNumRefs() != 0)
+				continue;
+			if(model->IsSimple() && ((CSimpleModelInfo*)model)->m_isBigBuilding)
+				continue;
+			uint32 d = ModelDistNow(streamId);
+			if(bestId < 0 || d > bestDist){ bestId = streamId; bestDist = d; }
+		}
+		if(bestId >= 0){
+			TraceEvict(bestId);
+			RemoveModel(bestId);
+			return true;
+		}
+	}
 #endif
 
 	for(si = ms_endLoadedList.m_prev; si != &ms_startLoadedList; si = si->m_prev){
@@ -2387,22 +2439,12 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent, uint32 m
 #ifdef GTA_OGC
 			if(!ignoreRecent && LoadedRecently(streamId))
 				continue;
-			// B124, kept without its distance ordering: the emergency shed
-			// needs a hole of minBytes, and the least-used crumbs did not make
-			// one (b201: 116 sheds of 4 models each for 15-25K requests with
-			// 0.7-1.2 MB free, and those models reloaded as LOD -> HD flips).
-			if(minBytes && ms_aInfoForModel[streamId].GetCdSize()*CDSTREAM_SECTOR_SIZE < minBytes)
-				continue;
 #endif
 			if (CModelInfo::GetModelInfo(streamId)->GetNumRefs() == 0) {
 				TraceEvict(streamId);
 				RemoveModel(streamId);
 				return true;
 			}
-#ifdef GTA_OGC
-		}else if(minBytes){
-			continue;   // the sized pass takes models only
-#endif
 		}else if(streamId >= STREAM_OFFSET_TXD && streamId < STREAM_OFFSET_COL){
 			if(CTxdStore::GetNumRefs(streamId - STREAM_OFFSET_TXD) == 0 &&
 			   !IsTxdUsedByRequestedModels(streamId - STREAM_OFFSET_TXD)
@@ -2422,10 +2464,6 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent, uint32 m
 			}
 		}
 	}
-#ifdef GTA_OGC
-	if(minBytes)   // no unused model that big: plain least-used
-		return RemoveLeastUsedModel(excludeMask, ignoreRecent, 0);
-#endif
 	return (ms_numVehiclesLoaded > 7 || CGame::currArea != AREA_MAIN_MAP && ms_numVehiclesLoaded > 4) && RemoveLoadedVehicle();
 }
 
@@ -3792,8 +3830,12 @@ CStreaming::ProcessEntitiesInSectorList(CPtrList &list, float x, float y, float 
 				pos = CVector2D(e->GetPosition());
 				if(xmin < pos.x && pos.x < xmax &&
 				   ymin < pos.y && pos.y < ymax &&
-				   (CVector2D(x, y) - pos).MagnitudeSqr() < lodDistSq)
+				   (CVector2D(x, y) - pos).MagnitudeSqr() < lodDistSq){
+#ifdef GTA_OGC
+					NoteModelDistance(e->GetModelIndex(), (CVector2D(x, y) - pos).Magnitude());
+#endif
 					RequestModel(e->GetModelIndex(), flags);
+				}
 			}
 		}
 	}
@@ -4195,6 +4237,7 @@ CStreaming::DeleteRwObjectsBehindCameraInSectorList(CPtrList &list, size_t mem)
 			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0
 #ifdef GTA_OGC
 			    && CanRemoveModel(e->GetModelIndex())   // B137: RemoveModel on a QUEUED script-owned model cancels its request (b136: specialchar 110 'state 0 req 0' forever)
+			    && ModelDistNow(e->GetModelIndex()) >= (uint32)STREAM_DIST   // the original requests everything within STREAM_DIST every frame: evicting it only reloads it
 #endif
 			    ) {
 #ifdef GTA_OGC
@@ -4226,6 +4269,7 @@ CStreaming::DeleteRwObjectsNotInFrustumInSectorList(CPtrList &list, size_t mem)
 			if (CModelInfo::GetModelInfo(e->GetModelIndex())->GetNumRefs() == 0
 #ifdef GTA_OGC
 			    && CanRemoveModel(e->GetModelIndex())   // B137: RemoveModel on a QUEUED script-owned model cancels its request (b136: specialchar 110 'state 0 req 0' forever)
+			    && ModelDistNow(e->GetModelIndex()) >= (uint32)STREAM_DIST   // the original requests everything within STREAM_DIST every frame: evicting it only reloads it
 #endif
 			    ) {
 #ifdef GTA_OGC

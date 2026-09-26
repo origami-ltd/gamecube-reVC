@@ -771,6 +771,9 @@ CRenderer::SetupEntityVisibility(CEntity *ent)
 		return VIS_INVISIBLE;
 
 	dist = (ent->GetPosition() - ms_vecCameraPosition).Magnitude();
+#ifdef GTA_OGC
+	CStreaming::NoteModelDistance(ent->GetModelIndex(), dist);
+#endif
 
 #ifndef FIX_BUGS
 	// Whatever this is supposed to do, it breaks fading for objects
