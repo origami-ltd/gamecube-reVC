@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
@@ -393,6 +394,30 @@ reducedScore(const u8 *rgba, int w, int h, int step, bool cmpr, bool alpha)
 	return s;
 }
 
+// User, 09-26: shop fronts and anything with lettering keep their original
+// definition; walls may be halved. Mean SSIM cannot tell them apart (a sign
+// is a small part of its texture), the artists' names can: 163 of the 1724
+// textures of 256+, 9.6% of their bytes.
+static bool
+keepFullByName(const char *name)
+{
+	static const char *const words[] = {
+		"shop", "store", "sign", "neon", "logo", "text", "txt", "poster",
+		"billb", "bilbrd", "billbrd", "advert", "banner", "menu", "cubana",
+		"ammu", "pizza", "burger", "cafe", "diner", "club", "laund", "barber",
+		"pawn", "pharm", "liquor", "cinema", "theat", "casino", "bowl", "jewel",
+		"sale", "marquee", "letter", "mall", "spray", "boutiq", "hardware",
+		"deli", "bakery", "donut", "taco", "salon", "tattoo",
+	};
+	char low[33];
+	int i = 0;
+	for(; name[i] && i < 32; i++) low[i] = (char)tolower((unsigned char)name[i]);
+	low[i] = 0;
+	for(const char *w : words)
+		if(strstr(low, w)) return true;
+	return false;
+}
+
 // Takes an Image rather than a Texture so the same tiling serves both inputs:
 // a dictionary read off disc, and a loose TGA. Destroys img.
 static bool
@@ -487,7 +512,7 @@ convertImage(Image *img, const char *name, const char *mask,
 	// saves 51% of the texel bytes (55% if every one were halved). 128 and
 	// below are untouched.
 	if(gAdaptive > 0.0f && (w >= 256 || h >= 256) && w >= 64 && h >= 64 &&
-	   !(w & (w-1)) && !(h & (h-1))){
+	   !(w & (w-1)) && !(h & (h-1)) && !keepFullByName(name)){
 		bool cmpr = !gradientAlpha;
 		bool hasAlpha = false;
 		for(size_t i = 0; i < (size_t)w*h && !hasAlpha; i++) hasAlpha = rgba[i*4+3] < 250;
