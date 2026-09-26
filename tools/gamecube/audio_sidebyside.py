@@ -78,7 +78,7 @@ def sfx_reference(index, rate):
         data = f.read(size)
     src = list(struct.unpack("<%dh" % (len(data) // 2), data[:len(data) // 2 * 2]))
     # The reference plays it at its own rate; resample to the dump's actual
-    # output rate (32,028Hz on GameCube and 48kHz on the Wii dev target).
+    # output rate (32,028Hz on GameCube).
     out, n = [], len(src)
     if n < 2:
         return src

@@ -63,16 +63,8 @@ else()
     # headers add another 46KB. That is MEM1 spent on unwind tables for
     # exceptions that cannot happen.
     target_compile_options(${EXECUTABLE} PRIVATE -fno-exceptions -fno-rtti)
-    # Marks the libogc/console path, shared verbatim by GameCube and Wii.
-    # libogc rejects defining both __gamecube__ and __wii__, so this is its own
-    # macro rather than a reuse of either.
+    # Marks the libogc/console path.
     target_compile_definitions(${EXECUTABLE} PRIVATE GTA_OGC)
-    # Wii release: malloc may grow into MEM2 (libogc's default). OFF clamps the
-    # Wii DOL to the GameCube's MEM1-only heap, for reproducing GC memory bugs.
-    option(REVC_WII_MEM2 "Wii build: let malloc use MEM2" ON)
-    if(NINTENDO_WII AND REVC_WII_MEM2)
-        target_compile_definitions(${EXECUTABLE} PRIVATE REVC_WII_MEM2)
-    endif()
     if(${PROJECT}_AUDIO_GC)
         target_compile_definitions(${EXECUTABLE} PRIVATE AUDIO_GAMECUBE)
         target_link_libraries(${EXECUTABLE} PRIVATE aesnd)

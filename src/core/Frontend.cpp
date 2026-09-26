@@ -3221,7 +3221,7 @@ void
 CMenuManager::LoadSettings()
 {
 	CFileMgr::SetDirMyDocuments();
-#if defined(GTA_OGC) && !defined(HW_RVL)
+#ifdef GTA_OGC
 	int fileHandle = CFileMgr::OpenFile("mc:/gta_vc.set", "r");
 #else
 	int fileHandle = CFileMgr::OpenFile("gta_vc.set", "r");

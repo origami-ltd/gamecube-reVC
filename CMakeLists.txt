@@ -11,10 +11,8 @@ include(GetGitRevisionDescription)
 get_git_head_revision(GIT_REFSPEC GIT_SHA1 "ALLOW_LOOKING_ABOVE_CMAKE_SOURCE_DIR")
 message(STATUS "Building ${CMAKE_PROJECT_NAME} GIT SHA1: ${GIT_SHA1}")
 
-# GameCube and Wii share the same toolchain, libogc and GX GPU. The GameCube
-# build is MEM1 + ARAM only; the Wii build boots from SD/USB and lets malloc
-# use MEM2 (REVC_WII_MEM2, src/CMakeLists.txt).
-if(NINTENDO_GAMECUBE OR NINTENDO_WII)
+# GameCube: devkitPPC + libogc, MEM1 + ARAM.
+if(NINTENDO_GAMECUBE)
     set(NINTENDO_OGC TRUE)
 endif()
 

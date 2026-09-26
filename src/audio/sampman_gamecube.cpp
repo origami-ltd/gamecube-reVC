@@ -55,8 +55,8 @@
 // hunting the mute - a silent miss hides in a play session, a park screen
 // naming the failure does not.
 //
-// OFF for shipping and for real hardware. On a Wii it turned a missing sound
-// into a dead console at the end of a load, which tells the player nothing
+// OFF for shipping and for real hardware. It turned a missing sound into a
+// dead console at the end of a load, which tells the player nothing
 // and costs them the session. Audio that cannot be served is now a line on
 // the gecko and silence in that one channel; the game keeps running.
 // Re-enable it when hunting an audio bug, not otherwise.
@@ -192,14 +192,13 @@ struct GcBank {
 	bool8  loaded;
 };
 
-// Where each bank sample sits in audio memory (ARAM on GameCube, the
-// 16MB-capped MEM2 shim on the Wii dev target). Native rate, host-endian,
+// Where each bank sample sits in ARAM. Native rate, host-endian,
 // byte-for-byte the size the game's own sfx.raw carries — no inflation.
 static uint32 gBankSampleAddr[SAMPLEBANK_PED_START];
 static GcBank gBanks[MAX_SFX_BANKS];
 
 // The DSP's own output rate, taken from libogc rather than assumed: the
-// GameCube clocks it at 54MHz/1124 = 48042.7Hz and the Wii at a flat 48000.
+// GameCube clocks it at 54MHz/1124 = 48042.7Hz.
 // Anything handed to the DSP at a different rate is resampled by
 // sample-repeat inside the ucode, with no interpolation, which aliases
 // audibly - so channels convert once on the way in, to THIS rate, and the
@@ -207,11 +206,7 @@ static GcBank gBanks[MAX_SFX_BANKS];
 // resampler never runs. 48kHz 16-bit is the hardware ceiling; there is no
 // higher-quality path on this machine.
 #define GC_DSP_RATE_F  ((f32)DSP_DEFAULT_FREQ)
-#ifdef HW_RVL
-enum { GC_DSP_RATE = 48000 };
-#else
 enum { GC_DSP_RATE = (uint32)(54000000.0/1124.0 + 0.5) };
-#endif
 // Ceiling on a converted channel buffer. Above it the sample plays native
 // (the DSP's stair-step is the lesser evil against a 24MB arena).
 // A converted buffer is ~2.2x the native sample. 512KB covers 99.9% of the
@@ -312,7 +307,7 @@ static uint8 gEffectsFade = 127, gMusicFade = 127;
 
 // Ped comments: seven rotating PED_BLOCKSIZE slots filled straight from
 // sfx.raw on demand, plus one dedicated player-talk buffer — the OAL layout.
-// ponytail: plain MEM1 malloc (~630KB); move to MEM2/ARAM staging if the
+// ponytail: plain MEM1 malloc (~630KB); move to ARAM staging if the
 // arena ever needs it back.
 static uint8 *gPedBuf;
 extern "C" { extern volatile const char *gMainWhere; }   // gamecube.cpp watchdog checkpoint
@@ -455,7 +450,6 @@ gcReadSampleData(uint32 nSfx, uint8 *dst, uint32 capacity)
 }
 
 // One bounded read shared by ped comments and player talk.
-#if !defined(HW_RVL)
 static uint32 align32(uint32 v);
 static void gcBankWrite(uint32 dst, const void *src, uint32 n);
 // A ped comment from sfx.raw straight into its ARAM slot: 32K pieces through
@@ -488,7 +482,6 @@ gcReadSampleToAram(uint32 nSfx, uint32 aram)
 	fclose(f);
 	return ok;
 }
-#endif
 
 static bool8
 gcReadSample(uint32 nSfx, uint8 *dst)
@@ -514,36 +507,7 @@ align32(uint32 v)
 	return (v + 31) & ~31u;
 }
 
-// The bank lives in audio memory: ARAM on the GameCube, MEM2 standing in on
-// the Wii dev target (the Wii removed ARAM; Dolphin-Wii ignores AR DMA, which
-// is why the bank "loaded" into nothing). One-way stack lifetime either way.
-#if defined(HW_RVL)
-static uint32
-gcBankAlloc(uint32 bytes)
-{
-	// From Arena2 HI, downward: malloc's sbrk fallback grows Arena2Lo upward
-	// (see _sbrk_r in gamecube.cpp), so the two stay disjoint by
-	// construction — sharing Arena2Lo with sbrk was the heap smash.
-	// HARD CAP at 16MB: this shim stands in for the GameCube's ARAM and
-	// nothing else. Without the cap the dev build quietly spends the Wii's
-	// 64MB and stops representing the ship target — which is exactly how a
-	// 46MB sample bank got built for a machine with 16MB of audio memory.
-	enum { GC_ARAM_SIZE = 16*1024*1024 };
-	static uint32 used;
-	if(used + align32(bytes) > GC_ARAM_SIZE)
-		return 0;
-	uint8 *lo = (uint8*)SYS_GetArena2Lo();
-	uint8 *hi = (uint8*)SYS_GetArena2Hi();
-	uint8 *nhi = (uint8*)((uint32)(hi - align32(bytes)) & ~31u);
-	if(nhi < lo)
-		return 0;
-	SYS_SetArena2Hi(nhi);
-	used += align32(bytes);
-	return (uint32)nhi;
-}
-static void gcBankWrite(uint32 dst, const void *src, uint32 n){ memcpy((void*)dst, src, n); }
-static void gcBankRead(void *dst, uint32 src, uint32 n){ memcpy(dst, (const void*)src, n); }
-#else
+// The bank lives in ARAM, with a one-way stack lifetime.
 static uint32
 gcBankAlloc(uint32 bytes)
 {
@@ -570,7 +534,6 @@ gcBankRead(void *dst, uint32 src, uint32 n)
 	ARQ_PostRequest(&request, 0x47534155, ARQ_ARAMTOMRAM, ARQ_PRIO_LO,
 	    src, (u32)MEM_VIRTUAL_TO_PHYSICAL(dst), n);
 }
-#endif
 
 // ---------------------------------------------------------------- lifecycle
 
@@ -585,7 +548,6 @@ cSampleManager::Initialise(void)
 	if(_bSampmanInitialised)
 		return TRUE;
 
-#if !defined(HW_RVL)
 	if(!AR_CheckInit()){
 		// AR_Alloc records each block length via *__ARBlockLen++ with no
 		// null or bounds check — AR_Init(nil, 0) hands it a null pointer and
@@ -597,7 +559,6 @@ cSampleManager::Initialise(void)
 		static u32 aramBlocks[300];
 		AR_Init(aramBlocks, 300);
 	}
-#endif
 	// B115 (user): dvd:/noaudio.txt = no audio at all — the PC "no device"
 	// path (cAudioManager stays uninitialised, every DMAudio call is a no-op).
 	// ARAM is initialised above regardless, the texel store needs it.
@@ -896,7 +857,7 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 	// from SAMPLEBANK_PED_START up is streamed per-sample into the rotating
 	// ped slots (see InitialiseChannel's routing), never served from here.
 	// Falling back to gNumSamples made "bank 0" span all of sfx.raw — 340MB,
-	// which no ARAM or MEM2 pool holds — instead of its real 14MB.
+	// which ARAM cannot hold — instead of its real 14MB.
 	uint32 first = BankStartOffset[nBank];
 	uint32 last = nBank+1 < MAX_SFX_BANKS && BankStartOffset[nBank+1] ?
 	    BankStartOffset[nBank+1] : SAMPLEBANK_PED_START;
@@ -907,21 +868,12 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 
 	uint32 byteStart = gSampleIndex[first].nOffset;
 	uint32 byteEnd = gSampleIndex[last-1].nOffset + gSampleIndex[last-1].nSize;
-#ifdef HW_RVL
-	// Native-rate bank: sized by the file bytes, per-sample aligned. The
-	// 48k conversion happens per channel at play time now.
 	uint32 bytes = align32(byteEnd - byteStart);
-#else
-	uint32 bytes = align32(byteEnd - byteStart);
-#endif
 
-	// gcBankAlloc is a stack on both targets (ARAM stack on GameCube, MEM2
-	// arena on the Wii dev build): UnloadSampleBank cannot return memory, so
+	// gcBankAlloc is an ARAM stack: UnloadSampleBank cannot return memory, so
 	// an unload/reload cycle (audio Terminate/Initialise around a cutscene
 	// skip) must reuse the old allocation or the second alloc of a 14MB bank
-	// exhausts the pool and sound never comes back. This was the whole-game
-	// SFX mute on the Wii build: raw AR_Alloc here bypassed the HW_RVL MEM2
-	// shim, and the Wii has no ARAM to allocate.
+	// exhausts the pool and sound never comes back.
 	uint32 addr;
 	if(gBanks[nBank].aramAddr && gBanks[nBank].bytes >= bytes)
 		addr = gBanks[nBank].aramAddr;
@@ -931,14 +883,8 @@ cSampleManager::LoadSampleBank(uint8 nBank)
 			// To the card, not gecko: the gecko capture truncates lines.
 			DVD_FS_GUARD;
 			char bl[96];
-#ifdef HW_RVL
-			snprintf(bl, sizeof(bl), "BANK %s %uK arena2=%uK addr=%08x\n",
-			    addr ? "ok" : "FAIL", (unsigned)(bytes/1024),
-			    (unsigned)(SYS_GetArena2Size()/1024), (unsigned)addr);
-#else
 			snprintf(bl, sizeof(bl), "BANK %s %uK aram addr=%08x\n",
 			    addr ? "ok" : "FAIL", (unsigned)(bytes/1024), (unsigned)addr);
-#endif
 		}
 		if(addr == 0){
 			return FALSE;
@@ -1496,7 +1442,6 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 		memSrc = gPlayerTalkData;
 	else{
 		int32 slot = SampleManager._GetPedCommentSlot(nSfx);
-#if !defined(HW_RVL)
 		if(slot >= 0 && gPedAram && c->vs){
 			gcDiscardChannelPcm(c);
 			GcVoiceStream *vs = c->vs;
@@ -1513,7 +1458,6 @@ gcPrepareChannel(GcChannel *c, uint32 nChannel)
 			gConvOk++;
 			return TRUE;
 		}
-#endif
 		if(slot < 0 || gPedBuf == nil){
 			snprintf(d, sizeof(d), "sfx=%u slot=%d", (unsigned)nSfx, (int)slot);
 			gcAudioDie("ped-comment-not-loaded", d);
@@ -3070,7 +3014,6 @@ cSampleManager::LoadPedComment(uint32 nComment)
 	if(MusicManager.IsInitialised() &&
 	   MusicManager.GetMusicMode() == MUSICMODE_CUTSCENE)
 		return FALSE;
-#if !defined(HW_RVL)
 	if(!gPackedSfx){
 		if(gPedAram == 0){
 			gPedAram = gcBankAlloc(align32(PED_BLOCKSIZE)*MAX_PEDSFX);
@@ -3104,13 +3047,8 @@ cSampleManager::LoadPedComment(uint32 nComment)
 		LWP_MutexUnlock(gSringLock);
 		return FALSE;
 	}
-#endif
 	if(gPedBuf == nil){
-#ifdef HW_RVL
-		gPedBuf = (uint8*)gcBankAlloc(align32(PED_BLOCKSIZE*MAX_PEDSFX));
-#else
 		gPedBuf = (uint8*)memalign(32, PED_BLOCKSIZE*MAX_PEDSFX);
-#endif
 		if(gPedBuf == nil)
 			return FALSE;
 		for(int32 i = 0; i < MAX_PEDSFX; i++)

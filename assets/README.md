@@ -17,9 +17,7 @@ assets/
 With the data in place, build the releases from the repository root:
 
 ```bash
-python3 build.py iso        # GameCube -> build/release/reVC-GameCube.iso
-python3 build.py sd         # Wii      -> build/release/reVC-Wii-SD/ (work in progress)
-python3 build.py release    # both
+python3 build.py iso        # -> build/release/reVC-GameCube.iso
 ```
 
 or with Docker: `docker run --rm -v "$PWD/assets":/assets:ro -v "$PWD/out":/out revc`.

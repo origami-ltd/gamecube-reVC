@@ -240,7 +240,7 @@ CustomFrontendOptionsPopulate(void)
 #include "ini.h"
 #endif
 
-#if defined(GTA_OGC) && !defined(HW_RVL)
+#ifdef GTA_OGC
 // Straight to the memory card with the rest of the userfiles.
 mINI::INIFile ini("mc:/reVC.ini");
 #else

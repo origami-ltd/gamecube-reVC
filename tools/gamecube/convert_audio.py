@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vice City audio -> the console audio set the GameCube/Wii runtime plays.
+"""Vice City audio -> the console audio set the GameCube runtime plays.
 
     python3 convert_audio.py <GTAVC/audio dir> <output dir>
 

@@ -33,20 +33,13 @@
 #include <ogc/machine/processor.h>
 #include <ogc/usbgecko.h>
 #include <ogc/dvd.h>
-#ifndef HW_RVL
 extern "C" int GcCardMountDevice(void);
-#endif
 namespace rw { namespace gx { int8_t gxReadEfbPref(void); } }
 #include <iso9660.h>
 extern "C" bool ISO9660_MountDbg(const char *name, const DISC_INTERFACE *disc_interface);
 extern "C" void ISO9660_UnmountDbg(const char *name);
 #include <fat.h>
-#ifdef HW_RVL
-#include <sdcard/wiisd_io.h>
-#include <ogc/usbstorage.h>
-#else
 #include <sdcard/gcsd.h>
-#endif
 #include <ogc/lwp_watchdog.h>
 #include <ogc/color.h>
 #include <tuxedo/ppc/exception.h>
@@ -1113,8 +1106,8 @@ gcFatalPark(const char *tag, const char *msg)
 	//
 	// This used to call SYS_ResetSystem(SYS_POWEROFF) so a batch-mode Dolphin
 	// would close itself instead of sitting on the screen forever. On a real
-	// Wii that turns the console OFF - the user watched it happen at the end
-	// of a load - and it takes the one thing worth having with it: this screen
+	// console that turns it OFF - the user watched it happen at the end of a
+	// load - and it takes the one thing worth having with it: this screen
 	// names the failure, and nobody can read it after the power goes. The
 	// dump is already in crash.log by now either way, but the screen is what
 	// gets read first.
@@ -1276,19 +1269,8 @@ RwBool
 psInstallFileSystem(void)
 {
 	if(!fileSystemReady){
-#ifdef HW_RVL
-		// SD first, then USB. The Wii's front SD is the documented setup and
-		// mounts instantly; USB is probed after it because usbstorage's startup
-		// blocks for a while when nothing is attached, and that would tax every
-		// boot to serve the rarer case. Put the game data on whichever one you
-		// want it read from - USB is the faster of the two on this machine by a
-		// wide margin, which matters for a game that streams hundreds of MB.
-		static const DISC_INTERFACE *const sdSlots[] = { &__io_wiisd, &__io_usbstorage };
-		static const char *const sdNames[] = { "front SD", "USB storage" };
-#else
 		static const DISC_INTERFACE *const sdSlots[] = { &__io_gcsda, &__io_gcsdb };
 		static const char *const sdNames[] = { "SD Gecko slot A", "SD Gecko slot B" };
-#endif
 		for(size_t i = 0; i < sizeof(sdSlots)/sizeof(sdSlots[0]); i++){
 			printf("mount: probing %s...\n", sdNames[i]);
 			// 1MB sector cache (64 pages x 32 sectors); the default is tiny
@@ -1301,14 +1283,8 @@ psInstallFileSystem(void)
 		}
 		// The disc is the real GameCube medium (the asset set fits a 1.46GB
 		// mini-DVD). Probed after SD so the dev card still wins when present.
-		//
-		// GameCube ONLY. This code's own comment has always warned that on real
-		// hardware with an empty drive the probe blocks forever - startup() and
-		// isInserted() both block - and a Wii booted from the Homebrew Channel
-		// reaches it whenever the SD and USB probes come up empty, with no disc
-		// in the drive and no reason to want one. Failing the mount and saying
-		// so beats hanging with a black screen.
-#ifndef HW_RVL
+		// On real hardware with an empty drive this probe blocks forever -
+		// startup() and isInserted() both block.
 		if(!fileSystemReady){
 			printf("mount: probing DVD (ISO9660)...\n");
 			{
@@ -1324,7 +1300,6 @@ psInstallFileSystem(void)
 				;
 			}
 		}
-#endif
 		if(!fileSystemReady){
 			printf("mount: no storage found. Put the game files in the ROOT of\n");
 			printf("       the SD card or a USB drive, formatted FAT32.\n");
@@ -1351,7 +1326,6 @@ psInstallFileSystem(void)
 const char *
 _psGetUserFilesFolder(void)
 {
-#ifndef HW_RVL
 	// Userfiles (settings dump + story saves) live on the memory card, each
 	// as its own CARD file — options and progress separated, and nothing
 	// depends on the disc being writable.
@@ -1359,7 +1333,6 @@ _psGetUserFilesFolder(void)
 		static const char mc[] = "mc:";
 		return mc;
 	}
-#endif
 	static const char path[] = "dvd:/userfiles";
 	return path;
 }
@@ -1618,22 +1591,6 @@ showPortCredit(void)
 	CFont::SetAlphaFade(255.0f);
 	CFont::SetDropShadowPosition(0);
 }
-
-#if defined(HW_RVL) && !defined(REVC_WII_MEM2)
-// Only when built with -DREVC_WII_MEM2=OFF: the Wii release keeps libogc's
-// MEM2 malloc. For that GameCube-faithful mode:
-// MEM2 is forbidden: this is a GameCube game and the GameCube has no MEM2.
-// libogc's Wii sbrk.o defines MALLOC_MEM2 weakly with value 1, which makes
-// _sbrk_r serve malloc out of Arena2 (0x90002000..0x933E0000, ~52MB) once MEM1
-// runs dry — so the Wii dev DOL was quietly playing on ~68MB, four times the
-// target's heap, and every "it works on Wii" verdict was measured against a
-// machine the target isn't. The GameCube libogc has no MALLOC_MEM2 at all and
-// its _sbrk_r is Arena1-only. This strong definition overrides the weak one so
-// the Wii DOL fails exactly where a GameCube fails.
-// Verify: powerpc-eabi-nm build/wii/src/reVC.elf | grep MALLOC_MEM2
-//   'B' = this definition (clamped)   'V' = libogc's weak default (MEM2 live)
-extern "C" u32 MALLOC_MEM2 = 0;
-#endif
 
 static bool autoCarTestEnabled, autoCarProbed;
 bool gcAutoSkipCutscenes;   // autocar.txt runs are hands-free: CutsceneMgr ends each scene after 1 s

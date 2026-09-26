@@ -2,15 +2,11 @@
 """One-command builds for macOS, Linux and Windows.
 
     python3 build.py            # GameCube DOL (build/cube/src/reVC.dol)
-    python3 build.py wii        # Wii DOL, MEM2 on (build/wii/src/reVC.dol)
-    python3 build.py all        # both DOLs
-    python3 build.py iso        # GameCube: DOL + disc -> build/release/reVC-GameCube.iso
-    python3 build.py sd         # Wii: DOL + SD card tree -> build/release/reVC-Wii-SD/ (WIP)
-    python3 build.py release    # both
+    python3 build.py iso        # DOL + disc -> build/release/reVC-GameCube.iso
 
-iso/sd/release read your Vice City install from assets/GTAVC (or --game) and
-need xorriso, ffmpeg and sox on PATH; Dockerfile has everything.
-Needs a devkitPro install with the GameCube/Wii toolchains (see README).
+iso reads your Vice City install from assets/GTAVC (or --game) and needs
+xorriso, ffmpeg and sox on PATH; Dockerfile has everything.
+Needs a devkitPro install with the GameCube toolchain (see README).
 """
 import argparse
 import json
@@ -23,7 +19,7 @@ import tempfile
 import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DKP_GROUPS = ["gamecube-dev", "wii-dev"]
+DKP_GROUPS = ["gamecube-dev"]
 
 
 def run(cmd, **kw):
@@ -101,12 +97,12 @@ def setup_windows():
     if not os.path.isdir("C:/devkitPro"):
         name, url = github_latest_asset("devkitPro/installer", ".exe")
         exe = download(url, name)
-        print("Launching the devkitPro installer — select the GameCube and "
-              "Wii development packages.")
+        print("Launching the devkitPro installer — select the GameCube "
+              "development packages.")
         os.startfile(exe)  # noqa: attribute exists on Windows
     else:
         print("devkitPro found at C:/devkitPro; run the devkitPro updater "
-              "to add gamecube-dev and wii-dev if they are missing.")
+              "to add gamecube-dev if it is missing.")
 
 
 def setup():
@@ -132,7 +128,7 @@ def find_devkitpro():
         if candidate and os.path.isfile(
                 os.path.join(candidate, "cmake", "ogc-common.cmake")):
             return candidate.replace("\\", "/")
-    sys.exit("devkitPro not found. Install it (with GameCube/Wii packages) "
+    sys.exit("devkitPro not found. Install it (with the GameCube packages) "
              "and/or set the DEVKITPRO environment variable.")
 
 
@@ -147,13 +143,9 @@ def find_tool(name, dkp):
     sys.exit(f"{name} not found on PATH; install it or add it to PATH.")
 
 
-def build(target, dkp, cmake, ninja):
-    if target == "cube":
-        toolchain = f"{dkp}/cmake/GameCube.cmake"
-    else:
-        toolchain = os.path.join(ROOT, "vendor", "portlibs", "cmake",
-                                 "Wii.cmake")
-    build_dir = os.path.join(ROOT, "build", target)
+def build(dkp, cmake, ninja):
+    toolchain = f"{dkp}/cmake/GameCube.cmake"
+    build_dir = os.path.join(ROOT, "build", "cube")
     os.makedirs(build_dir, exist_ok=True)
     env = dict(os.environ, DEVKITPRO=dkp)
     if not os.path.isfile(os.path.join(build_dir, "build.ninja")):
@@ -167,7 +159,7 @@ def build(target, dkp, cmake, ninja):
         ], check=True, env=env)
     subprocess.run([ninja, "-C", build_dir], check=True, env=env)
     dol = os.path.join(build_dir, "src", "reVC.dol")
-    print(f"\n  {target}: {dol}")
+    print(f"\n  cube: {dol}")
 
 
 def build_txdconv():
@@ -238,31 +230,28 @@ def opening_movies(args, game):
     return cache
 
 
-def disc_root(profile, args, txdconv):
-    """GTAVC -> the console data root, under build/assets/<profile>/root.
+def disc_root(args, txdconv):
+    """GTAVC -> the disc root, under build/assets/gamecube/root.
 
-    gamecube: textures taller than 128 at 75% (user-approved 09-03), CI8
-              palettes and the shared texel pool (both need the ARAM tier).
-    wii:      full-size textures, no CI8/pool (the Wii keeps textures in
-              main memory, MEM2 included).
-    Both:     native map/vehicle/pad geometry, console audio, the movies.
+    Textures taller than 128 at 75% (user-approved 09-03), CI8 palettes and
+    the shared texel pool (both need the ARAM tier), native map/vehicle/pad
+    geometry, console audio, the movies.
     """
     game = os.path.abspath(args.game or os.path.join(ROOT, "assets", "GTAVC"))
     if not os.path.isdir(os.path.join(game, "models")):
         sys.exit(f"game data not found at {game}; copy your Vice City "
                  "install there or pass --game (see assets/README.md)")
-    work = os.path.join(ROOT, "build", "assets", profile)
+    work = os.path.join(ROOT, "build", "assets", "gamecube")
     root = os.path.join(work, "root")
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
 
     cmd = ["--game", game, "--out", root, "--txdconv", txdconv, "--gamefiles",
-           os.path.abspath(args.gamefiles or os.path.join(ROOT, "assets", "gamefiles"))]
-    if profile == "gamecube":
-        cmd += ["--shrink", "128", "75"]
+           os.path.abspath(args.gamefiles or os.path.join(ROOT, "assets", "gamefiles")),
+           "--shrink", "128", "75"]
     tool("build_sd.py", *cmd, "--preencoded-movies", opening_movies(args, game))
 
-    # Converted once, shared by both profiles: minutes of ffmpeg/sox.
+    # Converted once and kept across builds: minutes of ffmpeg/sox.
     audio = os.path.join(ROOT, "build", "assets", "audio")
     if not os.path.isfile(os.path.join(audio, "lengths.cache")):
         shutil.rmtree(audio, ignore_errors=True)
@@ -272,16 +261,15 @@ def disc_root(profile, args, txdconv):
 
     models = os.path.join(root, "models")
     img, dir_ = os.path.join(models, "gta3.img"), os.path.join(models, "gta3.dir")
-    if profile == "gamecube":
-        ci8 = [os.path.join(work, "ci8.img"), os.path.join(work, "ci8.dir")]
-        pool = [os.path.join(work, "pool.img"), os.path.join(work, "pool.dir")]
-        tool("ci8img.py", img, dir_, *ci8)
-        tool("sharedpool.py", *ci8, *pool, os.path.join(models, "shared.txd"),
-             "--pool-kb", "2048")
-        os.replace(pool[0], img)
-        os.replace(pool[1], dir_)
-        for f in ci8:
-            os.remove(f)
+    ci8 = [os.path.join(work, "ci8.img"), os.path.join(work, "ci8.dir")]
+    pool = [os.path.join(work, "pool.img"), os.path.join(work, "pool.dir")]
+    tool("ci8img.py", img, dir_, *ci8)
+    tool("sharedpool.py", *ci8, *pool, os.path.join(models, "shared.txd"),
+         "--pool-kb", "2048")
+    os.replace(pool[0], img)
+    os.replace(pool[1], dir_)
+    for f in ci8:
+        os.remove(f)
     # Seek locality on the disc: each TXD next to its models, groups in map
     # order. Byte-identical entries, new order and lowercase names.
     layout = os.path.join(work, "layout")
@@ -299,16 +287,6 @@ def disc_root(profile, args, txdconv):
     return root
 
 
-WII_META = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<app version="1">
-  <name>reVC</name>
-  <coder>reVC GameCube/Wii port</coder>
-  <short_description>GTA Vice City (reVC) for Wii</short_description>
-  <long_description>Game data goes in the root of this SD card or USB drive.</long_description>
-</app>
-"""
-
-
 def package_iso(root, out_dir):
     iso = os.path.join(out_dir, "reVC-GameCube.iso")
     tool("build_iso.py", "--root", root, "--dol",
@@ -316,25 +294,11 @@ def package_iso(root, out_dir):
     print(f"\n  GameCube ISO: {iso}")
 
 
-def package_sd(root, out_dir):
-    sd = os.path.join(out_dir, "reVC-Wii-SD")
-    shutil.rmtree(sd, ignore_errors=True)
-    link_tree(root, sd)
-    app = os.path.join(sd, "apps", "reVC")
-    os.makedirs(app)
-    shutil.copy2(os.path.join(ROOT, "build", "wii", "src", "reVC.dol"),
-                 os.path.join(app, "boot.dol"))
-    with open(os.path.join(app, "meta.xml"), "w") as f:
-        f.write(WII_META)
-    print(f"\n  Wii SD card: {sd}  (copy its CONTENTS to the card root; "
-          "boot apps/reVC from the Homebrew Channel)")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("target", nargs="?", default="cube",
-                        choices=("cube", "wii", "all", "iso", "sd", "release"))
+                        choices=("cube", "iso"))
     parser.add_argument("--game", help="Vice City install "
                         "(default: assets/GTAVC)")
     parser.add_argument("--gamefiles", help="reVC gamefiles: TEXT, neo, models, "
@@ -360,19 +324,12 @@ def main():
     dkp = find_devkitpro()
     cmake = find_tool("cmake", dkp)
     ninja = find_tool("ninja", dkp)
-    dols = {"cube": ("cube",), "wii": ("wii",), "all": ("cube", "wii"),
-            "iso": ("cube",), "sd": ("wii",), "release": ("cube", "wii")}
-    for target in dols[args.target]:
-        build(target, dkp, cmake, ninja)
-    if args.target not in ("iso", "sd", "release"):
+    build(dkp, cmake, ninja)
+    if args.target != "iso":
         return
     out_dir = os.path.abspath(args.out or os.path.join(ROOT, "build", "release"))
     os.makedirs(out_dir, exist_ok=True)
-    txdconv = build_txdconv()
-    if args.target in ("iso", "release"):
-        package_iso(disc_root("gamecube", args, txdconv), out_dir)
-    if args.target in ("sd", "release"):
-        package_sd(disc_root("wii", args, txdconv), out_dir)
+    package_iso(disc_root(args, build_txdconv()), out_dir)
 
 
 if __name__ == "__main__":

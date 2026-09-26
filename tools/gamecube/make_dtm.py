@@ -54,13 +54,13 @@ def make_inputs(seconds, flight=False):
 	return inputs
 
 
-def make_header(input_count, game_id=b"GBLPGL", wii_executable=True):
+def make_header(input_count, game_id=b"GBLPGL"):
 	header = bytearray(HEADER_SIZE)
 	header[0:4] = b"DTM\x1a"
 	# The canonical disc image identifies itself as GBLPGL. Dolphin rejects a
 	# movie whose six-byte id belongs to the old standalone-DOL test executable.
 	header[4:10] = game_id
-	header[10] = int(wii_executable)
+	header[10] = 0  # GameCube disc, not a Wii executable.
 	header[11] = 1  # GameCube controller in port 1.
 	struct.pack_into("<Q", header, 13, input_count)  # frameCount
 	struct.pack_into("<Q", header, 21, input_count)  # inputCount
@@ -101,7 +101,7 @@ def self_test():
 	assert len(header) == HEADER_SIZE
 	assert header[:4] == b"DTM\x1a"
 	assert header[4:10] == b"GBLPGL"
-	assert header[10:12] == bytes((1, 1))
+	assert header[10:12] == bytes((0, 1))
 	assert struct.unpack_from("<Q", header, 13)[0] == len(inputs)
 	assert struct.unpack_from("<Q", header, 21)[0] == len(inputs)
 	assert struct.unpack_from("<Q", header, 237)[0] == (1 << 64) - 1
@@ -113,7 +113,6 @@ def main():
 	parser.add_argument("output", nargs="?", type=Path)
 	parser.add_argument("--seconds", type=int, default=240)
 	parser.add_argument("--game-id", default="GBLPGL")
-	parser.add_argument("--gamecube-disc", action="store_true")
 	parser.add_argument("--flight", action="store_true",
 	    help=f"hold A + stick forward after {FLIGHT_START_SECONDS}s")
 	parser.add_argument("--self-test", action="store_true")
@@ -136,7 +135,7 @@ def main():
 
 	inputs = make_inputs(args.seconds, args.flight)
 	args.output.write_bytes(make_header(
-		len(inputs), game_id, not args.gamecube_disc) + b"".join(inputs))
+		len(inputs), game_id) + b"".join(inputs))
 	print(f"wrote {args.output}: {len(inputs)} inputs at {FPS} Hz")
 
 

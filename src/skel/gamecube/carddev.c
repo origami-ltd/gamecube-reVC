@@ -3,9 +3,6 @@
 // like a retail GC title's would. Whole-file semantics: open pulls the file
 // into RAM, writes land in RAM, close flushes back in one CARD_Write. The
 // files involved are a few KB; the biggest (a save) is under 200KB.
-//
-// GC build only: the Wii dev build keeps dvd:/userfiles on the SD card.
-#ifndef HW_RVL
 
 #include <gccore.h>
 #include <ogc/card.h>
@@ -251,4 +248,3 @@ int GcCardMountDevice(void)
 	return AddDevice(&dotab_mc) >= 0;
 }
 
-#endif // !HW_RVL

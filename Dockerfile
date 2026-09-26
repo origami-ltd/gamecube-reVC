@@ -9,8 +9,7 @@
 # on its own instead (-v ~/GTAVC:/assets/GTAVC:ro). /out receives
 #   reVC-GameCube.iso   GameCube mini-DVD, MEM1 + ARAM
 # Optional: /assets/movies with opening.ogv + titles.ogv skips the FMV encode.
-# Other targets: append cube, wii, all, sd or release to the run command
-# (sd/release add the Wii SD card, which does not get past loading yet).
+# Append cube to the run command to build only the DOL.
 FROM devkitpro/devkitppc:latest
 
 # xorriso builds the ISO; ffmpeg + sox convert the audio (sox writes Vorbis);

@@ -435,9 +435,8 @@ bool CGame::Initialise(const char* datFile)
 #ifdef GTA_OGC
 	// B89: the shared texture pool (sharedpool.py). Resident for the whole run;
 	// archive TXDs reference its texels by hash instead of carrying copies.
-	// The Wii build ships no pool (its references resolve only through the
-	// GameCube's ARAM tier), so a missing file is skipped, not fatal:
-	// LoadTxd parks the game on any file it cannot open.
+	// A missing file is skipped, not fatal: LoadTxd parks the game on any
+	// file it cannot open.
 	if(FILE *f = fopen("MODELS/SHARED.TXD", "rb")){
 		fclose(f);
 		int sharedTxdSlot = CTxdStore::AddTxdSlot("shared");

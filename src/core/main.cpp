@@ -1616,8 +1616,7 @@ Idle(void *arg)
 	// runs. The intro script fades in (2 s of GAME time) in the same frame the
 	// cutscene load begins; on a real drive the next three frames take seconds
 	// of WALL time each, so the world, radar and ambience showed through at
-	// fade 247..225 (B98 FRAME trace). Main never saw it: with MEM2 those
-	// frames were 16 ms. Released by the first running cutscene, or after 15 s
+	// fade 247..225 (B98 FRAME trace). Released by the first running cutscene, or after 15 s
 	// of game time (Load Game has no cutscene).
 	// B102: the 15 s game-time escape released the hold before the office
 	// scene — the INTRO script's special-character loads alone take longer

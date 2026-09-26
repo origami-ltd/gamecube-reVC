@@ -5,8 +5,7 @@ reverse-engineered engine from [mrxenginner/reVC](https://github.com/mrxenginner
 
 The port runs from a GameCube mini-DVD ISO within the console's limits:
 24 MB of MEM1 for the game and 16 MB of ARAM for texels, the sound bank,
-audio read-ahead and a disc read cache. A Wii build (SD card, MEM2) exists
-but is still a work in progress.
+audio read-ahead and a disc read cache.
 
 ## Status
 
@@ -22,8 +21,6 @@ Playable from the **GameCube ISO**, still a work in progress.
   fails to spawn.
 - Not tested yet: missions beyond the opening, memory card saves and
   sessions of several hours.
-- **Wii** (SD card, MEM2): boots, plays the movies and reaches the menu,
-  then hangs loading the game.
 
 ## Architecture
 
@@ -61,13 +58,9 @@ without them the PC movies are encoded during the build.
 
 The build converts every texture to GX-native formats, repacks `gta3.img`
 with native map, vehicle and pad geometry, converts the audio (IMA ADPCM
-streams and sample bank, Vorbis radio) and the movies (Theora):
-
-- **GameCube** (MEM1 + ARAM): textures taller than 128 px at 75%, CI8
-  palettes and a shared texel pool, laid out on a 1.46 GB mini-DVD image.
-- **Wii** (MEM2, work in progress — boots, plays the movies and reaches the
-  menu, then hangs loading the game): full-size textures on an SD card tree
-  with `apps/reVC/boot.dol` for the Homebrew Channel.
+streams and sample bank, Vorbis radio) and the movies (Theora), with
+textures taller than 128 px at 75%, CI8 palettes and a shared texel pool,
+laid out on a 1.46 GB mini-DVD image.
 
 ### Docker (recommended)
 
@@ -84,8 +77,7 @@ docker run --rm -v "$PWD/assets":/assets:ro -v "$PWD/out":/out revc
 ```
 
 `out/` receives `reVC-GameCube.iso` (about 6 minutes from a fresh install).
-Append `release` to the `docker run` line to also build the
-(work-in-progress) Wii SD card tree. Mount real folders: a symlink inside
+Mount real folders: a symlink inside
 `assets/` that points outside the mount does not resolve in the container —
 mount that folder on its own instead (`-v ~/GTAVC:/assets/GTAVC:ro`).
 
@@ -95,18 +87,15 @@ mount that folder on its own instead (`-v ~/GTAVC:/assets/GTAVC:ro`).
 git clone --recursive https://github.com/origami-ltd/gamecube-reVC.git
 cd gamecube-reVC
 python3 build.py --setup    # CMake, Ninja and devkitPro for your OS
-python3 build.py            # GameCube DOL -> build/cube/src/reVC.dol
-python3 build.py wii        # Wii DOL (MEM2 on) -> build/wii/src/reVC.dol
-python3 build.py iso        # GameCube -> build/release/reVC-GameCube.iso
-python3 build.py sd         # Wii      -> build/release/reVC-Wii-SD/ (work in progress)
-python3 build.py release    # both
+python3 build.py            # DOL -> build/cube/src/reVC.dol
+python3 build.py iso        # ISO -> build/release/reVC-GameCube.iso
 ```
 
-The DOLs need Python 3, CMake ≥ 3.13, Ninja and devkitPro with the
-`gamecube-dev` and `wii-dev` package groups; everything else they link is
+The DOL needs Python 3, CMake ≥ 3.13, Ninja and devkitPro with the
+`gamecube-dev` package group; everything else it links is
 in the repository (the librw fork with the GX backend, the xiph
-submodules, a PowerPC libtheora under `vendor/portlibs/`). The ISO and SD
-targets also need a host C++ compiler, `xorriso`, FFmpeg 8 or newer (older
+submodules, a PowerPC libtheora under `vendor/portlibs/`). The ISO also
+needs a host C++ compiler, `xorriso`, FFmpeg 8 or newer (older
 FFmpeg breaks the movies: Debian 12's 5.1 drops Theora's duplicate-frame
 packets when remuxing), SoX with Vorbis support, and libtheora 1.2.0's
 `encoder_example` — or the pre-encoded movies in `assets/movies`.
@@ -116,22 +105,22 @@ root.
 
 - **macOS** — `brew install cmake ninja xorriso ffmpeg sox libogg libvorbis`,
   then install [devkitPro pacman](https://github.com/devkitPro/pacman/releases)
-  (`.pkg` installer) and run `sudo dkp-pacman -Sy gamecube-dev wii-dev`.
+  (`.pkg` installer) and run `sudo dkp-pacman -Sy gamecube-dev`.
 - **Debian/Ubuntu** — `sudo apt-get install cmake ninja-build build-essential
   xorriso sox libsox-fmt-all libogg-dev libvorbis-dev curl xz-utils`, then run the
   [devkitPro pacman bootstrap](https://apt.devkitpro.org/install-devkitpro-pacman)
-  and `sudo dkp-pacman -Sy gamecube-dev wii-dev`. If the distribution's
+  and `sudo dkp-pacman -Sy gamecube-dev`. If the distribution's
   `ffmpeg -version` is below 8, put a static
   [FFmpeg 8 build](https://github.com/BtbN/FFmpeg-Builds/releases) first on
   `PATH` (the Dockerfile does exactly this).
 - **Arch Linux** — `sudo pacman -S cmake ninja base-devel xorriso ffmpeg sox
   libogg libvorbis`, add the
   [devkitPro repositories](https://devkitpro.org/wiki/devkitPro_pacman) to
-  `/etc/pacman.conf` and `sudo pacman -Sy gamecube-dev wii-dev`.
+  `/etc/pacman.conf` and `sudo pacman -Sy gamecube-dev`.
 - **Windows** — `winget install Kitware.CMake Ninja-build.Ninja
   Python.Python.3.12 Gyan.FFmpeg ChrisBagwell.SoX`, then run the
   [devkitPro installer](https://github.com/devkitPro/installer/releases)
-  and select the GameCube and Wii development packages. `xorriso` and the
+  and select the GameCube development packages. `xorriso` and the
   movie encoder are not packaged for Windows: install
   [MSYS2](https://www.msys2.org/), `pacman -S xorriso` in its shell and add
   its `usr\bin` to `PATH`; build the encoder below in MSYS2 with a compiler
@@ -155,20 +144,10 @@ and Windows steps follow the same requirements but have not been run.
 
 ## Running
 
-### GameCube
-
 Open `build/release/reVC-GameCube.iso` in Dolphin. Use DSP LLE with
 `DSPThread = False` under `[Core]` in `Dolphin.ini`: DSP HLE on its own
 thread can deliver the DSP interrupt before its mail and freeze the game.
 On a console, load the ISO with Swiss or an optical drive emulator.
-
-### Wii (Homebrew Channel or Dolphin) — work in progress
-
-Copy the **contents** of `build/release/reVC-Wii-SD/` to the root of a FAT32
-SD card (the card must contain `/models/gta3.img`, not
-`/reVC-Wii-SD/models/gta3.img`) and launch reVC from the Homebrew Channel.
-In Dolphin, enable SD card folder sync (`Config → Wii → SD Card Settings`)
-targeting that folder and open `apps/reVC/boot.dol`.
 
 ## Credits
 

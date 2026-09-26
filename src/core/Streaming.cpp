@@ -748,10 +748,8 @@ CStreaming::Init2(void)
 		// time this runs, pools, paths, collision and the engine already hold
 		// most of it (measured: usedNow 15273K of a 16032K arena at this line).
 		// Budgeting "arena minus reserve" then granted the streamer ~14MB on
-		// top of a heap with ~200K left — 29MB of demand in 16MB. It never
-		// showed because libogc's Wii sbrk fell through into MEM2 (MALLOC_MEM2
-		// = 1) and absorbed the excess; with MEM2 forbidden the overcommit is
-		// the OOM. Budget what is actually left, the way dca3 sizes its fixed
+		// top of a heap with ~200K left — 29MB of demand in 16MB, and the
+		// overcommit is the OOM. Budget what is actually left, the way dca3 sizes its fixed
 		// STREAMING_MEM_SIZE against a known resident set.
 		extern size_t gOgcHeapUsedAtInit;
 		struct mallinfo mi = mallinfo();

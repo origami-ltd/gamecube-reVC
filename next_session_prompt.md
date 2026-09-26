@@ -5,7 +5,7 @@ branch `gamecube`. `origin` is mrxenginner's upstream — do not push there.
 
 Branches: `gamecube` (current), `floor-08-20` (the user's named PISO — a known-good
 state), `wip-08-20` (everything the 08-19/20 sessions produced, including discarded
-MEM2 experiments; cherry-pick only). Tarball backup:
+experiments; cherry-pick only). Tarball backup:
 `/Users/ebellumat/revc-backup-0820-1730/worktree-full.tar.gz`
 
 The librw submodule sits on a LOCAL-ONLY commit (`9a6e550`, branch `wip-08-20`); its
@@ -13,16 +13,12 @@ remote is mrxenginner's. A fresh clone will not build until that is resolved.
 
 ## Rules the user set, learned the hard way
 
-- **MEM2 DOES NOT EXIST.** GameCube = 24MB MEM1 + 16MB ARAM (DMA-only, not CPU/GX
-  addressable). MEM2 is Wii-only. The Wii dev target is a valid proxy ONLY while MEM2
-  is untouched, because Wii MEM1 == GameCube MEM1. MEM2 may stand in for ARAM alone,
-  capped at 16MB. A whole day was lost to ignoring this.
+- **The budget is the GameCube's.** 24MB MEM1 + 16MB ARAM (DMA-only, not CPU/GX
+  addressable). Nothing else.
 - **One Dolphin at a time.** `pgrep -x Dolphin` before launching; if one is alive and
   it is the user's, wait. Never `pkill` blindly while they are playing.
 - **Dolphin's window opens on the MacBook built-in display** (AppleScript-move to
   {2570,-50} right after launch).
-- **Never write the SD image while Dolphin runs** — its buffered view clobbers host
-  writes. Reads may be stale. `fsck_msdos -y` after every write.
 - **No timed background waits.** Tail logs live; the user closing Dolphin is the signal.
 - **Texture quality is untouchable.** Memory pressure is solved by eviction/offload.
 - Ask before installing anything (e.g. an audio loopback driver).
@@ -140,7 +136,7 @@ measured identical (0.30dB); the win is space and read time, not timbre.
   discarded at the next boot. The options file is `gta_vc.set`, separate from the story
   slots `GTAVCsf*.b`. NOTE: an older handoff claimed the memory card was "PROVEN BOTH
   DIRECTIONS" — that was wrong. `mc:` is still rejected by crossplatform.cpp's path
-  normaliser; the proven round trip is the dev target's SD.
+  normaliser.
 - **Debug HUD hang**: `CFont::GetNumberLines` and `GetTextRect` wrap by resetting x and
   advancing y WITHOUT advancing the string, so a word wider than the wrap box spins
   forever. `PrintString` already guarded this with `!first`; the two measuring passes
@@ -151,7 +147,7 @@ measured identical (0.30dB); the win is space and read time, not timbre.
   640x528.
 - MEM1 stays tight on a 24MB machine. Levers if allocation failures return: streaming
   budget, the 1.3MB of frontend textures never freed (Frontend.cpp UnloadTextures), ped
-  slots. NOT texture quality, NOT MEM2.
+  slots. NOT texture quality.
 
 ## Host-side checks that exist (run them, they are fast)
 

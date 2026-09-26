@@ -17,7 +17,7 @@ head. This checks both halves:
     python3 tools/gamecube/test_resample.py
 """
 
-DSPS = (48000, 48043)  # Wii dev target, real GameCube
+DSPS = (48043,)  # GameCube DSP: 54 MHz / 1124
 TAPS = 8
 
 
@@ -100,7 +100,7 @@ def main():
             for n in (2, 3, 64, 1287, 20000):
                 ok, k, w, r = overlap_is_safe(n, f, dsp)
                 assert ok, f"overlap broken at {f}->{dsp}, n={n}: k={k} write={w} read={r}"
-    print(f"ok: every FIR read stays ahead at {len(rates)} pitched rates on Wii/GC")
+    print(f"ok: every FIR read stays ahead at {len(rates)} pitched rates on GameCube")
 
     # Baking target pitch f makes the converted duration n/f and leaves the
     # hardware voice at dsp, rather than asking AESND to resample it again.
