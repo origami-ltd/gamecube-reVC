@@ -184,7 +184,6 @@ static size_t gStreamHeapFree = STREAM_HEAP_FLOOR;
 #endif
 
 extern "C" int gcBootDone(void);   // gamecube.cpp: 1 from the first GS_PLAYING_GAME frame (B144)
-extern "C" int gcStreamEmergencyShed(unsigned need);   // below: size-aware shed
 volatile int gcEssentialLoad;   // B150: read by gcArenaCarve (gamecube.cpp)
 static uint8 gLoadFails[NUMSTREAMINFO];   // bounded retry counters, see FailedLoad
 static uint8 gFailSec[NUMSTREAMINFO];     // B133: second of the last failure; the cap is a 60 s cooldown, not a life sentence
@@ -1319,12 +1318,11 @@ CStreaming::ConvertBufferToObject(int8 *buf, int32 streamId)
 #ifdef GTA_OGC
 			// A building that failed on a heap fragment (b199: six Washington
 			// Beach buildings, 23K geometry blocks with 700K free, then banned)
-			// gets room before its retry: compact the heap and shed what nothing
-			// draws until a 64K block fits.
-			if(mi->IsSimple()){
+			// gets a compacted heap before its retry. Not a shed: b201's 64K
+			// shed evicted 24 models a time, 21 times, and they came back as
+			// LOD -> HD flips.
+			if(mi->IsSimple())
 				CGame::TidyUpMemory(false, false);
-				gcStreamEmergencyShed(64*1024);
-			}
 #endif
 			gFailWhy = "model load";
 			FailedLoad(streamId);
@@ -2294,13 +2292,13 @@ gcStreamEmergencyShed(unsigned need)
 			break;
 		}
 		if(k == cap) break;
-		if(!CStreaming::RemoveLeastUsedModel(keep) && !CStreaming::RemoveLeastUsedModel(keep, true)){   // B140: second pass ignores LoadedRecently
+		if(!CStreaming::RemoveLeastUsedModel(keep, false, need) && !CStreaming::RemoveLeastUsedModel(keep, true, need)){   // B140: second pass ignores LoadedRecently
 			// B149: nothing unreferenced — every building near the scene still
 			// holds its RW object (refs > 0). Drop the RW objects behind the
 			// camera the way the budget sweep would, then look again. b147:
 			// prop 295 (81K) failed 24x with 'shed 0 models' and 2.2MB free.
 			CStreaming::DeleteRwObjectsBehindCamera(CStreaming::ms_memoryUsed > 2*need ? CStreaming::ms_memoryUsed - 2*need : 0);
-			if(!CStreaming::RemoveLeastUsedModel(keep, true)) break;
+			if(!CStreaming::RemoveLeastUsedModel(keep, true, need)) break;
 		}
 		dropped++;
 	}
@@ -2363,7 +2361,7 @@ extern "C" void gcScriptWaitDiag(int32 m)
 }
 
 bool
-CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
+CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent, uint32 minBytes)
 {
 #ifdef GTA_OGC
 	// B125: never a script-owned or DONT_REMOVE model. Every caller here
@@ -2389,12 +2387,22 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 #ifdef GTA_OGC
 			if(!ignoreRecent && LoadedRecently(streamId))
 				continue;
+			// B124, kept without its distance ordering: the emergency shed
+			// needs a hole of minBytes, and the least-used crumbs did not make
+			// one (b201: 116 sheds of 4 models each for 15-25K requests with
+			// 0.7-1.2 MB free, and those models reloaded as LOD -> HD flips).
+			if(minBytes && ms_aInfoForModel[streamId].GetCdSize()*CDSTREAM_SECTOR_SIZE < minBytes)
+				continue;
 #endif
 			if (CModelInfo::GetModelInfo(streamId)->GetNumRefs() == 0) {
 				TraceEvict(streamId);
 				RemoveModel(streamId);
 				return true;
 			}
+#ifdef GTA_OGC
+		}else if(minBytes){
+			continue;   // the sized pass takes models only
+#endif
 		}else if(streamId >= STREAM_OFFSET_TXD && streamId < STREAM_OFFSET_COL){
 			if(CTxdStore::GetNumRefs(streamId - STREAM_OFFSET_TXD) == 0 &&
 			   !IsTxdUsedByRequestedModels(streamId - STREAM_OFFSET_TXD)
@@ -2414,6 +2422,10 @@ CStreaming::RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent)
 			}
 		}
 	}
+#ifdef GTA_OGC
+	if(minBytes)   // no unused model that big: plain least-used
+		return RemoveLeastUsedModel(excludeMask, ignoreRecent, 0);
+#endif
 	return (ms_numVehiclesLoaded > 7 || CGame::currArea != AREA_MAIN_MAP && ms_numVehiclesLoaded > 4) && RemoveLoadedVehicle();
 }
 

@@ -162,7 +162,7 @@ public:
 	static void RemoveIslandsNotUsed(eLevelName level);
 	static void RemoveBigBuildings(eLevelName level);
 	static bool RemoveLoadedVehicle(void);
-	static bool RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent = false);   // B140: the emergency second pass ignores LoadedRecently
+	static bool RemoveLeastUsedModel(uint32 excludeMask, bool ignoreRecent = false, uint32 minBytes = 0);   // B140: the emergency second pass ignores LoadedRecently; B124: minBytes asks for a victim that big
 	static void RemoveAllUnusedModels(void);
 	static void RemoveUnusedModelsInLoadedList(void);
 	static bool RemoveLoadedZoneModel(void);
