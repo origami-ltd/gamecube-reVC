@@ -60,7 +60,7 @@ def make_header(input_count, game_id=b"GBLPGL"):
 	# The canonical disc image identifies itself as GBLPGL. Dolphin rejects a
 	# movie whose six-byte id belongs to the old standalone-DOL test executable.
 	header[4:10] = game_id
-	header[10] = 0  # GameCube disc, not a Wii executable.
+	header[10] = 0  # console flag: 0 = GameCube.
 	header[11] = 1  # GameCube controller in port 1.
 	struct.pack_into("<Q", header, 13, input_count)  # frameCount
 	struct.pack_into("<Q", header, 21, input_count)  # inputCount
