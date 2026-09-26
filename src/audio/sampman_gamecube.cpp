@@ -2028,8 +2028,12 @@ static void gcApplyStreamVolume(GcStream *st, uint8 nStream);
 static void
 gcSilenceNow(void)
 {
+	// Same rule as every other volume change: mission streams 1/2 skip the
+	// fade. Zeroing them here cut intro1 a frame after it started (DO_FADE IN
+	// begins at fade 0 on the frame the line starts) and nothing restored it
+	// until the next line.
 	for(int32 i = 0; i < MAX_STREAMS; i++)
-		if(gStreams[i].voice) AESND_SetVoiceVolume(gStreams[i].voice, 0, 0);
+		gcApplyStreamVolume(&gStreams[i], (uint8)i);
 	for(uint32 i = 0; i < ARRAY_SIZE(gChannels); i++)
 		if(gChannels[i].voice && gChannels[i].playing) AESND_SetVoiceVolume(gChannels[i].voice, 0, 0);
 }

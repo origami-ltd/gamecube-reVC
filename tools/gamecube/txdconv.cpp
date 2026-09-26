@@ -412,6 +412,10 @@ keepFullByName(const char *name)
 		// the facade are separate textures, so both families keep 256.
 		"awn", "canop", "front", "entrance", "entrace", "blind", "restr",
 		"grill", "steak", "autos",
+		// Ocean Drive shop walls whose names say nothing: poshbase is the pink
+		// wall with the arched shop windows under a window (awning is geometry).
+		"posh", "scooter", "wok&", "jewl", "prada", "clothes", "womens",
+		"restpink", "topfloorx", "decobuildkb7", "decobuildkb11top",
 	};
 	char low[33];
 	int i = 0;
