@@ -10,16 +10,16 @@ Expected layout:
 assets/
 ├── GTAVC/          # your Vice City installation (anim, audio, data,
 │                   # models, movies, txd, ...)
-└── gamefiles/      # port-specific game data used by the build scripts
-    ├── TEXT/       # localisation (.gxt)
-    └── neo/        # neo pipeline data
+├── gamefiles/      # reVC's gamefiles: TEXT/ (.gxt), neo/, models/, data/
+└── movies/         # optional: pre-encoded opening.ogv + titles.ogv
 ```
 
-With the data in place, generate the SD card tree:
+With the data in place, build the releases from the repository root:
 
 ```bash
-python3 tools/gamecube/build_sd.py --game assets/GTAVC --out <sd-tree> \
-    --txdconv <path-to-txdconv>
+python3 build.py iso        # GameCube -> build/release/reVC-GameCube.iso
+python3 build.py sd         # Wii      -> build/release/reVC-Wii-SD/ (work in progress)
+python3 build.py release    # both
 ```
 
-See `python3 tools/gamecube/build_sd.py --help` for all arguments.
+or with Docker: `docker run --rm -v "$PWD/assets":/assets:ro -v "$PWD/out":/out revc`.

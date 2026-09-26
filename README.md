@@ -46,7 +46,16 @@ git clone --recursive https://github.com/origami-ltd/gamecube-reVC.git
 cd gamecube-reVC
 python3 build.py --setup    # installs the dependencies for your OS
 python3 build.py            # GameCube DOL -> build/cube/src/reVC.dol
-python3 build.py wii        # Wii dev DOL  -> build/wii/src/reVC.dol
+python3 build.py wii        # Wii DOL (MEM2 on) -> build/wii/src/reVC.dol
+```
+
+With the game data in place (see [Game data](#game-data)) the same script
+produces the releases:
+
+```bash
+python3 build.py iso        # GameCube -> build/release/reVC-GameCube.iso
+python3 build.py sd         # Wii      -> build/release/reVC-Wii-SD/ (work in progress)
+python3 build.py release    # both
 ```
 
 The same commands work on macOS, Linux and Windows. `--setup` uses the
@@ -84,43 +93,55 @@ environment variable to its root.
 This repository contains no game assets. A legally owned copy of Grand
 Theft Auto: Vice City is required.
 
-Copy the game installation to `assets/GTAVC` (the [`assets/`](assets/)
-folder is git-ignored) and run:
+Copy the game installation to `assets/GTAVC` and reVC's `gamefiles` folder
+(TEXT, neo, models, data) to `assets/gamefiles` (the [`assets/`](assets/)
+folder is git-ignored), then run `python3 build.py iso`, `sd` or `release`.
+Besides devkitPro this needs `xorriso`, `ffmpeg` and `sox`, and libtheora's
+`encoder_example` for the opening movies (or pre-encoded `opening.ogv` and
+`titles.ogv` in `assets/movies`).
+
+The build converts every texture to GX-native formats, repacks `gta3.img`
+with native map, vehicle and pad geometry, converts the audio (IMA ADPCM
+streams and sample bank, Vorbis radio) and the movies (Theora):
+
+- **GameCube** (MEM1 + ARAM): textures taller than 128 px at 75%, CI8
+  palettes and a shared texel pool, laid out on a 1.46 GB mini-DVD image.
+- **Wii** (MEM2, work in progress — boots, plays the movies and reaches the
+  menu, then hangs loading the game): full-size textures on an SD card tree
+  with `apps/reVC/boot.dol` for the Homebrew Channel.
+
+`--game`, `--gamefiles`, `--movies` and `--out` override the defaults.
+
+### Docker
+
+The [`Dockerfile`](Dockerfile) has the whole toolchain. Point it at a folder
+laid out like `assets/` (real folders — a symlink leading outside the mount
+does not resolve inside the container):
 
 ```bash
-python3 build.py sd         # SD card tree -> assets/sd-tree
+docker build -t revc .
+docker run --rm -v /path/to/assets:/assets:ro -v "$PWD/out":/out revc
 ```
 
-This builds the ahead-of-time texture converter for your machine, converts
-every texture to GX-native formats, repacks `gta3.img` and lays out the
-card tree the game reads (`tools/gamecube/build_sd.py` does the asset
-work; `--game`, `--out`, `--audio` and `--movies` override the defaults).
+`out/` receives `reVC-GameCube.iso`. Append `release` to also build the
+(work-in-progress) Wii SD card tree.
 
 ## Running
 
-### Dolphin
+### GameCube (Dolphin)
 
-1. Build the SD card tree (see [Game data](#game-data)).
-2. Point Dolphin's Wii SD card at it: `Config → Wii → SD Card Settings`,
-   then either set the SD card image to one whose **root** holds the tree's
-   contents, or enable folder sync targeting the tree itself (the sync root
-   becomes the card root). Either way the card must end up with
-   `/models/gta3.img` at the top level.
-3. Open `build/wii/src/reVC.dol` in Dolphin.
+Open `build/release/reVC-GameCube.iso` in Dolphin. Use DSP LLE with
+`DSPThread = False` under `[Core]` in `Dolphin.ini`: DSP HLE on its own
+thread can deliver the DSP interrupt before its mail and freeze the game.
+Real-hardware disc boot is untested — see [Status](#status).
 
-### Wii (Homebrew Channel)
+### Wii (Homebrew Channel or Dolphin) — work in progress
 
-1. Generate the SD card tree (see [Game data](#game-data)) and copy its
-   **contents** — the `anim/`, `audio/`, `data/`, `models/`, `text/` and
-   remaining folders `build_sd.py` produced — directly to the **root** of a
-   FAT32 SD card. The game reads them from the root: the card must contain
-   `/models/gta3.img`, not `/sd-tree/models/gta3.img`.
-2. Copy `build/wii/src/reVC.dol` to the card as `apps/reVC/boot.dol`.
-3. Launch reVC from the Homebrew Channel.
-
-### GameCube
-
-Real-hardware disc boot is not functional yet — see [Status](#status).
+Copy the **contents** of `build/release/reVC-Wii-SD/` to the root of a FAT32
+SD card (the card must contain `/models/gta3.img`, not
+`/reVC-Wii-SD/models/gta3.img`) and launch reVC from the Homebrew Channel.
+In Dolphin, enable SD card folder sync (`Config → Wii → SD Card Settings`)
+targeting that folder and open `apps/reVC/boot.dol`.
 
 ## Credits
 

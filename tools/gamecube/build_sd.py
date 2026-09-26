@@ -111,10 +111,12 @@ STAGED_GXT_LABELS = {
 }
 
 
-def convert_txd(txdconv, src, dst, max_dim=None):
+def convert_txd(txdconv, src, dst, max_dim=None, shrink=None):
     cmd = [txdconv]
     if max_dim:
         cmd += ["--max-dim", str(max_dim)]
+    if shrink:
+        cmd += ["--shrink", *shrink]
     cmd += [src, dst]
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0
@@ -132,15 +134,29 @@ def main():
     ap.add_argument("--preencoded-movies",
                     help="directory containing opening.ogv and titles.ogv")
     ap.add_argument("--max-dim", type=int, help="cap texture axes, passed to txdconv")
+    ap.add_argument("--shrink", nargs=2, metavar=("H", "PCT"),
+                    help="GameCube disc: textures taller than H go to PCT%% in "
+                         "gta3.img and generic.txd (user-approved 128 75, "
+                         "09-03); the loose UI dictionaries stay full size")
     ap.add_argument("--size-mb", type=float,
                     default=MINI_DVD_BYTES / 1048576.0,
                     help="target disc size, for the fit report")
     ap.add_argument("--keep-sfx-raw", action="store_true",
                     help="keep the unpacked sample bank for an SD-only build")
+    ap.add_argument("--gamefiles", default=os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "assets", "gamefiles"),
+                    help="reVC's gamefiles folder (TEXT, neo, models, data); "
+                         "default assets/gamefiles")
     args = ap.parse_args()
 
     if not os.path.isdir(args.game):
         sys.exit("game directory not found: " + args.game)
+    # A pristine install lacks reVC's own files and the port's GXT labels;
+    # building without them ships blank menu rows and no neo pipeline.
+    if not os.path.isdir(os.path.join(args.gamefiles, "TEXT")):
+        sys.exit("reVC gamefiles not found (need TEXT/, neo/, models/, data/): "
+                 + args.gamefiles)
     os.makedirs(args.out, exist_ok=True)
 
     # Everything the game reads. gta3.img is NOT copied here — repack_img.py
@@ -155,6 +171,12 @@ def main():
         shutil.copytree(src, dst, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("gta3.img", "gta3.dir",
                                                      "*.bak", "._*"))
+    # reVC's install step, done here: gamefiles overlays the game (reVC's
+    # particle.txd, generic.txd, fonts_r.txd, freeroam_miami.scm, ...).
+    for name in ("models", "data"):
+        src = os.path.join(args.gamefiles, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, os.path.join(args.out, name), dirs_exist_ok=True)
 
     # The stock PC movies cannot be decoded by the console backend. Transcode
     # both original opening parts to the bounded GameCube stream: Rockstar's
@@ -214,11 +236,8 @@ def main():
 
     # Repo GXT files contain the port-specific GameCube labels. They must win
     # over the stock PC text copied above or the new keys render as blanks.
-    repo_text = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "..", "..", "assets", "gamefiles", "TEXT")
-    if os.path.isdir(repo_text):
-        shutil.copytree(repo_text, os.path.join(args.out, "text"),
-                        dirs_exist_ok=True)
+    shutil.copytree(os.path.join(args.gamefiles, "TEXT"),
+                    os.path.join(args.out, "text"), dirs_exist_ok=True)
     gxtpatch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "gxtpatch.py")
     for filename, labels in STAGED_GXT_LABELS.items():
@@ -246,7 +265,8 @@ def main():
             if name.lower() == "frontend_gcc.txd":
                 continue
             tmp = path + ".gx"
-            if convert_txd(args.txdconv, path, tmp, args.max_dim):
+            shrink = args.shrink if name.lower() == "generic.txd" else None
+            if convert_txd(args.txdconv, path, tmp, args.max_dim, shrink):
                 os.replace(tmp, path)
                 converted += 1
             else:
@@ -272,6 +292,8 @@ def main():
     cmd = [sys.executable, repack]
     if args.max_dim:
         cmd += ["--max-dim", str(args.max_dim)]
+    if args.shrink:
+        cmd += ["--shrink", *args.shrink]
     # --static-ide-root belongs to the iso-hardening branch's repack (static
     # DFF pre-instancing); this branch's repack_img.py does not take it.
     cmd += [source_img, source_dir, next_img, next_dir, args.txdconv]
@@ -321,8 +343,7 @@ def main():
     # the card kept losing them: this script only copied from the game dir.
     # Without neo/neo.txd the four pipeline rows never appear in Graphics
     # Setup at all (re3.cpp gates them on opening that file).
-    repo_neo = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "..", "..", "assets", "gamefiles", "neo")
+    repo_neo = os.path.join(args.gamefiles, "neo")
     if os.path.isdir(repo_neo):
         print("copy neo", flush=True)
         shutil.copytree(repo_neo, os.path.join(args.out, "neo"),

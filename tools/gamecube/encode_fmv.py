@@ -106,7 +106,8 @@ def validate(args, source, encoded):
         sys.exit(quality.returncode)
     matches = re.findall(r"All:([0-9.]+)", quality.stderr)
     if not matches or float(matches[-1]) < MIN_SSIM:
-        sys.exit("encoded FMV failed SSIM %.3f quality floor" % MIN_SSIM)
+        sys.exit("encoded FMV failed SSIM %.3f quality floor (measured %s)" %
+                 (MIN_SSIM, matches[-1] if matches else "nothing"))
     return matches[-1]
 
 

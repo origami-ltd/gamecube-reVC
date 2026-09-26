@@ -31,7 +31,7 @@
 #include "AudioManager.h"
 #include "MusicManager.h"
 #include "Frontend.h"
-#include "cdstream.h"
+#include "CdStream.h"
 #include "CdStream.h"
 
 #include <gccore.h>

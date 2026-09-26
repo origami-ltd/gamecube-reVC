@@ -1,0 +1,8 @@
+.git
+build
+assets
+research
+toolchain
+dolphin-*
+**/__pycache__
+**/.DS_Store
