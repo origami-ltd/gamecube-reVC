@@ -2204,6 +2204,38 @@ found:
 extern "C" void *__real_malloc(size_t);
 extern "C" void *gcBigAlloc(size_t); extern "C" void gcBigFree(void*); extern "C" int gcBigContains(const void*);
 extern "C" lwp_t gMainLwp;   // gamecube.cpp main(): only the main thread may touch the streaming tables
+
+// ARAM is a cache for texels: when a dictionary does not fit the store
+// (gxraster.cpp readNativeTexture), free one thing nothing draws and let the
+// caller retry — an unreferenced dictionary first, else the least-used model
+// (its dictionary goes on a later call). b193 failed the dictionary instead,
+// and the intro's blocking load retried hotelroomint for over a minute of
+// black screen. Returns 0 when nothing more can go.
+extern "C" int
+gcAramReclaim(unsigned bytes)
+{
+	static bool8 inReclaim;
+	(void)bytes;
+	if(inReclaim || CStreaming::ms_endLoadedList.m_prev == nil || LWP_GetSelf() != gMainLwp)
+		return 0;
+	inReclaim = TRUE;
+	int freed = 0;
+	for(CStreamingInfo *si = CStreaming::ms_endLoadedList.m_prev; si != &CStreaming::ms_startLoadedList; si = si->m_prev){
+		int32 id = si - CStreaming::ms_aInfoForModel;
+		if(id >= STREAM_OFFSET_TXD && id < STREAM_OFFSET_COL && !(si->m_flags & STREAMFLAGS_CANT_REMOVE) &&
+		   CTxdStore::GetNumRefs(id - STREAM_OFFSET_TXD) == 0 &&
+		   !CStreaming::IsTxdUsedByRequestedModels(id - STREAM_OFFSET_TXD)){
+			CStreaming::RemoveModel(id);
+			freed = 1;
+			break;
+		}
+	}
+	if(!freed)
+		freed = CStreaming::RemoveLeastUsedModel(0, true);
+	inReclaim = FALSE;
+	return freed;
+}
+
 extern "C" int
 gcStreamEmergencyShed(unsigned need)
 {
