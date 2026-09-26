@@ -3253,6 +3253,21 @@ cSampleManager::StopStreamedFile(uint8 nStream)
 	st->posSamples = 0;
 }
 
+// 09-26: a mission line that starts and is cut. One line per state change of
+// a mission audio slot (AudioLogic.cpp), with what its stream was doing.
+extern "C" void
+gcMissionAudioTrace(const char *what, int slot, int sample)
+{
+	uint8 n = (uint8)(slot + 1);
+	if(n >= MAX_STREAMS) return;
+	GcStream *st = &gStreams[n];
+	const GcStreamRequest *r = &gStreamRequests[n];
+	printf("MAUDIO %s slot %d sample %d | s%d %s pos %u/%u eof %d playing %d armed %d hold %d paused %d starved %u cb %u f=%u\n",
+	    what, slot, sample, (int)n, st->path, (unsigned)st->posSamples, (unsigned)st->lenSamples,
+	    (int)st->eof, (int)st->playing, (int)st->armed, (int)r->hold, (int)r->paused,
+	    (unsigned)st->starved, (unsigned)st->cbCount, (unsigned)CTimer::GetFrameCounter());
+}
+
 int32
 cSampleManager::GetStreamedFilePosition(uint8 nStream)
 {

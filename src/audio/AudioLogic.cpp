@@ -1,6 +1,12 @@
 #include "common.h"
 
 #include "AudioManager.h"
+#ifdef GTA_OGC
+extern "C" void gcMissionAudioTrace(const char *what, int slot, int sample);   // sampman_gamecube.cpp
+#define GC_MAUDIO(what, slot) gcMissionAudioTrace(what, slot, m_nMissionAudioSampleIndex[slot])
+#else
+#define GC_MAUDIO(what, slot)
+#endif
 #include "audio_enums.h"
 #ifdef GTA_OGC
 extern "C" int gcStreamPrimed(int n);
@@ -10194,6 +10200,7 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 					nFramesUntilFailedLoad[slot] = 0;
 				} else if (!m_bIsPaused) {
 					if (++nFramesForPretendPlaying[slot] >= 90) {
+						GC_MAUDIO("finished-pretend", slot);
 						m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_FINISHED;
 						m_nMissionAudioSampleIndex[slot] = NO_SAMPLE;
 					} else
@@ -10301,6 +10308,7 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 						if (nCheckPlayingDelay[slot] > 0) {
 							nCheckPlayingDelay[slot]--;
 						} else if ((g_bMissionAudioLoadFailed[slot] && m_nMissionAudioFramesToPlay[slot]-- == 0) || GetMissionScriptPoliceAudioPlayingStatus() == PLAY_STATUS_FINISHED) {
+							GC_MAUDIO("finished-police", slot);
 							m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_FINISHED;
 							if (m_nMissionAudioSampleIndex[slot] >= SFX_MISSION_MOB_01A && m_nMissionAudioSampleIndex[slot] <= SFX_MISSION_MOB_99A)
 								m_bIsMissionAudioPhoneCall[slot] = FALSE;
@@ -10336,6 +10344,7 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 						else
 #endif // !GTA_PS2
 						{
+							GC_MAUDIO("finished", slot);
 							m_nMissionAudioPlayStatus[slot] = PLAY_STATUS_FINISHED;
 							if (m_nMissionAudioSampleIndex[slot] >= SFX_MISSION_MOB_01A && m_nMissionAudioSampleIndex[slot] <= SFX_MISSION_MOB_99A)
 								m_bIsMissionAudioPhoneCall[slot] = FALSE;
@@ -10394,6 +10403,7 @@ cAudioManager::ProcessMissionAudioSlot(uint8 slot)
 							break;
 						nCheckPlayingDelay[slot] = 0;
 					}
+					GC_MAUDIO("playing", slot);
 					m_bIsMissionAudioPlaying[slot] = TRUE;
 				}
 				break;
