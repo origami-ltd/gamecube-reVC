@@ -20,6 +20,7 @@ logged to dvd:/native.log, and an earlier session read that log being empty as
 "nothing was rejected" — it meant the reader had not run yet.
 """
 import argparse
+import fnmatch
 import os
 import shutil
 import subprocess
@@ -111,6 +112,36 @@ STAGED_GXT_LABELS = {
 }
 
 
+def find_ci(parent, *parts):
+    """parent/parts, each part matched regardless of case. Installs differ
+    (MODELS\\GENERIC\\WHEELS.TXD, Audio/) and Linux, Docker included, is
+    case-sensitive (issues #4, #11). A miss returns the plain join."""
+    path = parent
+    for part in parts:
+        exact = os.path.join(path, part)
+        if not os.path.exists(exact) and os.path.isdir(path):
+            exact = next((os.path.join(path, n) for n in os.listdir(path)
+                          if n.lower() == part.lower()), exact)
+        path = exact
+    return path
+
+
+def copy_lower(src, dst, ignore=()):
+    """copytree with every staged name lowercased: the disc driver folds case,
+    this script's own lookups (models/generic/wheels.txd, ...) do not."""
+    for dirpath, dirs, files in os.walk(src):
+        out = os.path.join(dst, os.path.relpath(dirpath, src).lower())
+        os.makedirs(out, exist_ok=True)
+        names = {n.lower() for n in dirs + files}
+        for n in os.listdir(out):   # a mixed-case copy left by an older build
+            if n != n.lower() and n.lower() in names:
+                p = os.path.join(out, n)
+                shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        for f in files:
+            if not any(fnmatch.fnmatch(f.lower(), p) for p in ignore):
+                shutil.copy2(os.path.join(dirpath, f), os.path.join(out, f.lower()))
+
+
 def convert_txd(txdconv, src, dst, max_dim=None, shrink=None, adaptive=None):
     cmd = [txdconv]
     if max_dim:
@@ -161,7 +192,7 @@ def main():
         sys.exit("game directory not found: " + args.game)
     # A pristine install lacks reVC's own files and the port's GXT labels;
     # building without them ships blank menu rows and no neo pipeline.
-    if not os.path.isdir(os.path.join(args.gamefiles, "TEXT")):
+    if not os.path.isdir(find_ci(args.gamefiles, "TEXT")):
         sys.exit("reVC gamefiles not found (need TEXT/, neo/, models/, data/): "
                  + args.gamefiles)
     os.makedirs(args.out, exist_ok=True)
@@ -170,20 +201,18 @@ def main():
     # produces the converted archive separately, and copying the PC one would
     # quietly overwrite it.
     for name in ("anim", "data", "text", "txd", "models"):
-        src = os.path.join(args.game, name)
+        src = find_ci(args.game, name)
         if not os.path.exists(src):
             continue
-        dst = os.path.join(args.out, name)
         print("copy %s" % name, flush=True)
-        shutil.copytree(src, dst, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("gta3.img", "gta3.dir",
-                                                     "*.bak", "._*"))
+        copy_lower(src, os.path.join(args.out, name),
+                   ("gta3.img", "gta3.dir", "*.bak", "._*"))
     # reVC's install step, done here: gamefiles overlays the game (reVC's
     # particle.txd, generic.txd, fonts_r.txd, freeroam_miami.scm, ...).
     for name in ("models", "data"):
-        src = os.path.join(args.gamefiles, name)
+        src = find_ci(args.gamefiles, name)
         if os.path.isdir(src):
-            shutil.copytree(src, os.path.join(args.out, name), dirs_exist_ok=True)
+            copy_lower(src, os.path.join(args.out, name))
 
     # The stock PC movies cannot be decoded by the console backend. Transcode
     # both original opening parts to the bounded GameCube stream: Rockstar's
@@ -243,8 +272,7 @@ def main():
 
     # Repo GXT files contain the port-specific GameCube labels. They must win
     # over the stock PC text copied above or the new keys render as blanks.
-    shutil.copytree(os.path.join(args.gamefiles, "TEXT"),
-                    os.path.join(args.out, "text"), dirs_exist_ok=True)
+    copy_lower(find_ci(args.gamefiles, "TEXT"), os.path.join(args.out, "text"))
     gxtpatch = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "gxtpatch.py")
     for filename, labels in STAGED_GXT_LABELS.items():
@@ -289,8 +317,8 @@ def main():
 
     # The world archive is intentionally excluded from copytree above because
     # every embedded PC TXD must be converted before the console streams it.
-    source_img = os.path.join(args.game, "models", "gta3.img")
-    source_dir = os.path.join(args.game, "models", "gta3.dir")
+    source_img = find_ci(args.game, "models", "gta3.img")
+    source_dir = find_ci(args.game, "models", "gta3.dir")
     if not os.path.isfile(source_img) or not os.path.isfile(source_dir):
         sys.exit("missing source world archive: <game>/models/gta3.img + gta3.dir")
     staged_img = os.path.join(args.out, "models", "gta3.img")

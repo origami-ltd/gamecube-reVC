@@ -193,6 +193,8 @@ def build_txdconv():
 
 
 TOOLS = os.path.join(ROOT, "tools", "gamecube")
+sys.path.insert(0, TOOLS)
+from build_sd import find_ci  # installs differ in case (issues #4, #11)
 
 
 def tool(name, *args):
@@ -219,7 +221,7 @@ def opening_movies(args, game):
         return given
     cache = os.path.join(ROOT, "build", "assets", "movies")
     if not have(cache):
-        src = os.path.join(game, "movies")
+        src = find_ci(game, "movies")
         pc = {f.lower(): os.path.join(src, f) for f in os.listdir(src)}
         # titles.ogv plays first: the Rockstar logo reel; opening.ogv is the
         # Vice City title montage.
@@ -239,7 +241,7 @@ def disc_root(args, txdconv):
     tier), native map/vehicle/pad geometry, console audio, the movies.
     """
     game = os.path.abspath(args.game or os.path.join(ROOT, "assets", "GTAVC"))
-    if not os.path.isdir(os.path.join(game, "models")):
+    if not os.path.isdir(find_ci(game, "models")):
         sys.exit(f"game data not found at {game}; copy your Vice City "
                  "install there or pass --game (see assets/README.md)")
     work = os.path.join(ROOT, "build", "assets", "gamecube")
@@ -257,7 +259,7 @@ def disc_root(args, txdconv):
     audio = os.path.join(ROOT, "build", "assets", "audio")
     if not os.path.isfile(os.path.join(audio, "lengths.cache")):
         shutil.rmtree(audio, ignore_errors=True)
-        tool("convert_audio.py", os.path.join(game, "audio"), audio + ".tmp")
+        tool("convert_audio.py", find_ci(game, "audio"), audio + ".tmp")
         os.replace(audio + ".tmp", audio)
     link_tree(audio, os.path.join(root, "audio"))
 
